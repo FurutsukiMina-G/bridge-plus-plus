@@ -1,0 +1,10 @@
+import {createServer} from 'node:http';
+const source=process.argv[2],profile=process.argv[3];let input='';for await(const chunk of process.stdin)input+=chunk;let models=JSON.parse(input).models;
+process.on('message',m=>{if(m.type==='catalog'){models=m.models;process.send({type:'catalog-updated',requestId:m.requestId});}});
+const server=createServer(async(req,res)=>{let text='';for await(const chunk of req)text+=chunk;const body=JSON.parse(text);if(!models.some(m=>m.variant.id===body.model)){res.writeHead(404);res.end();return;}
+ process.send?.({type:'request-start'});if(body.delayMs)await new Promise(r=>setTimeout(r,body.delayMs));
+ process.stderr.write('prompt-private-fixture reply-private-fixture\n');
+ const usage={prompt_tokens:16,completion_tokens:2,total_tokens:18},observed={source,profile,pid:process.pid,effort:body.reasoning_effort,messages:body.messages,tools:body.tools,tool_choice:body.tool_choice,cacheKey:body.prompt_cache_key,scope:body.bridge_scope};
+ if(body.stream){res.writeHead(200,{'content-type':'text/event-stream'});res.end('data: '+JSON.stringify({id:'fixture',object:'chat.completion.chunk',model:body.model,choices:[{index:0,delta:{content:'reply-private-fixture'},finish_reason:null}]})+'\n\ndata: '+JSON.stringify({choices:[{index:0,delta:{},finish_reason:'stop'}]})+'\n\ndata: '+JSON.stringify({choices:[],usage})+'\n\ndata: [DONE]\n\n');}
+ else{res.writeHead(200,{'content-type':'application/json'});res.end(JSON.stringify({id:'fixture',object:'chat.completion',model:body.model,choices:[{index:0,message:{role:'assistant',content:'reply-private-fixture',...body.tools?.length?{tool_calls:[{id:'call',type:'function',function:{name:body.tools[0].function.name,arguments:'{}'}}]}:{}},finish_reason:body.tools?.length?'tool_calls':'stop'}],usage,observed}));}
+});server.listen(0,'127.0.0.1',()=>process.stdout.write(JSON.stringify({type:'ready',url:'http://127.0.0.1:'+server.address().port,key:'fixture-worker-key'})+'\n'));process.on('disconnect',()=>{server.closeAllConnections();server.close();});

@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="zh-CN" data-theme="dark">
+<head>
+  <meta charset="utf-8">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'; style-src-attr 'unsafe-inline'; img-src 'self' data: bridge-media:; media-src bridge-media:; connect-src 'none'; font-src 'self'; object-src 'none'; base-uri 'none'; frame-src 'none'">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Bridge++</title>
+  <link rel="stylesheet" href="vendor/katex/katex.min.css">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <div id="app" class="app">
+    <aside id="sidebar" class="sidebar" aria-label="会话与工作文件夹"></aside>
+    <main class="main">
+      <header id="topbar" class="topbar"></header>
+      <section id="view" class="view"></section>
+    </main>
+    <aside id="rightpanel" class="rightpanel" aria-label="变更、文件与后台任务"></aside>
+  </div>
+  <div id="settings" class="settings hidden" role="dialog" aria-modal="true" aria-label="设置"></div>
+  <div id="popover" class="popover hidden" role="menu"></div>
+  <div id="toast" role="status" class="toast hidden"></div>
+  <dialog id="modal"></dialog>
+  <dialog id="lightbox" class="lightbox" aria-label="查看图片"></dialog>
+  <script type="module" src="build.js"></script>
+</body>
+</html>

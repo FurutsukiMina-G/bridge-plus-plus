@@ -1,0 +1,93 @@
+import {EventEmitter} from 'node:events';
+import {join,resolve} from 'node:path';
+import {writeFile,readFile} from 'node:fs/promises';
+import {ModelServiceStore} from './model-service-store.mjs';
+import {serviceDefinition,SERVICE_PROFILES,validateServiceSettings} from './model-service-catalog.mjs';
+import {ServiceTasks,hiddenLauncher,scheduledServiceXml,servicePortOwner,serviceError,systemExec} from './model-service-system.mjs';
+import {launch} from '../core/process.mjs';
+import {DshProfileFiles} from './dsh-profile-files.mjs';
+import {connectServiceDsh} from './model-service-dsh.mjs';
+import {connectServiceClient,keyFingerprint} from './model-service-connect.mjs';
+import {discoverRuntimes} from './runtime-paths.mjs';
+import {componentRequired,packagedSources} from './source-packages.mjs';
+const normalized=value=>String(value).replaceAll('/','\\').toLowerCase();
+const includesArgument=(command,value)=>{const escaped=normalized(value).replace(/[.*+?^${}()|[\]\\]/g,'\\$&');return new RegExp(`(?:^|\\s)(?:"${escaped}"|${escaped})(?=\\s|$)`,'i').test(normalized(command));};
+const delay=ms=>new Promise(r=>setTimeout(r,ms));
+const processAlive=pid=>{try{process.kill(pid,0);return true;}catch{return false;}};
+const identity=state=>JSON.stringify([state?.pid,state?.instanceId,state?.baseURL,state?.installation?.entry]);
+export class ModelServices extends EventEmitter {
+  constructor({userData,node,runtimeFor=async id=>(await discoverRuntimes()).find(r=>r.id===id),clientConnector=connectServiceClient,root=resolve(import.meta.dirname,'../..'),tasks=new ServiceTasks(),portOwner=servicePortOwner,launchProcess=launch,launchDetached=systemExec,platform=process.platform,storeOptions,dsh=new DshProfileFiles(),components=null,pollMs=5000,pidAlive=processAlive,fetchImpl=fetch,healthTimeoutMs=1000,healthCacheMs=1000,now=Date.now}={}){super();Object.assign(this,{userData,node,root,tasks,portOwner,launchProcess,launchDetached,platform,storeOptions,dsh,components,pollMs,runtimeFor,clientConnector,pidAlive,fetchImpl,healthTimeoutMs,healthCacheMs,now});this.stores=new Map();this.queues=new Map();this.taskViews=new Map();this.ownership=new Map();this.ownerFlights=new Map();this.health=new Map();this.closed=false;}
+  async init(){for(const id of ['qoder','workbuddy'])this.stores.set(id,await new ModelServiceStore(this.userData,id,this.storeOptions).open());for(const id of this.stores.keys())try{await this.reconcile(id);}catch(error){this.taskViews.set(id,{enabled:true,valid:false,issue:error.message});}await this.refreshOwnership();this.previous=JSON.stringify(await this.snapshot());this.timer=setInterval(()=>{void this.changed().catch(()=>{});},this.pollMs);this.timer.unref();return this;}
+  store(id){serviceDefinition(id);const store=this.stores.get(id);if(!store)throw new Error('模型服务管理器未初始化');return store;}
+  serial(id,action){this.store(id);const task=(this.queues.get(id)??Promise.resolve()).catch(()=>{}).then(action);this.queues.set(id,task);return task;}
+  spec(id){return {command:this.node.command,args:[...this.node.args,join(this.root,'app/model-service.mjs'),'--id',id,'--user-data',this.userData],env:{...this.node.env,AWB_PACKAGED:(this.components?.isPackaged??packagedSources(this.root))?'1':'0'},cwd:this.root};}
+  async settings(id){const store=this.store(id);store.settings=validateServiceSettings(await store.read('settings.json'));return store.settings;}
+  validState(state,settings){return !!state&&['running','starting','error'].includes(state.status)&&state.error?.code!=='EADDRINUSE'&&Number.isSafeInteger(state.pid)&&state.pid>0&&typeof state.instanceId==='string'&&!!state.instanceId&&!!state.installation?.entry&&/^http:\/\/127\.0\.0\.1:\d+$/.test(state.baseURL??'')&&new URL(state.baseURL).port===String(settings.port);}
+  async verifyOwnership(id,{force=false}={}){
+    const store=this.store(id),[state,settings]=await Promise.all([store.read('status.json'),this.settings(id)]),key=identity(state);
+    if(!this.validState(state,settings)){this.ownership.delete(id);this.health.delete(id);return null;}
+    const cached=this.ownership.get(id);if(!force&&cached?.key===key)return cached;
+    if(this.ownerFlights.get(id)?.key===key)return this.ownerFlights.get(id).promise;
+    this.ownership.delete(id);this.health.delete(id);
+    const flight={key};flight.promise=(async()=>{let verified=false;try{if(this.pidAlive(state.pid)){const owner=await this.portOwner(settings.port);verified=!!owner&&owner.pid===state.pid&&includesArgument(owner.command,state.installation.entry)&&includesArgument(owner.command,this.userData)&&includesArgument(owner.command,id);}}catch{}
+      const [current,currentSettings]=await Promise.all([store.read('status.json'),this.settings(id)]);if(identity(current)!==key||!this.validState(current,currentSettings))return null;
+      const result={key,verified};if(this.ownerFlights.get(id)===flight)this.ownership.set(id,result);return result;
+    })().finally(()=>{if(this.ownerFlights.get(id)===flight)this.ownerFlights.delete(id);});this.ownerFlights.set(id,flight);return flight.promise;
+  }
+  async refreshOwnership(){await Promise.allSettled([...this.stores.keys()].map(id=>this.verifyOwnership(id)));}
+  async probe(id,{verify=false,state,settings}={}){
+    if(verify)await this.verifyOwnership(id,{force:true});
+    const store=this.store(id);[state,settings]=await Promise.all([state??store.read('status.json'),settings??this.settings(id)]);const key=identity(state);
+    if(!this.validState(state,settings)||this.ownership.get(id)?.key!==key||!this.ownership.get(id)?.verified)return null;
+    if(!this.pidAlive(state.pid)){this.ownership.delete(id);this.health.delete(id);return null;}
+    const cached=this.health.get(id);if(cached?.key===key){if(cached.promise)return cached.promise;if(!verify&&this.now()-cached.at<this.healthCacheMs)return cached.value;}
+    const row={key};row.promise=(async()=>{try{const response=await this.fetchImpl(state.baseURL+'/_bridge/health',{headers:{authorization:'Bearer '+store.key},signal:AbortSignal.timeout(this.healthTimeoutMs),redirect:'error'});if(!response.ok)return null;const health=await response.json();return health.kind==='bridgepp-model-service'&&health.id===id&&health.instanceId===state.instanceId&&health.pid===state.pid&&health.baseURL===state.baseURL?health:null;}catch{return null;}})().then(value=>{row.at=this.now();row.value=value;delete row.promise;return value;});this.health.set(id,row);return row.promise;
+  }
+  async sendControl(id,path,body,health){if(!health)throw new Error('无法核实本服务的进程和端口归属，未发送控制命令');const response=await this.fetchImpl(health.baseURL+path,{method:'POST',headers:{authorization:'Bearer '+this.store(id).key,'content-type':'application/json'},body:JSON.stringify(body??{}),signal:AbortSignal.timeout(path.endsWith('refresh')?100000:10000),redirect:'error'});const result=await response.json();if(!response.ok)throw new Error(result.error?.message??'模型服务控制失败');this.health.delete(id);return result;}
+  async control(id,path,body){return this.sendControl(id,path,body,await this.probe(id,{verify:true}));}
+  async view(id){const store=this.store(id),[settings,state]=await Promise.all([this.settings(id),store.read('status.json')]),def=store.definition;let health=null,issue=null;try{health=await this.probe(id,{state,settings});}catch{issue='无法核实模型服务进程/端口归属';}
+    if(!health&&state?.baseURL&&['running','starting'].includes(state.status))issue??='本服务历史状态仍为运行中，但当前进程归属未核实';
+    const baseURL=`http://127.0.0.1:${settings.port}`,status=health?.status??(state?.status==='error'||issue?'error':'stopped'),dsh=await store.read('dsh.json');return {id,name:def.name,source:def.source,sourceName:def.sourceName,port:settings.port,baseURL:baseURL+'/v1',profiles:SERVICE_PROFILES.map(id=>({id,name:{dsh:'DSH',kimi:'Kimi Code',codex:'Codex'}[id],baseURL:baseURL+'/'+id+'/v1'})),defaultProfile:settings.defaultProfile,status,pid:health?.pid??null,startedAt:health?.startedAt??null,error:issue?{code:'UNVERIFIED_PROCESS',message:issue}:health?.error??(status==='error'?state?.error:null),portOwner:status==='error'?state?.portOwner??null:null,autostart:this.taskViews.get(id)??{enabled:settings.autostart,valid:!settings.autostart,issue:null},keyPreview:store.key.slice(0,6)+'…'+store.key.slice(-4),models:health?.models??state?.models??{count:0,refreshedAt:null,error:null},requests:health?.requests??state?.requests??{total:0,failed:0,lastAt:null,lastError:null},dsh:dsh?.baseURL===baseURL+'/dsh/v1'?dsh:null,connections:await this.connections(id,baseURL)};
+  }
+  async connections(id,baseURL){const store=this.store(id),result={dsh:null,kimi:null,codex:null},dsh=await store.read('dsh.json');if(dsh?.baseURL===baseURL+'/dsh/v1')result.dsh={connectedAt:dsh.connectedAt,providerId:dsh.providerId};for(const target of ['kimi','codex']){const row=await store.read('connection-'+target+'.json');if(row?.baseURL===baseURL+'/'+target+'/v1'&&row.keyFingerprint===keyFingerprint(store.key))result[target]={connectedAt:row.connectedAt,path:row.path,providerId:row.providerId,...row.profile?{profile:row.profile}:{},...row.requiredEnv?{requiredEnv:row.requiredEnv}:{}};}return result;}
+  async snapshot(){if(!this.snapshotFlight)this.snapshotFlight=Promise.all([...this.stores.keys()].map(id=>this.view(id))).finally(()=>{this.snapshotFlight=null;});return this.snapshotFlight;}
+  async changed(){if(this.closed||this.polling)return;this.polling=true;try{await this.refreshOwnership();const value=JSON.stringify(await this.snapshot());if(value!==this.previous){this.previous=value;this.emit('change');}}finally{this.polling=false;}}
+  async startOne(id){if(await this.probe(id,{verify:true}))return this.view(id);const store=this.store(id);if(this.components)try{await this.components.environment(id);}catch{const error=componentRequired(id);await store.write('status.json',{status:'error',pid:null,error:{code:error.code,message:error.message}});this.emit('change');throw error;}const settings=await this.settings(id),owner=await this.portOwner(settings.port);if(owner){await store.write('status.json',{status:'error',pid:null,error:{code:'EADDRINUSE',message:'端口已被占用；未终止或修改占用进程。'},portOwner:owner});this.emit('change');return this.view(id);}
+    const previous=await store.read('status.json'),previousLog=await readFile(join(store.root,'service-error.log'),'utf8').catch(()=>'');let child,launchError;
+    const current=row=>row?.instanceId&&row.instanceId!==previous?.instanceId&&(child?Number.isInteger(child.pid)&&row.pid===child.pid:true);
+    const diagnostic=async()=>{let lines=await readFile(join(store.root,'service-error.log'),'utf8').catch(()=>'');if(!child)lines=lines.startsWith(previousLog)?lines.slice(previousLog.length):lines.split('\n').filter(line=>!previousLog.split('\n').includes(line)).join('\n');for(const line of lines.trim().split('\n').reverse()){let row;try{row=JSON.parse(line);}catch{continue;}if(row?.error&&current(row))return row.error;}return null;};
+    const failed=error=>new Error('模型服务启动失败：'+serviceError(error,store.key).message);
+    // Both intermediaries start services outside the GUI process tree; direct
+    // libuv spawn can inherit Chromium handles, so never use it as a fallback.
+    if(settings.autostart)await this.tasks.run(id);else if(this.platform==='win32'){
+      const spec=this.spec(id),launcher=join(store.root,'launch-manual.vbs');
+      try{await writeFile(launcher,'\uFEFF'+hiddenLauncher(spec,{wait:false}),{encoding:'utf16le',mode:0o600});const result=await this.launchDetached('wscript.exe',['//B','//Nologo',launcher],{windowsHide:true,timeout:15000});if(Number.isInteger(result?.code)&&result.code!==0)throw new Error(`wscript.exe 退出码 ${result.code}`);}catch(error){const state=await store.read('status.json').catch(()=>null),detail=state?.error&&current(state)?state.error:await diagnostic();launchError=new Error('无法通过 Windows Script Host 启动模型服务：'+serviceError(detail??error,store.key).message);}
+    }else{const spec=this.spec(id);child=this.launchProcess(spec.command,spec.args,{cwd:spec.cwd,env:spec.env,windowsHide:true,detached:true,stdio:'ignore'});child.unref();child.once('error',error=>{launchError=error;});}
+    for(let n=0;n<100;n++){
+      if(launchError)throw failed(launchError);
+      const state=await store.read('status.json').catch(()=>null);
+      if(state?.baseURL&&current(state)){await this.verifyOwnership(id);const health=await this.probe(id);if(health)return this.view(id);}
+      if(state?.error&&current(state))throw failed(state.error);
+      const detail=await diagnostic();if(detail)throw failed(detail);
+      if(child?.exitCode!==null&&child?.exitCode!==undefined&&child.exitCode!==0)throw failed(new Error(`子进程退出（退出码 ${child.exitCode}），未找到本次启动的诊断记录`));
+      if(settings.autostart&&n===10)await this.tasks.run(id);await delay(100);
+    }throw new Error('模型服务启动超时，未结束任何未知进程');
+  }
+  async stopOne(id){const health=await this.probe(id,{verify:true});if(!health){const store=this.store(id),state=await store.read('status.json');if(state?.baseURL&&['running','starting'].includes(state.status)){if(await this.portOwner((await this.settings(id)).port))throw new Error('无法核实服务归属，未终止进程');await store.write('status.json',{...state,status:'stopped'});}return this.view(id);}await this.sendControl(id,'/_bridge/stop',{},health);for(let n=0;n<100;n++){const state=await this.store(id).read('status.json');if(state?.instanceId===health.instanceId&&state.status==='stopped'){this.ownership.delete(id);this.emit('change');return this.view(id);}await delay(100);}throw new Error('服务尚未完成退出；未强行结束进程');}
+  start(id){return this.serial(id,()=>this.startOne(id));}
+  stop(id){return this.serial(id,()=>this.stopOne(id));}
+  restart(id){return this.serial(id,async()=>{await this.stopOne(id);return this.startOne(id);});}
+  configure(id,patch){return this.serial(id,async()=>{if(Object.keys(patch).some(k=>!['port','defaultProfile'].includes(k)))throw new Error('无效服务设置');const store=this.store(id),settings=await this.settings(id),next=validateServiceSettings({...settings,...patch}),running=await this.probe(id,{verify:true});if(running&&next.port===settings.port){await this.control(id,'/_bridge/configure',{defaultProfile:next.defaultProfile});}else{await this.stopOne(id);await store.configure(patch);const state=await store.read('status.json',{});await store.write('status.json',{...state,status:'stopped',pid:null,baseURL:null,error:null,portOwner:null,port:next.port});if(running)return this.startOne(id);}this.emit('change');return this.view(id);});}
+  async installTask(id){const store=this.store(id),launcher=join(store.root,'launch-hidden.vbs'),spec=this.spec(id),xmlFile=join(store.root,'autostart.xml');await writeFile(launcher,'\uFEFF'+hiddenLauncher(spec),{encoding:'utf16le',mode:0o600});await writeFile(xmlFile,'\uFEFF'+scheduledServiceXml(id,{launcher,account:await this.tasks.account()}),{encoding:'utf16le',mode:0o600});await this.tasks.install(id,xmlFile);await store.write('launch.json',spec);}
+  async reconcile(id){const store=this.store(id),settings=await this.settings(id);if(!settings.autostart){this.taskViews.set(id,{enabled:false,valid:true,issue:null});return;}
+    const existing=await this.tasks.query(id),launcher=join(store.root,'launch-hidden.vbs');if(existing&&!existing.includes(`Bridge++ model-service ${id}`))throw new Error('同名任务不属于 Bridge++，未覆盖');
+    if(!this.tasks.matches(existing,id,launcher)||JSON.stringify(await store.read('launch.json'))!==JSON.stringify(this.spec(id))||await readFile(launcher,'utf16le').catch(()=>null)!=='\uFEFF'+hiddenLauncher(this.spec(id))){await this.installTask(id);await this.stopOne(id);await this.startOne(id);}this.taskViews.set(id,{enabled:true,valid:true,issue:null});
+  }
+  autostart(id,enabled){return this.serial(id,async()=>{if(typeof enabled!=='boolean')throw new Error('无效开机启动设置');if(enabled){const existing=await this.tasks.query(id);if(existing&&!existing.includes(`Bridge++ model-service ${id}`))throw new Error('同名任务不属于 Bridge++，未覆盖');await this.installTask(id);}else await this.tasks.remove(id);await this.store(id).configure({autostart:enabled});this.taskViews.set(id,{enabled,valid:true,issue:null});this.emit('change');return this.view(id);});}
+  key(id,action){return this.serial(id,async()=>{const store=this.store(id);if(action==='reveal')return {key:store.key};if(action!=='regenerate')throw new Error('未知密钥操作');const running=await this.probe(id,{verify:true});await this.stopOne(id);await store.regenerate();if(running)await this.startOne(id);this.emit('change');return {keyPreview:store.key.slice(0,6)+'…'+store.key.slice(-4),dshReconnectRequired:true};});}
+  async models(id){const health=await this.probe(id,{verify:true});if(!health)throw new Error('请先启动模型服务');const response=await this.fetchImpl(health.baseURL+'/v1/models',{headers:{authorization:'Bearer '+this.store(id).key},signal:AbortSignal.timeout(10000),redirect:'error'});if(!response.ok)throw new Error('无法读取模型服务目录');return (await response.json()).data;}
+  refreshModels(id){return this.serial(id,async()=>{await this.control(id,'/_bridge/refresh');this.emit('change');return this.models(id);});}
+  connect(id,target,replace=[]){if(target==='dsh')return this.connectDsh(id,replace);if(!['kimi','codex'].includes(target))throw new Error('请选择 DSH、Kimi Code 或 Codex CLI');if(!Array.isArray(replace)||replace.length)throw new Error('Kimi/Codex 仅更新本服务受管片段，不替换其他 provider');return this.serial(id,async()=>{const health=await this.probe(id,{verify:true});if(!health)throw new Error('请先启动并核实模型服务');const result=await this.clientConnector({store:this.store(id),target,models:await this.models(id),baseURL:health.baseURL,key:this.store(id).key,runtime:await this.runtimeFor(target)});this.emit('change');return result;});}
+  connectDsh(id,replace=[]){return this.serial(id,async()=>{const health=await this.probe(id,{verify:true});if(!health)throw new Error('请先启动并核实模型服务');const result=await connectServiceDsh({store:this.store(id),models:await this.models(id),baseURL:health.baseURL,key:this.store(id).key,rpc:(method,args)=>this.dsh.rpc(method,args),replace});this.emit('change');return result;});}
+  async close(){this.closed=true;clearInterval(this.timer);await Promise.allSettled([...this.queues.values()]);/* independent services intentionally remain running */}
+}

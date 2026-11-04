@@ -1,0 +1,22 @@
+{
+  "type": "event_msg",
+  "payload": {
+    "type": "item_completed",
+    "thread_id": "00000000-0000-7000-8000-000000000001",
+    "turn_id": "00000000-0000-7000-8000-000000000003",
+    "item": {
+      "type": "Extension",
+      "kind": "image_gen.generation",
+      "id": "exec-image-fixture",
+      "status": "completed",
+      "revisedPrompt": "White background with a solid red circle in the center.",
+      "result": "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aO3cAAAAASUVORK5CYII=",
+      "transparentBackground": false,
+      "failure": null,
+      "savedPath": "C:\\fixture\\.codex\\generated_images\\00000000-0000-7000-8000-000000000001\\exec-image-fixture.png",
+      "generationId": "generation-fixture"
+    },
+    "started_at_ms": 1,
+    "completed_at_ms": 2
+  }
+}

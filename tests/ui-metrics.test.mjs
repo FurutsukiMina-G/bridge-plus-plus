@@ -1,0 +1,48 @@
+import {test} from 'node:test';
+import assert from 'node:assert/strict';
+import {readUsage,estimateTokens,SessionMetrics} from '../app/ui/metrics.js';
+
+test('usage readers normalize gateway, Codex, Anthropic and pi-ai layouts with cached tokens inside the prompt',()=>{
+  assert.deepEqual(readUsage({prompt_tokens:20000,completion_tokens:500,cached_tokens:15000,cache_status:'reported',context_window:200000,first_token_ms:300,duration_ms:2300}),
+    {input:20000,output:500,cached:15000,reasoning:null,window:200000,cacheStatus:'reported',firstTokenMs:300,durationMs:2300});
+  assert.equal(readUsage({prompt_tokens:100,completion_tokens:5,prompt_tokens_details:{cached_tokens:64}}).cached,64);
+  assert.equal(readUsage({prompt_tokens:100,completion_tokens:5,cached_tokens:50,cache_status:'estimated'}).cacheStatus,'estimated');
+  const codex=readUsage({last:{inputTokens:31200,cachedInputTokens:27648,outputTokens:420,reasoningOutputTokens:180},modelContextWindow:1000000});
+  assert.deepEqual([codex.input,codex.cached,codex.output,codex.reasoning,codex.window],[31200,27648,420,180,1000000]);
+  const anthropic=readUsage({input_tokens:10,cache_read_input_tokens:900,cache_creation_input_tokens:90,output_tokens:7});
+  assert.deepEqual([anthropic.input,anthropic.cached,anthropic.output],[1000,900,7]);
+  const pi=readUsage({input:40,output:3,cacheRead:960,cacheWrite:0});
+  assert.deepEqual([pi.input,pi.cached],[1000,960]);
+  assert.equal(readUsage({prompt_tokens:100,completion_tokens:2}).cacheStatus,'not_reported');
+  assert.equal(readUsage({foo:1}),null);
+  assert.equal(readUsage(null),null);
+});
+
+test('session metrics report context fill, last and cumulative cache hits, and measured or estimated speed',()=>{
+  const m=new SessionMetrics(),at=ms=>new Date(Date.UTC(2026,9,28,12,0,0)+ms).toISOString();
+  assert.deepEqual(m.context(200000),{used:null,window:200000,ratio:null});
+  assert.equal(m.cache(),null);
+  m.feed({type:'native-event',name:'request/context',data:{contextWindow:128000},at:at(0)});
+  m.feed({type:'text',text:'hello world, streaming text',turnId:'t1',at:at(100)});
+  m.feed({type:'text',text:'more streamed output here',turnId:'t1',at:at(1100)});
+  m.feed({type:'usage',data:{prompt_tokens:12000,completion_tokens:400,cached_tokens:6000},turnId:'t1',at:at(1200)});
+  assert.deepEqual(m.context(200000),{used:12400,window:128000,ratio:12400/128000});
+  assert.equal(m.rate(Date.parse(at(60000))).value,400);
+  m.feed({type:'usage',data:{prompt_tokens:20000,completion_tokens:100,cached_tokens:18000,context_window:200000,first_token_ms:500,duration_ms:1500},turnId:'t2',at:at(5000)});
+  const cache=m.cache();
+  assert.equal(cache.ratio,0.9);
+  assert.equal(cache.sessionRatio,24000/32000);
+  assert.equal(m.context(null).window,200000);
+  assert.equal(m.rate(Date.parse(at(60000))).value,100);
+  assert.equal(m.rate(Date.parse(at(60000))).estimated,false);
+  assert.deepEqual(m.turn('t1'),{requests:1,input:12000,output:400,cacheRatio:0.5,cacheStatus:'reported'});
+  m.feed({type:'thinking',text:'思考中的流式文字',turnId:'t3',at:at(9000)});
+  m.feed({type:'thinking',text:'继续输出更多内容',turnId:'t3',at:at(9500)});
+  const live=m.rate(Date.parse(at(10000)),true);
+  assert.equal(live.estimated,true);assert.equal(live.live,true);assert.ok(live.value>0);
+  m.feed({type:'usage',scope:'native-session',data:{input_tokens:10,output_tokens:2},at:at(11000)});
+  assert.equal(m.requests.length,2);
+  m.clear();
+  assert.equal(m.lastRequest(),null);
+  assert.ok(estimateTokens('中文字符')>estimateTokens('abcd'));
+});
