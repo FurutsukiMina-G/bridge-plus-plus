@@ -1,5 +1,6 @@
 import {randomUUID} from 'node:crypto';
 import {dshEfforts} from './dsh-host.mjs';
+import {pruneServiceBackups} from './model-service-backups.mjs';
 const same=(a,b)=>JSON.stringify(a)===JSON.stringify(b);
 const value=row=>{const result={...row?.section,...row?.user};if(row?.section?.providers||row?.user?.providers)result.providers={...row?.section?.providers,...row?.user?.providers};return result;};
 function reasoning(efforts){if(!efforts.some(e=>!['none','off'].includes(e)))return false;const result=dshEfforts(efforts);if(result.off&&!['none','off'].includes(result.off)){const slot=['minimal','low','medium','high','xhigh','max'].find(key=>!Object.hasOwn(result,key));if(!slot)throw new Error('DSH 无法表示此模型的全部思考档位');result[slot]=result.off;delete result.off;}return result;}
@@ -25,7 +26,7 @@ export async function connectServiceDsh({store,models,baseURL,key,rpc,replace=[]
   for(const id of replace){const p=previous[id];if(p&&p.apiKeyEnv!==(def.id==='qoder'?'QODERBRIDGE_LOCAL_KEY':'WORKBUDDYBRIDGE_LOCAL_KEY'))throw new Error('替换目标不是已核实的旧 bridge provider');}
   const configured=models.map(m=>({id:m.id,name:m.name,contextWindow:m.context_window,maxTokens:m.max_tokens,input:m.input_modalities,reasoningEfforts:reasoning(m.reasoning_efforts)}));
   const provider={displayName:def.name,apiKeyEnv:def.credential,api:'openai-completions',baseURL:url,compat:{supportsDeveloperRole:false,supportsReasoningEffort:true,supportsUsageInStreaming:true,maxTokensField:'max_tokens',supportsLongCacheRetention:true},cacheRetention:'long',models:configured};
-  const backup=`dsh-before-${Date.now()}-${randomUUID()}.json`;await store.write(backup,{providerId:def.providerId,provider:existing??null,oldProviders:Object.fromEntries(replace.map(id=>[id,previous[id]??null])),defaultNamespace:defaults?.ns??null,defaultModel:oldDefault,revisions:{llm:llm.revision,default:defaults?.revision}});
+  const backup=`dsh-before-${Date.now()}-${randomUUID()}.json`;await store.write(backup,{providerId:def.providerId,provider:existing??null,oldProviders:Object.fromEntries(replace.map(id=>[id,previous[id]??null])),defaultNamespace:defaults?.ns??null,defaultModel:oldDefault,revisions:{llm:llm.revision,default:defaults?.revision}});await pruneServiceBackups(store,'dsh');
   const changes=[];let defaultMigration=null;
   try{
   await rpc('credentials/set',{ref:def.credential,value:key});
@@ -46,5 +47,14 @@ export async function connectServiceDsh({store,models,baseURL,key,rpc,replace=[]
   }
   const connectedAt=new Date().toISOString();await store.write('dsh-owner.json',{providerId:def.providerId,baseURL:url});await store.write('dsh.json',{providerId:def.providerId,baseURL:url,connectedAt});
   return {providerId:def.providerId,requestedProviderId:def.name,displayName:def.name,idAdjusted:true,idReason:'DSH 的凭据记录 provider 标识要求小写安全段，使用安全 provider id，显示名保持原名。',connectedAt,applied:'hot-reload',backup,changes,defaultMigration};
-  }catch(error){throw new Error(`DSH 接入未完整完成：${String(error.message??'RPC 失败').replaceAll(key,'[redacted]')}；已完成：${changes.join('、')||'无设置修改'}。备份：${backup}`);}
+  }catch(error){
+    const rollbackErrors=[],clean=value=>String(value?.message??value??'RPC 失败').replaceAll(key,'[redacted]'),attempt=async(label,operation)=>{try{await operation();}catch(failure){rollbackErrors.push(label+'：'+clean(failure));}};let current=null;
+    await attempt('读取当前设置',async()=>{current=await rpc('settings/describe');});const currentLlm=current?.namespaces?.find(n=>n.ns==='llm-pi-ai');
+    if(currentLlm){const rows=[{id:def.providerId,value:existing??null},...replace.map(id=>({id,value:previous[id]??null}))];await attempt('恢复 provider',()=>rpc('settings/mutate',{ns:'llm-pi-ai',expectedRevision:currentLlm.revision,ops:rows.map(row=>({op:row.value===null?'unset':'set',path:['providers',row.id],...row.value===null?{}:{value:row.value}}))}));}
+    if(defaultMigration&&defaults){const currentDefault=current?.namespaces?.find(n=>n.ns===defaults.ns);if(currentDefault)await attempt('恢复默认模型',()=>rpc('settings/mutate',{ns:defaults.ns,expectedRevision:currentDefault.revision,ops:[{op:'set',path:['provider'],value:oldDefault.provider},{op:'set',path:['model'],value:oldDefault.model}]}));}
+    if(!existing)await attempt('删除新增凭据引用',()=>rpc('credentials/unset',{ref:def.credential}));
+    throw new Error(`DSH 接入未完整完成：${clean(error)}；已完成：${changes.join('、')||'无设置修改'}；${rollbackErrors.length?'以下项目未能回滚：'+rollbackErrors.join('；'):'已回滚到原设置'}。备份：${backup}`);
+  }
 }
+
+export async function disconnectServiceDsh({store,rpc}){const def=store.definition,record=await store.read('dsh-owner.json')??await store.read('dsh.json');if(!record)return {target:'dsh',changed:false,backup:null,message:'尚未接入'};const described=await rpc('settings/describe'),llm=described.namespaces?.find(n=>n.ns==='llm-pi-ai'),defaults=described.namespaces?.find(n=>['agent-default-model','dsh-agent-default-model'].includes(n.ns)),oldDefault=value(defaults);if(oldDefault.provider===def.providerId)throw new Error('DSH 的默认模型正在使用这个接口，请先在 DSH 里换一个默认模型');if(described.writable!==true||!llm)throw new Error('DSH 桌面 RPC 设置不可写，未断开 provider');const existing=value(llm).providers?.[def.providerId];if(existing&&(existing.api!=='openai-completions'||existing.apiKeyEnv!==def.credential||existing.displayName!==def.name||existing.baseURL!==record.baseURL))throw new Error('DSH 同名 provider 不属于本服务，未断开');const backup=`dsh-before-${Date.now()}-${randomUUID()}.json`;await store.write(backup,{providerId:def.providerId,provider:existing??null,defaultNamespace:defaults?.ns??null,defaultModel:oldDefault,revisions:{llm:llm.revision,default:defaults?.revision}});await pruneServiceBackups(store,'dsh');if(existing)await rpc('settings/mutate',{ns:'llm-pi-ai',expectedRevision:llm.revision,ops:[{op:'unset',path:['providers',def.providerId]}]});await rpc('credentials/unset',{ref:def.credential});await store.write('dsh-owner.json',null);await store.write('dsh.json',null);return {target:'dsh',changed:true,backup,message:'已断开 DSH 接入并删除本服务凭据引用'};}

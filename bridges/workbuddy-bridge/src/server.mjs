@@ -62,11 +62,11 @@ export function createBridge({cfg,provider,key,instanceId,log}){
         if(chunk&&streaming){
           // A tool may execute as soon as the host sees a terminal frame. Hold it
           // until both the final arguments and the upstream [DONE] are verified.
-          if(completion.finish)pending.push(chunk);else{await write(res,`data: ${JSON.stringify(chunk)}\n\n`,controller.signal);if(chunk.usage)usageSent=true;}
+          if(completion.finish)pending.push(chunk);else{await write(res,`data: ${JSON.stringify(chunk)}\n\n`,controller.signal);if(chunk.usage||chunk.bridge_usage)usageSent=true;}
         }
       }
       completion.validate(upstream.tools);
-      if(streaming){for(const chunk of pending){await write(res,`data: ${JSON.stringify(chunk)}\n\n`,controller.signal);if(chunk.usage)usageSent=true;}await write(res,'data: [DONE]\n\n',controller.signal);res.end();}
+      if(streaming){for(const chunk of pending){await write(res,`data: ${JSON.stringify(chunk)}\n\n`,controller.signal);if(chunk.usage||chunk.bridge_usage)usageSent=true;}await write(res,'data: [DONE]\n\n',controller.signal);res.end();}
       else json(res,200,completion.result());
       stats.completed++;outcome='completed';
     }catch(error){
@@ -74,10 +74,11 @@ export function createBridge({cfg,provider,key,instanceId,log}){
       // Deadline cancellation stops SSE consumption before the transport can send
       // its error usage frame. Preserve its latest known official subtotal.
       const knownUsage=completion?.usage??transportMetrics?.knownUsage??null;
+      const bridgeUsage=completion?.bridgeUsage??(transportMetrics?.usageAccounting?{accounting:transportMetrics.usageAccounting,correction_calls:transportMetrics.correctionCalls??0}:null);
       if(completion&&!completion.usage&&knownUsage)completion.usage=knownUsage;
       if(errorCode==='cancelled'){stats.cancelled++;outcome='cancelled';}else stats.failed++;
-      if(!res.destroyed&&!res.writableEnded){if(!res.headersSent)json(res,p.status,{...p.body,...(knownUsage?{usage:knownUsage}:{})});else{
-        if(knownUsage&&!usageSent)res.write(`data: ${JSON.stringify({id:completion?.id,created:completion?.created,model:selected?.id,object:'chat.completion.chunk',choices:[],usage:knownUsage})}\n\n`);
+      if(!res.destroyed&&!res.writableEnded){if(!res.headersSent)json(res,p.status,{...p.body,...(knownUsage?{usage:knownUsage}:{}),...(bridgeUsage?{bridge_usage:bridgeUsage}:{})});else{
+        if((knownUsage||bridgeUsage)&&!usageSent)res.write(`data: ${JSON.stringify({id:completion?.id,created:completion?.created,model:selected?.id,object:'chat.completion.chunk',choices:[],usage:knownUsage,...(bridgeUsage?{bridge_usage:bridgeUsage}:{})})}\n\n`);
         res.write(`data: ${JSON.stringify(p.body)}\n\n`);res.end();}}
     }finally{
       clearTimeout(deadline);clearInterval(heartbeat);res.removeListener('close',disconnect);req.removeListener('aborted',disconnect);controller.abort();controllers.delete(controller);release?.();

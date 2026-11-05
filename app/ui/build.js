@@ -4215,6 +4215,14 @@ function stopNote(reason, shown = /* @__PURE__ */ new Set()) {
   const reset = resetText(reason.resetAt);
   return reset ? `${reason.message}\uFF08${reset}\uFF09` : reason.message;
 }
+function turnExtras(stats) {
+  const parts = [];
+  if (stats?.requests) parts.push(`\u8BF7\u6C42 ${stats.requests} \u6B21`);
+  if (stats?.failedRequests) parts.push(`\u5931\u8D25 ${stats.failedRequests} \u6B21`);
+  if (stats?.corrections) parts.push(`\u683C\u5F0F\u7EA0\u6B63 ${stats.corrections} \u6B21`);
+  if (stats?.continuations) parts.push(`\u81EA\u52A8\u7EED\u4F5C ${stats.continuations} \u6B21`);
+  return parts;
+}
 function limitNotice(failure, now = Date.now()) {
   if (failure?.kind !== "upstream" || !failure.resetAt || !(new Date(failure.resetAt).getTime() > now)) return "";
   return `${failure.source ? `${failure.source} ` : ""}\u9650\u901F\u4E2D\uFF0C${resetText(failure.resetAt, now)}\u3002\u73B0\u5728\u53D1\u9001\u53EF\u80FD\u7EE7\u7EED\u5931\u8D25\u3002`;
@@ -18538,9 +18546,10 @@ var permissionWarnings = { dsh: {
 } };
 var permissionWarning = (runtimeId, mode) => permissionWarnings[runtimeId]?.[mode] ?? null;
 var statusOf = (r) => r?.status ?? (r?.installed ? "ready" : "missing");
-var statusNames = { ready: "\u53EF\u7528", missing: "\u672A\u5B89\u88C5", "needs-setup": "\u9700\u8981\u8BBE\u7F6E", error: "\u68C0\u6D4B\u5931\u8D25" };
+var statusNames = { ready: "\u53EF\u7528", missing: "\u672A\u5B89\u88C5", "needs-setup": "\u9700\u8981\u8BBE\u7F6E", error: "\u68C0\u6D4B\u5931\u8D25", checking: "\u6B63\u5728\u68C0\u6D4B" };
 function unusableReason(r) {
   if (!r) return "\u672A\u9009\u62E9\u8FD0\u884C\u73AF\u5883";
+  if (r.checking && !usable(r)) return "\u6B63\u5728\u68C0\u6D4B\u8FD9\u4E2A\u8FD0\u884C\u73AF\u5883";
   if (r.reason) return r.reason;
   return { missing: `${r.name} \u5C1A\u672A\u5B89\u88C5`, "needs-setup": `${r.name} \u8FD8\u9700\u8981\u5B8C\u6210\u8BBE\u7F6E`, error: `${r.name} \u68C0\u6D4B\u5931\u8D25` }[statusOf(r)] ?? "";
 }
@@ -18592,25 +18601,25 @@ function environmentActions(env, r, { canOpenNative }) {
   return `<div class="card-actions">${list.join("")}</div>`;
 }
 function environmentCardHtml(r, env, { permissions = "", canOpenNative = false } = {}) {
-  const status = statusOf(r), busy2 = running(env?.job);
-  const label = busy2 ? `\u6B63\u5728${jobVerbs[env.job.action] ?? "\u5904\u7406"}` : statusNames[status] ?? status;
-  const reason = status !== "ready" ? unusableReason(r) : "";
-  const note = status !== "ready" && networkNotes[r.id] ? `<div class="env-note">${icon("info")}<span>${networkNotes[r.id]}</span></div>` : "";
-  return `<article class="runtime-card env-${esc3(status)}"><div class="card-top">${tile(r)}<span class="card-status ${busy2 ? "busy" : status === "ready" ? "ready" : status === "missing" ? "none" : status === "error" ? "error" : "warn"}">${busy2 ? '<span class="spinner"></span>' : '<span class="status-dot"></span>'}${esc3(label)}</span></div>
+  const status = statusOf(r), busy2 = running(env?.job), scanning = !!r.checking && !busy2;
+  const label = busy2 ? `\u6B63\u5728${jobVerbs[env.job.action] ?? "\u5904\u7406"}` : scanning ? statusNames.checking : statusNames[status] ?? status;
+  const reason = status !== "ready" && !scanning ? unusableReason(r) : "";
+  const note = status !== "ready" && !scanning && networkNotes[r.id] ? `<div class="env-note">${icon("info")}<span>${networkNotes[r.id]}</span></div>` : "";
+  return `<article class="runtime-card env-${esc3(status)}"><div class="card-top">${tile(r)}<span class="card-status ${busy2 || scanning ? "busy" : status === "ready" ? "ready" : status === "missing" ? "none" : status === "error" ? "error" : "warn"}">${busy2 || scanning ? '<span class="spinner"></span>' : '<span class="status-dot"></span>'}${esc3(label)}</span></div>
     <h3>${esc3(r.name)}<span class="proto">${esc3(r.protocol)}</span></h3><p>${esc3(r.description)}</p>
-    ${versionLine(env, r)}${reason ? `<div class="env-reason">${icon("alert")}<span>${esc3(reason)}</span></div>` : ""}${note}${jobHtml(env?.job)}
+    ${versionLine(env, r)}${reason ? `<div class="env-reason">${icon("alert")}<span>${esc3(reason)}</span></div>` : ""}${r.warning ? `<div class="env-reason">${icon("alert")}<span>${esc3(r.warning)}</span></div>` : ""}${note}${jobHtml(env?.job)}
     ${usable(r) ? `<div class="features">${esc3(r.tools)}</div>${permissions}` : ""}
     ${r.executable || r.desktop ? `<div class="runtime-path mono" title="${esc3(r.executable ?? r.desktop)}">${esc3(r.executable ?? r.desktop)}</div>` : ""}
-    ${environmentActions(env, r, { canOpenNative })}</article>`;
+    ${scanning ? "" : environmentActions(env, r, { canOpenNative })}</article>`;
 }
-var serviceStates = { running: "\u8FD0\u884C\u4E2D", stopped: "\u5DF2\u505C\u6B62", starting: "\u6B63\u5728\u542F\u52A8", error: "\u51FA\u9519" };
+var serviceStates = { running: "\u8FD0\u884C\u4E2D", stopped: "\u5DF2\u505C\u6B62", starting: "\u6B63\u5728\u542F\u52A8", error: "\u51FA\u9519", checking: "\u6B63\u5728\u6838\u5B9E", unavailable: "\u4E0D\u53EF\u7528", crashed: "\u5DF2\u5F02\u5E38\u9000\u51FA" };
 var sourceLogos = { qoder: "Q", workbuddy: "W" };
 var profileNames = { dsh: "DeepSeek Harness", kimi: "Kimi Code", codex: "Codex CLI" };
 function serviceStatus(s) {
   const busyPort = s.error?.code === "port_in_use" || !!s.portOwner;
-  const cls = s.status === "running" ? "ready" : s.status === "starting" ? "busy" : s.status === "error" || busyPort ? "error" : "none";
+  const pending2 = ["starting", "checking"].includes(s.status), cls = s.status === "running" ? "ready" : pending2 ? "busy" : ["error", "unavailable", "crashed"].includes(s.status) || busyPort ? "error" : "none";
   const text3 = busyPort && s.status !== "running" ? "\u7AEF\u53E3\u88AB\u5360\u7528" : serviceStates[s.status] ?? s.status ?? "\u672A\u77E5";
-  return `<span class="card-status ${cls}">${s.status === "starting" ? '<span class="spinner"></span>' : '<span class="status-dot"></span>'}${esc3(text3)}${s.status === "running" && s.pid ? `<span class="muted"> \xB7 pid ${esc3(s.pid)}</span>` : ""}</span>`;
+  return `<span class="card-status ${cls}">${pending2 ? '<span class="spinner"></span>' : '<span class="status-dot"></span>'}${esc3(text3)}${s.status === "running" && s.pid ? `<span class="muted"> \xB7 pid ${esc3(s.pid)}</span>` : ""}</span>`;
 }
 function copyRow(label, value, { id, mono = true, extra = "" }) {
   return `<div class="svc-row"><span class="svc-label">${label}</span><code class="svc-value${mono ? " mono" : ""}" ${id ? `id="${id}"` : ""} title="${esc3(value)}">${esc3(value)}</code>${extra}</div>`;
@@ -18627,7 +18636,7 @@ function connectionsOf(s) {
   return Object.entries(list).filter(([, c]) => c).map(([target, c]) => {
     const where = target === "codex" && c.profile ? `<span class="mono">codex --profile ${esc3(c.profile)}</span>` : target === "kimi" && c.path ? file(c.path) : c.providerId ? `provider <span class="mono">${esc3(c.providerId)}</span>` : c.path ? file(c.path) : "";
     const env = [c.requiredEnv].flat().filter(Boolean);
-    return `<div class="svc-dsh${env.length ? " pending" : ""}">${icon(env.length ? "alert" : "check")}<span>${env.length ? "\u5DEE\u4E00\u6B65\u63A5\u5165" : "\u5DF2\u63A5\u5165"} ${esc3(profileNames[target] ?? target)}${where ? ` \xB7 ${where}` : ""}${env.length ? ` \xB7 \u8FD8\u9700\u8981\u8BBE\u7F6E\u73AF\u5883\u53D8\u91CF <span class="mono">${esc3(env.join("\u3001"))}</span>` : c.connectedAt ? ` \xB7 ${ago(c.connectedAt)}` : ""}</span></div>`;
+    return `<div class="svc-dsh${env.length ? " pending" : ""}">${icon(env.length ? "alert" : "check")}<span>${env.length ? "\u5DEE\u4E00\u6B65\u63A5\u5165" : "\u5DF2\u63A5\u5165"} ${esc3(profileNames[target] ?? target)}${where ? ` \xB7 ${where}` : ""}${env.length ? ` \xB7 \u8FD8\u9700\u8981\u8BBE\u7F6E\u73AF\u5883\u53D8\u91CF <span class="mono">${esc3(env.join("\u3001"))}</span>` : c.connectedAt ? ` \xB7 ${ago(c.connectedAt)}` : ""}</span><button class="link-btn svc-disconnect" data-svc-disconnect="${esc3(s.id)}|${esc3(target)}" title="\u4ECE ${esc3(profileNames[target] ?? target)} \u7684\u914D\u7F6E\u91CC\u79FB\u9664\u8FD9\u4E2A\u63A5\u53E3">\u65AD\u5F00</button></div>`;
   }).join("");
 }
 function serviceFailure(e, now = Date.now()) {
@@ -18637,16 +18646,20 @@ function serviceFailure(e, now = Date.now()) {
 }
 function serviceCardHtml(s, view = {}) {
   const id = esc3(s.id), runningNow = s.status === "running", starting = s.status === "starting";
+  const top = `<div class="card-top"><span class="source-logo ${esc3(s.source)}">${esc3(sourceLogos[s.source] ?? "?")}</span>${serviceStatus(s)}</div>
+    <h3>${esc3(s.name)}<span class="proto">${esc3(s.sourceName ?? s.source)}</span></h3>`;
+  if (s.status === "checking") return `<article class="service-card" data-service="${id}">${top}<p class="svc-pending">\u6B63\u5728\u6838\u5B9E\u8FD9\u4E2A\u63A5\u53E3\u7684\u72B6\u6001\u2026</p></article>`;
+  if (s.status === "unavailable") return `<article class="service-card" data-service="${id}">${top}<div class="error-box">${esc3(s.error?.message ?? "\u8FD9\u4E2A\u63A5\u53E3\u6682\u65F6\u4E0D\u80FD\u4F7F\u7528")}</div><div class="card-actions"><button class="btn sm primary" data-svc-action="${id}|retry">${icon("refresh")}\u91CD\u8BD5</button></div></article>`;
   const profiles = s.profiles?.length ? s.profiles : Object.keys(profileNames).map((p) => ({ id: p }));
   const target = profiles.find((p) => p.id === s.defaultProfile) ?? profiles[0], targetName = profileNames[target?.id] ?? target?.name ?? target?.id;
   const address = target?.baseURL ?? s.baseURL ?? "\u2014";
   const key = view.key ? `<code class="svc-value mono revealed">${esc3(view.key)}</code>` : `<code class="svc-value mono">${esc3(s.keyPreview ?? "\u672A\u751F\u6210")}</code>`;
   const owner = s.portOwner ? `<div class="error-box">\u7AEF\u53E3 ${esc3(s.port)} \u5DF2\u88AB ${esc3(s.portOwner.name ?? "\u5176\u4ED6\u7A0B\u5E8F")}\uFF08pid ${esc3(s.portOwner.pid ?? "?")}\uFF09\u5360\u7528${s.portOwner.command ? `\uFF1A<span class="mono">${esc3(s.portOwner.command)}</span>` : ""}\u3002\u8BF7\u5148\u505C\u6B62\u5360\u7528\u5B83\u7684\u7A0B\u5E8F\uFF0C\u6216\u6362\u4E00\u4E2A\u7AEF\u53E3\u3002</div>` : s.error?.message ? `<div class="error-box">${esc3(s.error.message)}</div>` : "";
   const autostart = s.autostart ?? {};
+  const stale = s.stale ? `<div class="env-note">${icon("info")}<span>\u73B0\u5728\u8FD0\u884C\u7684\u662F ${esc3(s.stale.running ?? "\u65E7\u7248\u672C")}\uFF0C\u8FD9\u4E2A\u63A5\u53E3\u7A7A\u95F2\u540E\u4F1A\u81EA\u52A8\u6362\u6210 ${esc3(s.stale.current)}\uFF0C\u4E5F\u53EF\u4EE5\u73B0\u5728\u91CD\u542F\u3002</span></div>` : "";
   const requests = s.requests?.total ? `<span class="muted">\u5DF2\u5904\u7406 ${esc3(s.requests.total)} \u4E2A\u8BF7\u6C42${s.requests.failed ? `\uFF0C\u5931\u8D25 ${esc3(s.requests.failed)} \u4E2A` : ""}${s.requests.lastAt ? ` \xB7 \u6700\u8FD1 ${ago(s.requests.lastAt)}` : ""}</span>` : '<span class="muted">\u8FD8\u6CA1\u6709\u8BF7\u6C42</span>';
   const models2 = s.models ?? {};
-  return `<article class="service-card" data-service="${id}"><div class="card-top"><span class="source-logo ${esc3(s.source)}">${esc3(sourceLogos[s.source] ?? "?")}</span>${serviceStatus(s)}</div>
-    <h3>${esc3(s.name)}<span class="proto">${esc3(s.sourceName ?? s.source)}</span></h3>
+  return `<article class="service-card" data-service="${id}">${top}
     <div class="svc-rows">
       <div class="svc-row"><span class="svc-label">\u63A5\u5165\u5230</span><select class="svc-select" data-svc-profile="${id}" title="\u5E95\u4E0B\u7684\u300C\u63A5\u5165\u300D\u6309\u94AE\u767B\u8BB0\u5230\u8FD9\u4E2A Agent\uFF1B\u4E0D\u5E26\u524D\u7F00\u7684 /v1 \u4E5F\u6309\u5B83\u7684\u5DE5\u5177\u7EA6\u5B9A\u56DE\u7B54">${profiles.map((p) => `<option value="${esc3(p.id)}" ${p.id === target?.id ? "selected" : ""}>${esc3(profileNames[p.id] ?? p.name ?? p.id)}</option>`).join("")}</select></div>
       ${copyRow("\u5730\u5740", address, { extra: `<button class="icon-btn xs" data-copy-text="${esc3(address)}" title="\u590D\u5236\u5730\u5740">${icon("copy")}</button>` })}
@@ -18654,11 +18667,11 @@ function serviceCardHtml(s, view = {}) {
       <div class="svc-row"><span class="svc-label">\u7AEF\u53E3</span><input class="svc-port" type="number" min="1024" max="65535" value="${esc3(s.port ?? "")}" data-svc-port="${id}"><button class="btn sm" data-svc-apply-port="${id}">\u5E94\u7528</button></div>
       <label class="svc-row svc-toggle"><span class="svc-label">\u5F00\u673A\u542F\u52A8</span><input type="checkbox" data-svc-autostart="${id}" ${autostart.enabled ? "checked" : ""}><span>\u767B\u5F55 Windows \u65F6\u5728\u540E\u53F0\u542F\u52A8</span>${autostart.enabled && autostart.valid === false ? `<span class="svc-issue">${icon("alert")}${esc3(autostart.issue ?? "\u5F00\u673A\u4EFB\u52A1\u9700\u8981\u4FEE\u590D")}</span>` : ""}</label>
     </div>
-    ${owner}
+    ${owner}${stale}
     <div class="card-foot"><span><b>${esc3(models2.count ?? "\u2014")}</b> \u4E2A\u6A21\u578B${models2.refreshedAt ? ` \xB7 ${ago(models2.refreshedAt)}\u5237\u65B0` : ""}</span>${requests}</div>
     ${models2.error ? `<div class="error-box">${esc3(models2.error)}</div>` : ""}
     ${serviceFailure(s.requests?.lastError)}
-    <div class="card-actions">${runningNow ? `<button class="btn sm" data-svc-action="${id}|restart">${icon("refresh")}\u91CD\u542F</button><button class="btn sm danger" data-svc-action="${id}|stop">${icon("stop")}\u505C\u6B62</button>` : `<button class="btn sm primary" data-svc-action="${id}|start" ${starting ? "disabled" : ""}>${icon("play")}\u542F\u52A8</button>`}<button class="btn sm" data-svc-models="${id}">${icon("list")}${view.models ? "\u6536\u8D77\u6A21\u578B" : "\u67E5\u770B\u6A21\u578B"}</button><button class="btn sm" data-svc-refresh="${id}">${icon("refresh")}\u5237\u65B0\u6A21\u578B</button><button class="btn sm${runningNow ? " primary" : ""}" data-svc-connect="${id}|${esc3(target?.id ?? "dsh")}" ${runningNow && !view.connecting ? "" : "disabled"} title="${runningNow ? `\u628A\u8FD9\u4E2A\u63A5\u53E3\u767B\u8BB0\u5230 ${esc3(targetName)}` : "\u5148\u542F\u52A8\u63A5\u53E3"}">${view.connecting ? `<span class="spinner"></span>\u63A5\u5165\u4E2D\u2026` : `${icon("plug")}\u63A5\u5165 ${esc3(targetName)}`}</button></div>
+    <div class="card-actions">${runningNow ? `<button class="btn sm" data-svc-action="${id}|restart">${icon("refresh")}\u91CD\u542F</button><button class="btn sm danger" data-svc-action="${id}|stop">${icon("stop")}\u505C\u6B62</button>` : `<button class="btn sm primary" data-svc-action="${id}|start" ${starting ? "disabled" : ""}>${icon("play")}${s.status === "crashed" ? "\u91CD\u65B0\u542F\u52A8" : "\u542F\u52A8"}</button>`}<button class="btn sm" data-svc-models="${id}">${icon("list")}${view.models ? "\u6536\u8D77\u6A21\u578B" : "\u67E5\u770B\u6A21\u578B"}</button><button class="btn sm" data-svc-refresh="${id}">${icon("refresh")}\u5237\u65B0\u6A21\u578B</button><button class="btn sm${runningNow ? " primary" : ""}" data-svc-connect="${id}|${esc3(target?.id ?? "dsh")}" ${runningNow && !view.connecting ? "" : "disabled"} title="${runningNow ? `\u628A\u8FD9\u4E2A\u63A5\u53E3\u767B\u8BB0\u5230 ${esc3(targetName)}` : "\u5148\u542F\u52A8\u63A5\u53E3"}">${view.connecting ? `<span class="spinner"></span>\u63A5\u5165\u4E2D\u2026` : `${icon("plug")}\u63A5\u5165 ${esc3(targetName)}`}</button></div>
     ${connectionsOf(s)}
     ${view.models ? serviceModelsHtml(view.list) : ""}</article>`;
 }
@@ -18673,11 +18686,12 @@ function guideEnvRow(r, env) {
   const status = statusOf(r), busy2 = running(env?.job), a3 = env?.actions ?? {};
   let side;
   if (busy2) side = `<span class="guide-state"><span class="spinner"></span>${env.job.state === "downloading" && env.job.total ? `${Math.round(100 * (env.job.received ?? 0) / env.job.total)}%` : "\u5904\u7406\u4E2D"}</span>`;
+  else if (r.checking && status !== "ready") side = '<span class="guide-state"><span class="spinner"></span>\u68C0\u6D4B\u4E2D</span>';
   else if (status === "ready") side = `<span class="guide-state ok">${icon("check")}${esc3(env?.installed?.version ? `\u5DF2\u5C31\u7EEA \xB7 ${env.installed.version}` : "\u5DF2\u5C31\u7EEA")}</span>`;
   else if (a3.install) side = `<button class="btn sm primary" data-env-install="${esc3(r.id)}">${icon("download")}\u4E0B\u8F7D\u5B89\u88C5</button>`;
   else if (env?.page) side = `<button class="btn sm" data-env-page="${esc3(r.id)}">${icon("external")}\u5B98\u65B9\u9875\u9762</button>`;
   else side = `<button class="btn sm" data-configure-runtime="${esc3(r.id)}">\u6307\u5B9A\u8DEF\u5F84</button>`;
-  const sub2 = status === "ready" ? r.description : busy2 ? "" : unusableReason(r) + (networkNotes[r.id] ? ` \xB7 ${networkNotes[r.id]}` : "");
+  const sub2 = status === "ready" ? r.description : busy2 ? "" : r.checking ? r.description : unusableReason(r) + (networkNotes[r.id] ? ` \xB7 ${networkNotes[r.id]}` : "");
   return `<div class="guide-row">${tile(r)}<span class="guide-main"><span class="guide-name">${esc3(r.name)}${recommended.has(r.id) ? '<span class="mi-tag">\u63A8\u8350</span>' : ""}</span><span class="guide-sub">${esc3(sub2)}</span>${env?.job?.state === "failed" ? `<span class="guide-error">${esc3(env.job.message ?? "\u5931\u8D25")}</span>` : ""}</span>${side}</div>`;
 }
 var sourceTitles = { qoder: "Qoder CN", workbuddy: "WorkBuddy", antigravity: "Antigravity \xB7 Gemini" };
@@ -18710,7 +18724,7 @@ function sourceCardHtml(id, description, c, component) {
 }
 function onboardingHtml(snap) {
   const envs = new Map((snap.environments ?? []).map((e) => [e.id, e]));
-  const ready = snap.runtimes.filter(usable).length;
+  const ready = snap.runtimes.filter(usable).length, scanning = snap.runtimes.some((r) => r.checking);
   const order = [...snap.runtimes].sort((a3, b) => (recommended.has(b.id) ? 1 : 0) - (recommended.has(a3.id) ? 1 : 0));
   const sources2 = ["qoder", "workbuddy"].map((id) => guideSourceRow(id, snap)).join("");
   const folders = snap.projects.length ? `<div class="guide-row">${icon("folder", "guide-icon")}<span class="guide-main"><span class="guide-name">\u5DE5\u4F5C\u6587\u4EF6\u5939</span><span class="guide-sub">\u5DF2\u6253\u5F00 ${snap.projects.length} \u4E2A</span></span><span class="guide-state ok">${icon("check")}\u5DF2\u5B8C\u6210</span></div>` : `<div class="guide-row">${icon("folder", "guide-icon")}<span class="guide-main"><span class="guide-name">\u5DE5\u4F5C\u6587\u4EF6\u5939</span><span class="guide-sub">Agent \u53EA\u5728\u4F60\u6253\u5F00\u7684\u6587\u4EF6\u5939\u91CC\u5DE5\u4F5C</span></span><button class="btn sm" id="guide-add-project">${icon("folderPlus")}\u6253\u5F00\u6587\u4EF6\u5939</button></div>`;
@@ -18718,13 +18732,13 @@ function onboardingHtml(snap) {
     <h3><span class="guide-step">1</span>\u5F00\u53D1\u73AF\u5883${ready ? `<span class="guide-count">${ready} \u4E2A\u53EF\u7528</span>` : ""}</h3><div class="guide-list">${order.map((r) => guideEnvRow(r, envs.get(r.id))).join("")}</div>
     <h3><span class="guide-step">2</span>\u6A21\u578B\u6E90</h3><div class="guide-list">${sources2}</div>
     <h3><span class="guide-step">3</span>\u5DE5\u4F5C\u6587\u4EF6\u5939</h3><div class="guide-list">${folders}</div>
-    <div class="modal-actions"><button id="guide-later" class="btn">\u7A0D\u540E</button><button id="guide-done" class="btn primary" ${ready ? "" : "disabled"} title="${ready ? "" : "\u81F3\u5C11\u9700\u8981\u4E00\u4E2A\u53EF\u7528\u7684\u5F00\u53D1\u73AF\u5883"}">\u5F00\u59CB\u4F7F\u7528</button></div></div>`;
+    <div class="modal-actions"><button id="guide-later" class="btn">\u7A0D\u540E</button><button id="guide-done" class="btn primary" ${ready ? "" : "disabled"} title="${ready ? "" : scanning ? "\u6B63\u5728\u68C0\u6D4B\u5F00\u53D1\u73AF\u5883" : "\u81F3\u5C11\u9700\u8981\u4E00\u4E2A\u53EF\u7528\u7684\u5F00\u53D1\u73AF\u5883"}">\u5F00\u59CB\u4F7F\u7528</button></div></div>`;
 }
 
 // app/ui/app.js
 var $2 = (selector) => document.querySelector(selector);
 var esc4 = (value) => String(value ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
-var labels = { idle: "\u51C6\u5907\u5C31\u7EEA", starting: "\u6B63\u5728\u8FDE\u63A5", running: "\u8FD0\u884C\u4E2D", waiting: "\u7B49\u5F85\u6388\u6743", completed: "\u5DF2\u5B8C\u6210", failed: "\u8FD0\u884C\u5931\u8D25", interrupted: "\u5DF2\u4E2D\u65AD" };
+var labels = { idle: "\u51C6\u5907\u5C31\u7EEA", starting: "\u6B63\u5728\u8FDE\u63A5", running: "\u8FD0\u884C\u4E2D", waiting: "\u7B49\u5F85\u6388\u6743", completed: "\u5DF2\u5B8C\u6210", failed: "\u8FD0\u884C\u5931\u8D25", interrupted: "\u5DF2\u4E2D\u65AD", paused: "\u5DF2\u6682\u505C" };
 var sourceNames = { qoder: "Qoder CN", workbuddy: "WorkBuddy", antigravity: "Antigravity \xB7 Gemini" };
 var tiles2 = { dsh: "DS", kimi: "Ki", codex: "Cx", antigravity: "AG" };
 var choiceLabels = { approve: "\u5141\u8BB8\u8FD9\u6B21", "approve-session": "\u672C\u4F1A\u8BDD\u59CB\u7EC8\u5141\u8BB8", reject: "\u62D2\u7EDD", "reject-session": "\u672C\u4F1A\u8BDD\u59CB\u7EC8\u62D2\u7EDD" };
@@ -19329,7 +19343,8 @@ function renderComposerControls() {
   const envChip = `<button class="chip-btn${s ? " locked" : ""}${envOk ? "" : " unavailable"}" id="env-chip" data-value="${esc4(env?.id ?? "")}" title="${s ? "\u4F1A\u8BDD\u521B\u5EFA\u540E\u4E0D\u80FD\u66F4\u6362\u8FD0\u884C\u73AF\u5883" : envOk ? "\u5148\u9009\u62E9\u8FD0\u884C\u73AF\u5883" : esc4(unusableReason(env))}">${tile2(env)}<span class="chip-text">${esc4(env?.name ?? "\u9009\u62E9\u73AF\u5883")}</span>${icon(s ? "lock" : "chevronDown", "caret")}</button>`;
   const modelChip = `<button class="chip-btn model-chip" id="model-chip" data-value="${esc4(selection.modelKey ?? "")}" title="${s ? "\u67E5\u770B\u6216\u8C03\u6574\u6B64\u4F1A\u8BDD\u7684\u53C2\u6570" : "\u9009\u62E9\u6A21\u578B\u3001\u601D\u8003\u5F3A\u5EA6\u4E0E\u4E0A\u4E0B\u6587\u7A97\u53E3"}">${icon("layers")}<span class="chip-text">${modelLabel(selection, model)}</span>${icon("chevronDown", "caret")}</button>`;
   const permChip = permissionChipHtml(s, env);
-  el.innerHTML = `<div class="composer-left">${attachButtonHtml()}${folder}${envChip}<span class="chip-sep">${icon("chevronRight")}</span>${modelChip}${permChip}</div><button class="send${running2 ? " stop" : ""}" id="send" title="${running2 ? "\u505C\u6B62\u672C\u8F6E" : "\u53D1\u9001 (Enter)"}" aria-label="${running2 ? "\u505C\u6B62\u672C\u8F6E" : "\u53D1\u9001"}" ${p && envOk ? "" : "disabled"}>${icon(running2 ? "stop" : "arrowUp")}</button>`;
+  const waiting = !running2 && !!env?.checking;
+  el.innerHTML = `<div class="composer-left">${attachButtonHtml()}${folder}${envChip}<span class="chip-sep">${icon("chevronRight")}</span>${modelChip}${permChip}</div><button class="send${running2 ? " stop" : ""}" id="send" title="${running2 ? "\u505C\u6B62\u672C\u8F6E" : waiting ? "\u6B63\u5728\u68C0\u6D4B\u8FD0\u884C\u73AF\u5883\uFF0C\u7A0D\u7B49\u51E0\u79D2" : "\u53D1\u9001 (Enter)"}" aria-label="${running2 ? "\u505C\u6B62\u672C\u8F6E" : "\u53D1\u9001"}" ${p && envOk && !waiting ? "" : "disabled"}>${icon(running2 ? "stop" : "arrowUp")}</button>`;
   if (menu && !$2("#popover").classList.contains("hidden")) placeMenu();
 }
 var permissionIcons = { ask: "shield", "auto-review": "shieldCheck", auto: "zap", readonly: "lock" };
@@ -19418,11 +19433,15 @@ function renderBanner() {
   }
   if (!s && project()) {
     const env = runtime(state.runtimeId);
+    if (!state.snapshot.runtimes.some(usable) && env?.checking) {
+      el.innerHTML = `<div class="banner"><span class="spinner"></span><span>\u6B63\u5728\u68C0\u6D4B\u5F00\u53D1\u73AF\u5883\u2026</span></div>`;
+      return;
+    }
     if (!state.snapshot.runtimes.some(usable)) {
       el.innerHTML = `<div class="banner warn">${icon("alert")}<span>\u8FD8\u6CA1\u6709\u53EF\u7528\u7684\u5F00\u53D1\u73AF\u5883\u3002\u88C5\u597D DeepSeek Harness \u6216 Kimi Code \u4E2D\u7684\u4EFB\u610F\u4E00\u4E2A\u5C31\u80FD\u5F00\u59CB\u3002</span><span class="banner-actions"><button class="btn primary sm" id="open-guide">\u67E5\u770B\u5F15\u5BFC</button></span></div>`;
       return;
     }
-    if (env && !usable(env)) notes.push(`${unusableReason(env)}\u3002\u8BF7\u6362\u4E00\u4E2A\u8FD0\u884C\u73AF\u5883\uFF0C\u6216\u5230\u8BBE\u7F6E \u2192 \u8FD0\u884C\u73AF\u5883\u5904\u7406\u3002`);
+    if (env && !usable(env)) notes.push(env.checking ? `${unusableReason(env)}\u2026` : `${unusableReason(env)}\u3002\u8BF7\u6362\u4E00\u4E2A\u8FD0\u884C\u73AF\u5883\uFF0C\u6216\u5230\u8BBE\u7F6E \u2192 \u8FD0\u884C\u73AF\u5883\u5904\u7406\u3002`);
     else if (!state.modelKey) notes.push(state.runtimeId === "dsh" ? "DSH \u7EDF\u4E00\u4F1A\u8BDD\u9700\u8981 Qoder CN \u6216 WorkBuddy \u6A21\u578B\u3002\u8BF7\u5728\u8BBE\u7F6E \u2192 \u6A21\u578B\u6E90\u4E0B\u8F7D\u7EC4\u4EF6\u5E76\u767B\u5F55\u3002" : "\u8BF7\u9009\u62E9\u6A21\u578B\u3002");
     else if (state.modelKey !== "native" && !currentModel()) notes.push("\u6240\u9009\u6A21\u578B\u4E0D\u5728\u5F53\u524D\u76EE\u5F55\u4E2D\uFF0C\u8BF7\u91CD\u65B0\u9009\u62E9\u6216\u5237\u65B0\u6A21\u578B\u6E90\u3002");
   }
@@ -19606,10 +19625,11 @@ function diffBlock(e) {
   return `<details class="tool diff-event" data-expand="diff-${esc4(e.turnId ?? e.id)}"><summary>${icon("fileDiff", "tool-status")}<span class="tool-name">\u4EE3\u7801\u53D8\u66F4</span><span class="tool-summary">${esc4(text3 ? diffStat(text3) : "\u5DE5\u4F5C\u533A\u53D8\u66F4")}</span>${icon("chevronRight", "tool-caret")}</summary><div class="tool-body">${text3 ? diffHtml(text3) : `<pre>${esc4(clip2(pretty(e.data)))}</pre>`}</div></details>`;
 }
 function turnEndBlock(e) {
-  const t = e.turnId ? metrics.turn(e.turnId) : null, why = e.status === "completed" ? "" : stopLabel(e.reason), parts = [{ completed: "\u672C\u8F6E\u5B8C\u6210", interrupted: "\u5DF2\u505C\u6B62", failed: "\u672C\u8F6E\u672A\u5B8C\u6210" }[e.status] ?? "\u672C\u8F6E\u7ED3\u675F", ...why ? [why] : [], clock(e.at)];
+  const t = e.turnId ? metrics.turn(e.turnId) : null, why = ["completed", "paused"].includes(e.status) ? "" : stopLabel(e.reason), parts = [{ completed: "\u672C\u8F6E\u5B8C\u6210", interrupted: "\u5DF2\u505C\u6B62", failed: "\u672C\u8F6E\u672A\u5B8C\u6210", paused: "\u5DF2\u6682\u505C" }[e.status] ?? "\u672C\u8F6E\u7ED3\u675F", ...why ? [why] : [], clock(e.at)];
   if (t?.input != null) parts.push(`\u8F93\u5165 ${compact(t.input)}`);
   if (t?.output != null) parts.push(`\u8F93\u51FA ${compact(t.output)}`);
   if (t?.cacheRatio != null) parts.push(`\u7F13\u5B58 ${t.cacheStatus === "estimated" ? "\u2248" : ""}${pct(t.cacheRatio)}`);
+  parts.push(...turnExtras(e.stats));
   return `<div class="turn-end ${esc4(e.status)}"><span>${parts.map(esc4).join(" \xB7 ")}</span></div>`;
 }
 function renderChat(quiet = false) {
@@ -19778,7 +19798,7 @@ function fileMenuHtml() {
   const f2 = menu.file, here = f2.inside && f2.exists, name = f2.path.split(/[\\/]/).filter(Boolean).pop() ?? f2.path;
   const item = (id, glyph, label, on = true) => `<button class="menu-item" data-file-menu="${id}" ${on ? "" : "disabled"}>${icon(glyph, "mi-icon")}<span class="mi-main"><span class="mi-name">${label}</span></span></button>`;
   const note = here ? "" : `<div class="menu-note">${icon("info")}<span>${f2.inside ? "\u8FD9\u4E2A\u6587\u4EF6\u5DF2\u7ECF\u4E0D\u5B58\u5728" : "\u4E0D\u5728\u5F53\u524D\u5DE5\u4F5C\u6587\u4EF6\u5939\u91CC\uFF0C\u53EA\u80FD\u590D\u5236\u8DEF\u5F84"}</span></div>`;
-  return `<div class="menu-label" title="${esc4(f2.path)}">${esc4(name)}</div>${item("preview", "eye", "\u9884\u89C8", here && !!f2.preview)}${item("reveal", "folder", "\u5728\u8D44\u6E90\u7BA1\u7406\u5668\u4E2D\u663E\u793A", here)}${item("open", "external", "\u7528\u9ED8\u8BA4\u5E94\u7528\u6253\u5F00", here && f2.kind === "file")}${item("copy", "copy", "\u590D\u5236\u8DEF\u5F84")}${note}`;
+  return `<div class="menu-label" title="${esc4(f2.path)}">${esc4(name)}</div>${item("preview", "eye", "\u9884\u89C8", here && !!f2.preview)}${item("reveal", "folder", "\u5728\u8D44\u6E90\u7BA1\u7406\u5668\u4E2D\u663E\u793A", here)}${item("open", "external", "\u7528\u9ED8\u8BA4\u5E94\u7528\u6253\u5F00", here && f2.kind === "file" && f2.openable !== false)}${item("copy", "copy", "\u590D\u5236\u8DEF\u5F84")}${note}${here && f2.kind === "file" && f2.openable === false ? `<div class="menu-note">${icon("info")}<span>\u8FD9\u7C7B\u6587\u4EF6\u53EF\u80FD\u4F1A\u8FD0\u884C\u7A0B\u5E8F\uFF0C\u4E0D\u80FD\u76F4\u63A5\u6253\u5F00\uFF0C\u53EF\u4EE5\u5728\u8D44\u6E90\u7BA1\u7406\u5668\u91CC\u67E5\u770B</span></div>` : ""}`;
 }
 function linkMenuHtml() {
   const { host } = new URL(menu.url);
@@ -19796,7 +19816,7 @@ async function previewFile(f2, line) {
     openLightbox(found.url, found.name ?? f2.relative);
     return;
   }
-  if (f2.preview !== "text") throw new Error("\u8FD9\u79CD\u6587\u4EF6\u4E0D\u80FD\u5728\u8FD9\u91CC\u9884\u89C8\uFF0C\u53F3\u952E\u53EF\u4EE5\u7528\u9ED8\u8BA4\u5E94\u7528\u6253\u5F00");
+  if (f2.preview !== "text") throw new Error(f2.openable === false ? "\u8FD9\u79CD\u6587\u4EF6\u4E0D\u80FD\u5728\u8FD9\u91CC\u9884\u89C8\uFF0C\u53EF\u4EE5\u53F3\u952E\u5728\u8D44\u6E90\u7BA1\u7406\u5668\u4E2D\u663E\u793A" : "\u8FD9\u79CD\u6587\u4EF6\u4E0D\u80FD\u5728\u8FD9\u91CC\u9884\u89C8\uFF0C\u53F3\u952E\u53EF\u4EE5\u7528\u9ED8\u8BA4\u5E94\u7528\u6253\u5F00");
   setRightTab("files");
   await openFile(f2.relative, false);
   const view = document.querySelector("#preview-pane .code-view");
@@ -19820,7 +19840,7 @@ function envMenuHtml() {
   }
   return `<div class="menu-label">\u8FD0\u884C\u73AF\u5883 \xB7 \u5148\u9009\u73AF\u5883\uFF0C\u518D\u9009\u6A21\u578B</div>${state.snapshot.runtimes.map((r) => {
     const ok = usable(r), current = ok && r.id === state.runtimeId;
-    return `<button class="menu-item env-item${current ? " selected" : ""}" data-env="${r.id}" ${ok ? "" : "disabled"}>${tile2(r)}<span class="mi-main"><span class="mi-name">${esc4(r.name)}<span class="mi-tag">${esc4(r.protocol)}</span></span><span class="mi-sub">${ok ? esc4(r.description) : `${esc4(unusableReason(r))} \xB7 \u53EF\u5728\u8BBE\u7F6E \u2192 \u8FD0\u884C\u73AF\u5883\u91CC\u5B89\u88C5\u6216\u6307\u5B9A\u8DEF\u5F84`}</span></span>${current ? icon("check", "mi-check") : ""}</button>`;
+    return `<button class="menu-item env-item${current ? " selected" : ""}" data-env="${r.id}" ${ok ? "" : "disabled"}>${tile2(r)}<span class="mi-main"><span class="mi-name">${esc4(r.name)}<span class="mi-tag">${esc4(r.protocol)}</span></span><span class="mi-sub">${ok ? esc4(r.description) : r.checking ? esc4(unusableReason(r)) : `${esc4(unusableReason(r))} \xB7 \u53EF\u5728\u8BBE\u7F6E \u2192 \u8FD0\u884C\u73AF\u5883\u91CC\u5B89\u88C5\u6216\u6307\u5B9A\u8DEF\u5F84`}</span></span>${current ? icon("check", "mi-check") : ""}</button>`;
   }).join("")}<div class="menu-sep"></div><button class="menu-item subtle" data-open-settings="runtimes">${icon("settings", "mi-icon")}<span class="mi-main"><span class="mi-name">\u7BA1\u7406\u8FD0\u884C\u73AF\u5883\u2026</span></span></button>`;
 }
 function sessionMenuHtml() {
@@ -20355,6 +20375,10 @@ async function submit() {
     }
     if (s?.selectionIssue) throw new Error(s.selectionIssue + "\uFF1B\u8BF7\u5148\u5237\u65B0\u6765\u6E90\u5E76\u91CD\u65B0\u786E\u8BA4\u6A21\u578B");
     if (submitting) return;
+    if (runtime(s ? s.runtimeId : state.runtimeId)?.checking) {
+      toast("\u6B63\u5728\u68C0\u6D4B\u8FD0\u884C\u73AF\u5883\uFF0C\u7A0D\u7B49\u51E0\u79D2\u518D\u53D1\u9001");
+      return;
+    }
     const text3 = state.draft.trim(), queued = pending.list(views.draftKey(state));
     if (queued.some((x2) => x2.status === "staging")) {
       toast("\u9644\u4EF6\u8FD8\u5728\u5904\u7406\uFF0C\u7A0D\u7B49\u4E00\u4E0B\u518D\u53D1\u9001");
@@ -20809,6 +20833,14 @@ document.addEventListener("click", (e) => {
       view.connecting = false;
       refreshSettingsLive();
     });
+    return;
+  }
+  if (el = hit("[data-svc-disconnect]")) {
+    const [id2, target] = el.dataset.svcDisconnect.split("|"), name = { dsh: "DeepSeek Harness", kimi: "Kimi Code", codex: "Codex CLI" }[target] ?? target;
+    modal(`\u65AD\u5F00 ${name}`, `<p class="modal-text">\u4F1A\u4ECE ${esc4(name)} \u7684\u914D\u7F6E\u91CC\u79FB\u9664\u8FD9\u4E2A\u63A5\u53E3\u548C\u5B83\u7684\u5BC6\u94A5\uFF0C\u5176\u4ED6\u914D\u7F6E\u4E0D\u53D8\u3002\u4FEE\u6539\u524D\u4F1A\u7559\u4E00\u4EFD\u5907\u4EFD\u3002</p>`, async () => {
+      const r = await call("bridgeService:disconnect", { id: id2, target });
+      await serviceCall(null, null, r?.changed === false ? `${name} \u91CC\u6CA1\u6709\u8FD9\u4E2A\u63A5\u53E3` : r?.message ?? `\u5DF2\u65AD\u5F00 ${name}`);
+    }, { confirm: "\u65AD\u5F00", danger: true });
     return;
   }
   if (el = hit("[data-svc-apply-port]")) {
@@ -21315,7 +21347,12 @@ async function refreshFromBackend() {
   }
   refreshing = true;
   try {
+    const wasChecking = state.snapshot?.startup?.environments === "checking";
     await snapshot();
+    if (wasChecking && state.snapshot.startup?.environments !== "checking") {
+      capCache.clear();
+      if (!guideShown && !state.snapshot.runtimes.some(usable)) openGuide();
+    }
     for (const id of stopping) if (!busy(state.snapshot.sessions.find((x2) => x2.id === id))) stopping.delete(id);
     const s = session(), wasBusy = lastBusy;
     lastBusy = busy(s);
@@ -21408,7 +21445,8 @@ async function start() {
     renderAll();
     tick();
     const firstRun = state.snapshot.onboarding?.show && !state.snapshot.projects.length && !state.snapshot.sessions.length;
-    if (!guideShown && (firstRun || !state.snapshot.runtimes.some(usable))) openGuide();
+    const scanning = state.snapshot.startup?.environments === "checking";
+    if (!guideShown && (firstRun || !scanning && !state.snapshot.runtimes.some(usable))) openGuide();
     await Promise.all(state.snapshot.projects.map(async (p) => {
       const terminal = views.terminal(p.id), revision = terminal.revision;
       const saved = await call("terminal:state", { projectId: p.id });

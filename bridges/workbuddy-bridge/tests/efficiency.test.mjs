@@ -108,7 +108,9 @@ test('canonical final text arrives before the SDK terminal event; partial failur
   const response=await transport.chat(body,new AbortController().signal),reader=response.body.getReader();let raw='';
   while(!raw.includes('"content":"first"')){const part=await reader.read();assert.equal(part.done,false);raw+=new TextDecoder().decode(part.value);}
   assert.ok(!raw.includes('"finish_reason":"stop"'));go();while(true){const part=await reader.read();if(part.done)break;raw+=new TextDecoder().decode(part.value);}
-  assert.match(raw,/\[DONE\]/);assert.equal((raw.match(/"prompt_tokens":5000/g)??[]).length,1);
+  assert.match(raw,/\[DONE\]/);
+  const frames=raw.split('\n\n').filter(s=>s.startsWith('data: {')).map(s=>JSON.parse(s.slice(6)));
+  assert.equal(frames.filter(e=>e.usage?.prompt_tokens===5000).length,1);
 });
 test('JSON string projection preserves split escapes, raw surrogate pairs and quotes',()=>{
   const chunks=[];const p=new FinalTextProjector(s=>chunks.push(s));const expected='中文 😀\n"quote"';

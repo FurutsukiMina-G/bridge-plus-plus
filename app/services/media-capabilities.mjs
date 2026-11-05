@@ -6,7 +6,10 @@ import {promisify} from 'node:util';
 import {readExternalAsar} from '../core/external-asar.mjs';
 import {normalizeAntigravity} from '../core/catalog.mjs';
 import {ANTIGRAVITY_INPUT_MIMES,ANTIGRAVITY_TRANSPORT_SOURCE} from '../core/antigravity-media.mjs';
-const exec=promisify(execFile),cache=new Map();
+const exec=promisify(execFile),cache=new Map(),durable=new Map();
+const successfulProbe=value=>value&&typeof value==='object'&&!String(value.reason??'').startsWith('运行环境媒体能力检测失败：');
+export function hydrateRuntimeMediaCache(probes={}){cache.clear();durable.clear();for(const [key,value]of Object.entries(probes))if(successfulProbe(value)){durable.set(key,value);cache.set(key,Promise.resolve(value));}}
+export function successfulMediaProbes(){return new Map(durable);}
 export const MEDIA_LIMITS={image:8*1024*1024,audio:50*1024*1024,video:100*1024*1024};
 export const MAX_ATTACHMENTS_PER_TURN=8;
 export const MAX_ATTACHMENT_BYTES_PER_TURN=12*1024*1024;
@@ -62,6 +65,6 @@ export async function inspectRuntimeMedia(runtime,{readArchive=readExternalAsar}
     }
     return {image:false,audio:false,video:false,reason:'此运行环境未核实媒体输入传输'};
   })().catch(error=>({image:false,audio:false,video:false,reason:'运行环境媒体能力检测失败：'+error.message}));
-  cache.set(key,flight);return flight;
+  cache.set(key,flight);const result=await flight;if(successfulProbe(result))durable.set(key,result);return result;
 }
 export async function withRuntimeMedia(runtimes){return Promise.all(runtimes.map(async r=>({...r,media:await inspectRuntimeMedia(r).catch(error=>({reason:error.message}))})));}

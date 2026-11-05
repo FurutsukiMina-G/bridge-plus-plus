@@ -1,4 +1,4 @@
-import {readFile,writeFile,mkdir,open,rename,rm,lstat} from 'node:fs/promises';
+import {readFile,writeFile,mkdir,rename,rm,lstat} from 'node:fs/promises';
 import {createReadStream} from 'node:fs';
 import {createHash,randomUUID} from 'node:crypto';
 import {join,dirname,resolve} from 'node:path';
@@ -8,6 +8,8 @@ import {parse} from 'smol-toml';
 import {environmentProcess} from './environment-process.mjs';
 import {versionText} from './environment-utils.mjs';
 import {compareRuntimeVersions} from './runtime-paths.mjs';
+import {pruneServiceBackups} from './model-service-backups.mjs';
+import {withFileLock} from './file-lock.mjs';
 const queues=new Map(),q=JSON.stringify;
 export const keyFingerprint=key=>createHash('sha256').update(key).digest('hex');
 export const clientConfigPath=(target,{env=process.env,home=homedir()}={})=>join(target==='kimi'?env.KIMI_CODE_HOME||join(home,'.kimi-code'):env.CODEX_HOME||join(home,'.codex'),'config.toml');
@@ -38,7 +40,7 @@ export function replaceManagedFragment(original,{target,definition:def,text,prof
  if(starts.length>1||ends.length>1||starts.length!==ends.length||starts.length&&ends[0].start<=starts[0])throw new Error('Bridge++ 受管标记不完整或重复，未修改客户端配置');
  const previous=toml(original);let prefix=original,suffix='';
  if(starts.length){const inner=original.slice(starts[0]+begin.length,ends[0].start);if(!owned(toml(inner),target,def,profileFile))throw new Error('受管片段内含非本服务配置，未覆盖');prefix=original.slice(0,starts[0]);suffix=original.slice(ends[0].end);}
- if(remove){const next=starts.length?prefix+suffix:original;if(!isDeepStrictEqual(withoutOwned(previous,target,def),withoutOwned(toml(next),target,def)))throw new Error('移除受管片段会影响其他配置，未写入');return next;}
+ if(remove){const next=starts.length?prefix+suffix:original;if(!isDeepStrictEqual(withoutOwned(previous,target,def,profileFile),withoutOwned(toml(next),target,def,profileFile)))throw new Error('移除受管片段会影响其他配置，未写入');return next;}
  const outside=toml(prefix+suffix),section=target==='codex'?'model_providers':'providers';
  if(Object.hasOwn(outside[section]??{},def.providerId)||target==='codex'&&Object.hasOwn(outside.profiles??{},'bridgepp-'+def.id)||profileFile&&profileKeys.some(key=>Object.hasOwn(outside,key))||target==='kimi'&&Object.entries(outside.models??{}).some(([id,m])=>id.startsWith(def.providerId+'/')||m.provider===def.providerId))throw new Error('已有同名但不在 Bridge++ 受管片段内的 provider、profile 或模型，未覆盖');
  const next=prefix+(prefix&&!prefix.endsWith('\n')?newline:'')+begin+newline+text.replace(/\r?\n/g,newline)+end+newline+suffix;
@@ -50,11 +52,11 @@ export async function supportsCodexBearer(executable){if(!executable)return fals
 export async function verifyKimiConfig(executable){if(!executable||!/\.mjs$/i.test(executable))throw new Error('尚未核实此 Kimi 安装的配置格式，请配置受支持的 Kimi Code Node 入口');try{if((await lstat(executable)).size>64*1024*1024)throw new Error('package too large');const options={encoding:'utf8',signal:AbortSignal.timeout(8000)},pkg=JSON.parse(await readFile(join(dirname(executable),'../package.json'),options)),source=await readFile(executable,options);if(pkg.name==='@moonshot-ai/kimi-code'&&source.includes('KIMI_CODE_HOME')&&source.includes('~/.kimi-code/config.toml')&&source.includes('ModelAliasBaseSchema')&&source.includes('apiKeyEnv:')&&source.includes('supportEfforts:'))return;}catch{}throw new Error('此 Kimi 版本未核实全局配置位置和模型字段，未写入');}
 async function readConfig(file){try{const info=await lstat(file);if(!info.isFile()||info.nlink>1||info.size>4*1024*1024)throw new Error('客户端配置不是可安全编辑的普通文件');return await readFile(file,'utf8');}catch(error){if(error.code==='ENOENT')return null;throw new Error('无法安全读取客户端配置，未修改');}}
 async function editConfig({store,file,target,transform}){
- await mkdir(dirname(file),{recursive:true,mode:0o700});const lock=file+'.bridgepp.lock';let handle;try{handle=await open(lock,'wx',0o600);}catch{throw new Error('客户端配置正由另一个接入任务处理，请稍后重试');}
- const tmp=file+'.bridgepp-'+randomUUID()+'.tmp';let backup=null;
- try{const before=await readConfig(file),next=transform(before);if(next!==before){backup=`${target}-before-${Date.now()}-${randomUUID()}`+(before===null?'.missing.json':'.toml');await writeFile(join(store.root,backup),before??JSON.stringify({path:file,existed:false}),{flag:'wx',mode:0o600});await writeFile(tmp,next,{flag:'wx',mode:0o600});if(await readConfig(file)!==before)throw new Error('客户端配置已并发变化，未覆盖；请重试接入');for(let n=0;;n++)try{await rename(tmp,file);break;}catch(error){if(n>=4||!['EPERM','EACCES','EBUSY'].includes(error.code))throw new Error('无法替换客户端配置；请关闭占用配置的程序后重试');await new Promise(r=>setTimeout(r,25*2**n));}}
- return {path:file,backup,changed:next!==before};
- }finally{await rm(tmp,{force:true}).catch(()=>{});await handle.close();await rm(lock,{force:true});}
+ await mkdir(dirname(file),{recursive:true,mode:0o700});const lock=file+'.bridgepp.lock';
+ return withFileLock(lock,async()=>{const tmp=file+'.bridgepp-'+randomUUID()+'.tmp';let backup=null;
+  try{const before=await readConfig(file),next=transform(before);if(next!==before){backup=`${target}-before-${Date.now()}-${randomUUID()}`+(before===null?'.missing.json':'.toml');await writeFile(join(store.root,backup),before??JSON.stringify({path:file,existed:false}),{flag:'wx',mode:0o600});if(next!==null)await writeFile(tmp,next,{flag:'wx',mode:0o600});if(await readConfig(file)!==before)throw new Error('客户端配置已并发变化，未覆盖；请重试接入');if(next===null)await rm(file);else for(let n=0;;n++)try{await rename(tmp,file);break;}catch(error){if(n>=4||!['EPERM','EACCES','EBUSY'].includes(error.code))throw new Error('无法替换客户端配置；请关闭占用配置的程序后重试');await new Promise(r=>setTimeout(r,25*2**n));}await pruneServiceBackups(store,target);}
+  return {path:file,backup,changed:next!==before};
+  }finally{await rm(tmp,{force:true}).catch(()=>{});}}, {timeoutMessage:'客户端配置正由另一个接入任务处理，请稍后重试'});
 }
 async function writeConfig({store,file,target,fragment}){
  const definition=store.definition,profileFile=target==='codex'&&fragment.profileMode==='file',base=file;let migrationRequired=false;
@@ -71,6 +73,7 @@ async function writeConfig({store,file,target,fragment}){
  const message=target==='codex'?`已添加 ${profileFile?'独立 profile 文件':'旧版 Codex 兼容 profile 表'}；默认模型 ${fragment.defaultModel}；使用 codex --profile ${fragment.profile}，原生默认保持原样`:'已追加 provider 与模型；请在 Kimi 中自行选择，默认模型保持原样';
  return {path:file,providerId:fragment.providerId,...fragment.profile?{profile:fragment.profile,profileMode:fragment.profileMode,defaultModel:fragment.defaultModel}:{},backup:written.backup,migration:migration?.changed?{path:base,backup:migration.backup}:null,requiredEnv:fragment.requiredEnv??null,message:message+(fragment.requiredEnv?`；当前 Codex 未核实支持 provider 内置 token，请自行设置 ${fragment.requiredEnv}，Bridge++ 未修改系统环境变量`:'')};
 }
+export async function disconnectServiceClient({store,target}){if(!['kimi','codex'].includes(target))throw new Error('未知接入目标');const record=await store.read('connection-'+target+'.json');if(!record?.path)return {target,changed:false,backup:null,message:'尚未接入'};const file=resolve(record.path),definition=store.definition,profileFile=target==='codex'&&record.profileMode==='file',prior=queues.get(file)??Promise.resolve(),work=prior.catch(()=>{}).then(async()=>{const written=await editConfig({store,file,target,transform:before=>{if(before===null)return null;const next=replaceManagedFragment(before,{target,definition,profileFile,remove:true});return profileFile&&!next.trim()?null:next;}});await store.write('connection-'+target+'.json',null);return {target,changed:true,backup:written.backup,message:target==='codex'?'已移除 Codex 的 Bridge++ 受管配置':'已移除 Kimi 的 Bridge++ provider 和模型'};});queues.set(file,work);try{return await work;}finally{if(queues.get(file)===work)queues.delete(file);}}
 export async function connectServiceClient({store,target,models,baseURL,key,runtime,env=process.env,home=homedir(),verifyKimi=verifyKimiConfig,verifyBearer=supportsCodexBearer,resolveProfileMode=codexProfileMode}){
  if(!['kimi','codex'].includes(target))throw new Error('未知接入目标');if(target==='kimi')await verifyKimi(runtime?.executable);const profileMode=target==='codex'?await resolveProfileMode(runtime):null,fragment=clientFragment({target,definition:store.definition,models,baseURL,key,profileMode,bearerSupported:target==='codex'&&await verifyBearer(runtime?.executable)}),file=resolve(clientConfigPath(target,{env,home})),prior=queues.get(file)??Promise.resolve();
  const work=prior.catch(()=>{}).then(()=>writeConfig({store,file,target,fragment}));queues.set(file,work);let result;try{result=await work;}finally{if(queues.get(file)===work)queues.delete(file);}

@@ -67,7 +67,7 @@ test('truncated provider streams cannot release executable terminal frames',asyn
 test('gateway usage is journaled in the active run while duplicate native counts are ignored',async t=>{
   const store=await new Store(await directory()).open();await store.mutate(s=>{s.projects=[{id:'p',path:store.root}];});const gateway={},manager=new Sessions(store,{},gateway,[{id:'codex',installed:true}]);t.after(async()=>{await manager.close();await store.close();});
   const session=await manager.create({projectId:'p',runtimeId:'codex',selection:{modelKey:'native'}}),adapter={endpoint:{},close:async()=>{}};
-  const run={id:'run',adapter,events:Promise.resolve(),approvals:new Set(),prepared:Promise.resolve()};manager.adapters.set(session.id,adapter);manager.runs.set(session.id,run);
+  const run={id:'run',adapter,events:Promise.resolve(),approvals:new Set(),prepared:Promise.resolve(),continuations:0,stats:{requests:0,failedRequests:0,corrections:0}};manager.adapters.set(session.id,adapter);manager.runs.set(session.id,run);
   await manager.receive(session,adapter,{type:'usage',data:{prompt_tokens:5}});
   await gateway.onUsage(session.id,{type:'usage',source:'gateway',scope:'request',data:{prompt_tokens:10,completion_tokens:2}},gateway.requestContext(session.id));
   await gateway.onUsage(session.id,{type:'usage',source:'gateway',data:{}},'stale-run');

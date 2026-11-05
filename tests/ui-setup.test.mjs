@@ -175,3 +175,67 @@ test('the guide only lets you start once an environment is usable',()=>{
   assert.doesNotMatch(some,/id="guide-done" class="btn primary" disabled/);
   assert.match(some,/1 个可用/);
 });
+
+test('while detection runs an environment shows that, not what the last run saw',()=>{
+  const cached={...dsh,status:'missing',reason:'尚未安装，请到设置 → 开发环境安装或配置',checking:true};
+  const card=environmentCardHtml(cached,{actions:{}});
+  assert.match(card,/正在检测/);
+  assert.doesNotMatch(card,/尚未安装|未安装/,'a stale answer must not be shown as current');
+  assert.doesNotMatch(card,/data-configure-runtime|data-env-install/,'nothing can be done to it yet');
+  assert.equal(unusableReason(cached),'正在检测这个运行环境');
+  // A runtime that was fine last time stays selectable, so the composer does not flicker on every launch.
+  const known={...kimi,status:'ready',checking:true};
+  assert.equal(usable(known),true);
+  assert.match(environmentCardHtml(known,{actions:{}}),/正在检测/);
+  const first={id:'dsh',name:'DeepSeek Harness',protocol:'native-web',description:'原生 Harness',tools:'工具',installed:false,status:'checking',checking:true};
+  assert.equal(usable(first),false);
+  assert.equal(unusableReason(first),'正在检测这个运行环境');
+});
+
+test('a warning about an environment is shown even when it works',()=>{
+  const card=environmentCardHtml({...kimi,status:'ready',warning:'托管 Kimi 校验未通过，已改用内置版本：<退出码 1>'},{actions:{check:true}});
+  assert.match(card,/托管 Kimi 校验未通过，已改用内置版本：&lt;退出码 1&gt;/);
+  assert.match(card,/data-use-runtime="kimi"/);
+});
+
+test('the guide waits for detection before saying an environment is missing',()=>{
+  const snap={runtimes:[{...dsh,installed:false,status:'checking',checking:true},{...kimi,installed:false,status:'checking',checking:true}],environments:[],catalog:{},sourceComponents:[],projects:[]};
+  const html=onboardingHtml(snap);
+  assert.match(html,/检测中/);
+  assert.match(html,/正在检测开发环境/);
+  assert.doesNotMatch(html,/下载安装/);
+  assert.doesNotMatch(html,/data-configure-runtime/);
+});
+
+test('an interface card explains states that have nothing to manage yet',()=>{
+  const base={id:'qoder',name:'bridge++_qoder',source:'qoder',sourceName:'Qoder CN',port:8646,profiles:[],models:{},requests:{},connections:{dsh:null,kimi:null,codex:null}};
+  const checking=serviceCardHtml({...base,status:'checking'});
+  assert.match(checking,/正在核实/);
+  assert.doesNotMatch(checking,/data-svc-action|data-svc-key/);
+  const failed=serviceCardHtml({...base,status:'unavailable',error:{code:'SERVICE_UNAVAILABLE',message:'对外接口目录初始化失败：<EEXIST>'}});
+  assert.match(failed,/不可用/);
+  assert.match(failed,/对外接口目录初始化失败：&lt;EEXIST&gt;/);
+  assert.match(failed,/data-svc-action="qoder\|retry"/);
+  assert.doesNotMatch(failed,/data-svc-key/);
+});
+
+test('a crashed interface says so and offers a restart, an outdated one says what will happen',()=>{
+  const base={id:'qoder',name:'bridge++_qoder',source:'qoder',sourceName:'Qoder CN',port:8646,baseURL:'http://127.0.0.1:8646/v1',defaultProfile:'dsh',keyPreview:'bpp_…a1b2',models:{count:30},autostart:{enabled:true,valid:true},requests:{total:0}};
+  const crashed=serviceCardHtml({...base,status:'crashed',error:{code:'SERVICE_EXITED',message:'服务已异常退出：内存不足'}});
+  assert.match(crashed,/已异常退出/);
+  assert.match(crashed,/服务已异常退出：内存不足/);
+  assert.match(crashed,/data-svc-action="qoder\|start"[^>]*>.*重新启动/);
+  const stale=serviceCardHtml({...base,status:'running',pid:9,stale:{running:'0.1.17',current:'0.1.18'}});
+  assert.match(stale,/现在运行的是 0\.1\.17，这个接口空闲后会自动换成 0\.1\.18/);
+  assert.doesNotMatch(serviceCardHtml({...base,status:'running',pid:9,stale:null}),/空闲后/);
+  const unknown=serviceCardHtml({...base,status:'running',pid:9,stale:{running:null,current:'0.1.18'}});
+  assert.match(unknown,/现在运行的是 旧版本/);
+});
+
+test('every registered agent can be disconnected from the card',()=>{
+  const base={id:'workbuddy',name:'Bridge++_WorkBuddy',source:'workbuddy',sourceName:'WorkBuddy',port:8647,status:'running',defaultProfile:'dsh',keyPreview:'k',models:{count:1},autostart:{},requests:{total:0}};
+  const card=serviceCardHtml({...base,connections:{dsh:{connectedAt:'2026-11-05T00:00:00Z',providerId:'bridgepp_workbuddy'},kimi:{path:'C:\\x\\config.toml'},codex:null}});
+  assert.match(card,/data-svc-disconnect="workbuddy\|dsh"/);
+  assert.match(card,/data-svc-disconnect="workbuddy\|kimi"/);
+  assert.doesNotMatch(card,/data-svc-disconnect="workbuddy\|codex"/);
+});

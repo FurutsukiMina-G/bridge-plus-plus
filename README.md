@@ -44,7 +44,7 @@ Windows 桌面 Agent 开发工作台。把 Qoder CN、WorkBuddy 等模型源接�
 
 ## 从源码运行
 
-需要 Node.js 22 或更高版本。
+需要 Node.js 22.19 或更高版本（打包固定用 `.node-version` 里的版本），并且能访问 npm 官方仓库。`npm ci` 时 Qoder SDK 的安装脚本还要从 `static.qoder.com.cn` 下载官方运行时。
 
 ```bash
 npm ci
@@ -58,19 +58,31 @@ npm start
 npm test
 ```
 
+```bash
+npm run test:bridges
+```
+
 打包安装程序：
 
 ```bash
 npm run package:installer
 ```
 
+## 关闭窗口和卸载
+
+- 对外接口是独立的后台程序，关掉 Bridge++ 窗口后继续运行，要停止请在“设置 › 对外接口”操作。
+- 升级时安装程序会先让运行中的接口退出，装完自动恢复。
+- 卸载时会停止接口、删除开机启动任务，并询问是否同时删除数据（默认保留）。
+- 卸载不会改动 DSH、Kimi Code、Codex CLI 的配置。想把接口从这些环境里移除，先在“设置 › 对外接口”点“断开”。
+
 ## 数据和隐私
 
 - 项目、会话和设置保存在本机 `%APPDATA%\AgentWorkbench`。
 - Bridge++ 本身不收集数据。对话内容只发给你选择的模型服务。
 - 模型源的登录信息由各自的官方客户端管理，Bridge++ 只在本机读取，用来发起你的请求。
+- 对外接口的固定端口（8646、8647）只监听本机。同一台电脑上如果有其他账号先占用了端口，接入的客户端可能把密钥和请求发给对方：多人共用的电脑请留意卡片上的端口占用提示，或换一个端口。
 
 ## 说明
 
 - 请用你自己的账号，并遵守各模型服务和开发环境的服务条款。账号和额度由你自己负责。
-- 本项目暂未采用开源许可证，保留所有权利。第三方组件的许可证见各组件目录，`bridges/workbuddy-bridge/vendor` 中的第三方组件见同目录的 LICENSE 和 THIRD_PARTY_NOTICES。
+- 本项目暂未采用开源许可证，保留所有权利。第三方组件的许可证见各组件目录，KaTeX 字体的许可证见 `assets/licenses`，`bridges/workbuddy-bridge/vendor` 中的第三方组件见同目录的 LICENSE 和 THIRD_PARTY_NOTICES。

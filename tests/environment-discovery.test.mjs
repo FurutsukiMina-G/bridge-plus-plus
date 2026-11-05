@@ -11,7 +11,7 @@ import {Environments} from '../app/services/environments.mjs';
 async function root(){await mkdir('.runtime/tests',{recursive:true});const dir=await mkdtemp(resolve('.runtime/tests/environment-discovery-'));await mkdir(join(dir,'resources'));return dir;}
 function archiveBytes(pkg){const content=Buffer.from(JSON.stringify(pkg)),tree=Buffer.from(JSON.stringify({files:{'package.json':{size:content.length,offset:'0'}}})),header=Buffer.alloc(16+tree.length+(4-tree.length%4)%4);header.writeUInt32LE(4,0);header.writeUInt32LE(header.length-8,4);header.writeUInt32LE(header.length-12,8);header.writeUInt32LE(tree.length,12);tree.copy(header,16);return Buffer.concat([header,content]);}
 const runtime=(dir,id='dsh')=>({id,name:id,installed:true,status:'ready',executable:join(dir,id==='dsh'?'DeepSeek Harness.exe':'agy.exe'),kind:'system'});
-const discovery=row=>({discover:async()=>[row],registry:async()=>[],execute:async()=>assert.fail('unexpected process')});
+const discovery=row=>({discover:async()=>[row],execute:async()=>assert.fail('unexpected process')});
 
 test('Electron environment discovery uses original-fs for archive reads and file checks, retains rc version and enables DSH',async()=>{
  const dir=await root(),archive=join(dir,'resources/app.asar'),calls=[];await writeFile(archive,archiveBytes({version:'0.2.1-rc.4',homepage:'https://fixture.invalid/dsh'}));
@@ -25,7 +25,7 @@ test('Electron environment discovery uses original-fs for archive reads and file
 test('DSH archive package failure falls back to executable version then observed registry version',async()=>{
  const dir=await root();await writeFile(join(dir,'resources/app.asar'),'invalid fixture package');
  const exe=await inspectEnvironments({}, {...discovery(runtime(dir)),fileVersion:async()=> '0.2.1.0'});assert.equal(exe[0].status,'ready');assert.equal(exe[0].version,'0.2.1.0');
- const registry=await inspectEnvironments({}, {...discovery(runtime(dir)),fileVersion:async()=>null,registry:async()=>[{location:dir,version:'0.2.1-rc.3'}]});assert.equal(registry[0].version,'0.2.1-rc.3');
+ const registry=await inspectEnvironments({}, {...discovery(runtime(dir)),fileVersion:async()=>null,registryRows:[{location:dir,version:'0.2.1-rc.3'}]});assert.equal(registry[0].version,'0.2.1-rc.3');
 });
 test('a truly absent/non-file DSH archive remains needs-setup, and permission failures are not reported as missing',async()=>{
  const dir=await root(),options={...discovery(runtime(dir)),fileVersion:async()=>null};assert.equal((await inspectEnvironments({},options))[0].status,'needs-setup');await mkdir(join(dir,'resources/app.asar'));assert.equal((await inspectEnvironments({},options))[0].status,'needs-setup');

@@ -39,7 +39,7 @@ export type DecisionRepair = { kind: 'misclosed_parameter' | 'shorthand_paramete
   'tool_calls_envelope' | 'flat_call_arguments' | 'decorated_calls_envelope' | 'attribute_parameters' |
   'terminal_field_stub' | 'custom_tool_envelope' | 'localized_parameter' | 'generic_arguments_boundary' |
   'attributed_call_envelope' | 'named_generic_wrapper' | 'plain_tool_envelope' | 'redundant_decision_closers' | 'missing_calls_opener' |
-  'missing_calls_parameter_wrapper' | 'generic_shorthand_name' | 'plain_write_parameters' | 'misclosed_invoke_opener' | 'json_tool_name_separator'; tool: string; parameter: string };
+  'missing_calls_parameter_wrapper' | 'generic_shorthand_name' | 'plain_write_parameters' | 'misclosed_invoke_opener' | 'json_tool_name_separator' | 'missing_decision_close'; tool: string; parameter: string };
 function parseJson(text: string): unknown {
   try { return JSON.parse(text); }
   catch (original) {
@@ -187,7 +187,7 @@ function alternateDsDecision(text: string, request: ChatRequest, repairs: Decisi
     repairs.push({ kind: marker === 'DSML' ? 'repeated_dsml' : 'alternate_ds', tool: name, parameter: 'call' });
   }
 }
-function callsArray(text: string, repairs: DecisionRepair[], completeEnvelope = false): unknown {
+function callsArray(text: string, repairs: DecisionRepair[]): unknown {
   try { return parseJson(text); }
   catch (original) {
     // Some SDK-formatted call arrays carry an extra closing brace after the
@@ -202,8 +202,7 @@ function callsArray(text: string, repairs: DecisionRepair[], completeEnvelope = 
     }
     // An added outer brace must never masquerade as a missing call close.
     // Use the closed wrapper only when the array itself already ended.
-    const restored = (/\]\s*$/.test(text) ? missingCallClosures(`{"kind":"tool_calls","calls":${text.trim()}}`) : null) ??
-      (completeEnvelope ? missingCallClosures(`{"kind":"tool_calls","calls":${text.trim()}`) : null);
+    const restored = /\]\s*$/.test(text) ? missingCallClosures(`{"kind":"tool_calls","calls":${text.trim()}}`) : null;
     if (restored) {
       repairs.push(...restored.repairs);
       return (restored.value as { calls: unknown[] }).calls;
@@ -455,16 +454,8 @@ function dsmlDecision(text: string, request: ChatRequest, repairs: DecisionRepai
     // Reject mixed envelopes as a whole instead of silently dropping calls.
     if (!/^<｜｜DSML｜｜\s*(?:calls|tool_calls)>\s*(?:<｜｜DSML｜｜\s*invoke\s+name="tool_calls">\s*)?$/.test(text.slice(0, wrappedCalls.index)))
       throw new Error('Mixed DSML calls envelope would discard an earlier invocation');
-    const close = /^\s*<\/｜｜DSML｜｜\s*invoke>\s*<\/｜｜DSML｜｜\s*(calls|tool_calls)>\s*$/.exec(
-      text.slice(wrappedCalls.index + wrappedCalls[0].length));
-    // Only an explicit wrapper with all three closing tags can delimit a
-    // calls array whose final ']' was omitted. Reuse the existing EOF rule
-    // for complete call objects; incomplete arguments or later calls fail.
-    const completeEnvelope = Boolean(close && close[1] === marker?.[1] &&
-      /^<｜｜DSML｜｜\s*(?:calls|tool_calls)>\s*<｜｜DSML｜｜\s*invoke\s+name="tool_calls">\s*$/.test(text.slice(0, wrappedCalls.index)) &&
-      /^<｜｜DSML｜｜\s*parameter\s+name="calls"\s+string="false"\s*>/.test(wrappedCalls[0]) &&
-      /<\/｜｜DSML｜｜\s*parameter\s*>$/.test(wrappedCalls[0]));
-    const raw = callsArray(wrappedCalls[1]!.trim(), repairs, completeEnvelope) as unknown;
+    // Even an explicit DSML wrapper cannot prove an unclosed array is complete.
+    const raw = callsArray(wrappedCalls[1]!.trim(), repairs) as unknown;
     if (!Array.isArray(raw) || !raw.length) throw new Error('DSML calls parameter is empty or invalid');
     const calls = raw.map(item => {
       if (!item || typeof item !== 'object') throw new Error('DSML tool call is invalid');
@@ -753,16 +744,14 @@ function missingCallClosures(text: string): { value: unknown; repairs: DecisionR
       calls.push({ name, arguments: args.value });
       cursor = args.end;
       space();
-      let closedCall = false;
-      if (text[cursor] === '}') { closedCall = true; cursor++; space(); }
+      if (text[cursor] === '}') { cursor++; space(); }
       else if (text[cursor] === ',' || text[cursor] === ']')
         repairs.push({ kind: 'call_wrapper_close', tool: name, parameter: 'call' });
       else return null;
       if (text[cursor] === ',') { cursor++; continue; }
-      // Only complete call objects at EOF, or an explicit completed calls
-      // array, can lack the final decision wrapper. Never finish arguments.
-      if ((cursor === text.length && closedCall) || /^\]\s*$/.test(text.slice(cursor))) {
-        repairs.push({ kind: 'decision_wrapper_close', tool: name, parameter: 'calls' });
+      // The calls array must explicitly close. EOF could have cut off more calls.
+      if (/^\]\s*$/.test(text.slice(cursor))) {
+        repairs.push({ kind: 'missing_decision_close', tool: 'wrapper', parameter: 'calls' });
         return { value: { kind: 'tool_calls', calls }, repairs };
       }
       const tail = text.slice(cursor);
@@ -775,6 +764,50 @@ function missingCallClosures(text: string): { value: unknown; repairs: DecisionR
       return { value: { kind: 'tool_calls', calls }, repairs };
     }
   } catch { return null; }
+}
+// Walk only the envelope and each call header. objectRange owns the complete
+// arguments object, so literal protocol/name fragments inside strings stay data.
+function jsonCallEnvelope(text: string, request: ChatRequest, repairs: DecisionRepair[]): Decision | null {
+  const batch = /^\s*\{\s*"kind"\s*:\s*"tool_calls"\s*,\s*"calls"\s*:\s*\[/.exec(text);
+  const single = /^\s*\{\s*"kind"\s*:\s*"tool_call"\s*,/.exec(text);
+  if (!batch && !single) return null;
+  let cursor = (batch ?? single)![0].length;
+  const calls: {name:string;arguments:Record<string,unknown>}[] = [], local: DecisionRepair[] = [];
+  while (true) {
+    if (batch) {
+      const opener = /^\s*\{/.exec(text.slice(cursor));
+      if (!opener) throw new Error('Incomplete call in JSON batch');
+      cursor += opener[0].length;
+    }
+    const header = /^\s*(?:"name"\s*:\s*|"name=\s*(?:"\s*:\s*""\s+type="string"\s*,\s*)?)("(?:[^"\\]|\\.)*")\s*,\s*"arguments"\s*:\s*(?=\{)/.exec(text.slice(cursor));
+    if (!header) throw new Error('Incomplete JSON call name/arguments pair');
+    const name = JSON.parse(header[1]!) as string;
+    if (!/^\s*"name"\s*:/.test(header[0])) local.push({kind:'json_tool_name_separator',tool:name,parameter:'name'});
+    cursor += header[0].length;
+    const args = objectRange(text, cursor);
+    cursor = args.end;
+    const close = /^\s*\}/.exec(text.slice(cursor));
+    if (!close) throw new Error('Incomplete JSON call');
+    cursor += close[0].length;
+    calls.push({name,arguments:args.value as Record<string,unknown>});
+    if (!batch) {
+      if (text.slice(cursor).trim()) throw new Error('Unexpected trailing JSON call data');
+      break;
+    }
+    const next = /^\s*([,\]])/.exec(text.slice(cursor));
+    if (!next) throw new Error('Incomplete JSON calls array');
+    cursor += next[0].length;
+    if (next[1] === ',') continue;
+    const tail = text.slice(cursor).trim();
+    if (tail === '') local.push({kind:'missing_decision_close',tool:'wrapper',parameter:'calls'});
+    else if (tail !== '}') throw new Error('Unexpected trailing JSON batch data');
+    break;
+  }
+  const value = batch ? {kind:'tool_calls',calls} : {kind:'tool_call',...calls[0]};
+  // Validate the entire reconstructed envelope and every call as usual.
+  const decision = decisionObject(value, request, repairs);
+  repairs.push(...local);
+  return decision;
 }
 function jsonDecision(text: string, request: ChatRequest, repairs: DecisionRepair[]): Decision {
   const custom = /^<custom_tool_call>\s*([\s\S]*?)\s*<\/custom_tool_call>$/.exec(text);
@@ -801,17 +834,17 @@ function jsonDecision(text: string, request: ChatRequest, repairs: DecisionRepai
   let decoded: unknown;
   try { decoded = parseJson(text); }
   catch (original) {
-    // Observed complete single-call envelope mixes JSON with name="Tool" syntax.
-    // Decode only the explicitly delimited name/arguments pair; never scan or edit
-    // argument strings, guess missing values, accept extra fields or drop a call.
-    const named=/^\s*\{\s*"kind"\s*:\s*"tool_call"\s*,\s*"name=("(?:[^"\\]|\\.)*")\s*,\s*"arguments"\s*:\s*(?=\{)/.exec(text);
-    if(named){
-      const args=objectRange(text,named[0].length);
-      if(!/^\s*\}\s*$/.test(text.slice(args.end)))throw original;
-      const name=JSON.parse(named[1]!);
-      const decision=decisionObject({kind:'tool_call',name,arguments:args.value},request,repairs);
-      repairs.push({kind:'json_tool_name_separator',tool:name,parameter:'name'});
+    const closedCalls = missingCallClosures(text);
+    if (closedCalls) {
+      const decision = decisionObject(closedCalls.value, request, repairs);
+      repairs.push(...closedCalls.repairs);
       return decision;
+    }
+    // Canonical batches own all their members. Never salvage an embedded
+    // decision from a damaged member or silently discard its siblings.
+    if (/^\s*\{\s*"kind"\s*:\s*"tool_calls"\s*,\s*"calls"\s*:\s*\[/.test(text) ||
+        /^\s*\{\s*"kind"\s*:\s*"tool_call"\s*,\s*"name=/.test(text)) {
+      return jsonCallEnvelope(text, request, repairs)!;
     }
     const stub = /,"}}\s*$/.exec(text);
     if (stub) {
@@ -842,12 +875,6 @@ function jsonDecision(text: string, request: ChatRequest, repairs: DecisionRepai
       if (!/^(?:\s|<?<\/?｜｜DSML｜｜\s*parameter\s*>)*$/.test(text.slice(complete.end))) throw original;
       const decision = decisionObject({ kind: 'tool_calls', calls: complete.value }, request, repairs);
       repairs.push({ kind: 'decorated_calls_envelope', tool: 'wrapper', parameter: 'tool_calls' });
-      return decision;
-    }
-    const restored = missingCallClosures(text);
-    if (restored) {
-      const decision = decisionObject(restored.value, request, repairs);
-      repairs.push(...restored.repairs);
       return decision;
     }
     let candidate: Decision | null = null;
@@ -926,6 +953,7 @@ export function parseDecision(text: string, request: ChatRequest, onRepair?: (re
   }
   if (request.tool_choice === 'none') throw new Error('tool_choice forbids tool calls');
   const calls = decision.kind === 'tool_call' ? [decision] : decision.calls;
+  if (request.parallel_tool_calls === false && calls.length > 1) throw new Error('parallel_tool_calls false permits only one host call');
   for (const call of calls) {
     if (!names.includes(call.name) || (typeof selected === 'string' && selected !== call.name))
       throw new Error(`Unknown or unselected tool name: ${diagnosticToolName(call.name)}`);
@@ -1033,7 +1061,7 @@ export function conversationPrompt(request: ChatRequest, options: {
     `Return exactly one JSON object, with no markdown:\n` +
     `{"kind":"final","content":"your response"}\n` +
     `or {"kind":"tool_call","name":"one provided tool name","arguments":{...}}\n` +
-    `For independent parallel actions, you may use {"kind":"tool_calls","calls":[{"name":"provided tool name","arguments":{...}}]}.\n` +
+    `Request independent operations needed next (such as reading several files or running several searches) together in the same reply. Keep operations that depend on earlier results in separate replies. Use {"kind":"tool_calls","calls":[{"name":"provided tool name","arguments":{...}}]}.\n` +
     `Choose a tool when the user task needs a file, command, search, or other host action.\n` +
     `Do not return a progress-only final answer while host actions remain necessary.\n` +
     `When asking the user, use a declared question tool with its real schema, or a readable natural-language final reply. Never expose tool protocol as an answer.\n` +
@@ -1044,6 +1072,7 @@ export function conversationPrompt(request: ChatRequest, options: {
     `For read use named file_path/offset/limit when declared; for edit include complete old_string AND new_string; ` +
     `for pwsh include its required description AND command. Finish every string/object before ending the response.\n`;
   return contract +
+    (request.parallel_tool_calls === false ? 'This request sets parallel_tool_calls:false. Return at most one host tool call.\n' : '') +
     `Tool choice: ${JSON.stringify(request.tool_choice ?? 'auto')}\n` +
     toolBlock +
     `Conversation (${options.historyMode === 'delta' ? 'new messages since the prior decision' : 'full history'}): ${JSON.stringify(transcript)}\n` +

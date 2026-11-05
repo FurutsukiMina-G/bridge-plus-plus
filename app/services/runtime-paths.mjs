@@ -1,4 +1,4 @@
-import {access,readdir,readFile,stat} from 'node:fs/promises';
+import {access,readdir,readFile,stat,writeFile} from 'node:fs/promises';
 import {existsSync} from 'node:fs';
 import {join,dirname,resolve,delimiter,relative,isAbsolute} from 'node:path';
 import {homedir} from 'node:os';
@@ -40,11 +40,30 @@ export async function findCodex(){
   const candidates=packages.map(p=>join(p,'node_modules/@openai/codex-win32-x64/vendor/x86_64-pc-windows-msvc/bin/codex.exe'));
   return await findManagedCodex()??await inPath(['codex.exe'])??await first(candidates);
 }
+export function shouldRefreshCodex(preferences,runtime,current){return !preferences.codex?.executable&&current!==runtime?.executable;}
 export async function findManagedKimi(userData,{verify}={}){
   if(!userData)return null;const root=join(userData,'environments/kimi-code');const dirs=(await list(root)).filter(e=>e.isDirectory()&&/^\d+\.\d+\.\d+(?:-[\w.-]+)?$/.test(e.name)).sort((a,b)=>compareRuntimeVersions(b.name,a.name));
-  for(const entry of dirs)try{const dir=join(root,entry.name),receipt=JSON.parse(await readFile(join(dir,'bridgepp-install.json'),'utf8')),executable=join(dir,'node_modules/@moonshot-ai/kimi-code/dist/main.mjs'),pkg=JSON.parse(await readFile(join(dir,'node_modules/@moonshot-ai/kimi-code/package.json'),'utf8'));if(receipt.verified!==true||receipt.version!==entry.name||pkg.version!==entry.name||pkg.name!=='@moonshot-ai/kimi-code')continue;await access(executable);if(verify&&!await verify(executable,entry.name))return null;return {executable,version:entry.name};}catch{}return null;
+  for(const entry of dirs)try{
+    const dir=join(root,entry.name),receiptPath=join(dir,'bridgepp-install.json'),receipt=JSON.parse(await readFile(receiptPath,'utf8')),executable=join(dir,'node_modules/@moonshot-ai/kimi-code/dist/main.mjs'),packagePath=join(dir,'node_modules/@moonshot-ai/kimi-code/package.json'),pkg=JSON.parse(await readFile(packagePath,'utf8'));
+    if(receipt.verified!==true||receipt.version!==entry.name||pkg.version!==entry.name||pkg.name!=='@moonshot-ai/kimi-code')continue;
+    const [mainInfo,packageInfo]=await Promise.all([stat(executable),stat(packagePath)]),verifiedFiles={main:{size:mainInfo.size,mtimeMs:mainInfo.mtimeMs},package:{size:packageInfo.size,mtimeMs:packageInfo.mtimeMs}},cached=receipt.verifiedFiles;
+    if(verify&&JSON.stringify(cached)!==JSON.stringify(verifiedFiles)){
+      const result=await verify(executable,entry.name),ok=result===true||result?.ok===true,warning=typeof result==='object'?result.warning??null:null;
+      if(!ok)return {executable:null,version:null,warning:warning??'托管 Kimi 校验未通过，已改用内置版本'};
+      if(!warning)await writeFile(receiptPath,JSON.stringify({...receipt,verifiedFiles}),{mode:0o600}).catch(()=>{});
+      return {executable,version:entry.name,warning};
+    }
+    return {executable,version:entry.name,warning:null};
+  }catch{}return null;
 }
 export function hideQaRuntimes(runtimes,env=process.env,{isPackaged=false}={}){if(isPackaged)return runtimes;const hidden=new Set(String(env.AWB_HIDE_RUNTIMES??'').split(',').map(s=>s.trim()));return runtimes.map(r=>hidden.has(r.id)?{...r,executable:null,desktop:null,installed:false,status:'missing',reason:'源码测试模拟：此环境未安装'}:r);}
+const descriptions=[
+  {id:'dsh',name:'DeepSeek Harness',short:'DSH',protocol:'native-web',mode:'integrated',tools:'完整原生工具 / Skills / MCP / 子代理',description:'原生 Harness 会话与完整界面'},
+  {id:'kimi',name:'Kimi Code',short:'Kimi',protocol:'acp',mode:'integrated',tools:'完整原生工具 / Skills / MCP / 子代理',description:'ACP 双向会话与原生审批'},
+  {id:'codex',name:'Codex CLI',short:'Codex',protocol:'exec-json / app-server',mode:'integrated',tools:'完整原生工具 / Skills / MCP / 子代理',description:'原生 exec JSONL；第三方模型使用 app-server'},
+  {id:'antigravity',name:'Antigravity',short:'AG',protocol:'stream-json',mode:'native',tools:'完整原生工具 / Skills / MCP / 子代理',description:'独立 Gemini 模型源 · 原生 CLI / 桌面'}
+];
+export function runtimePlaceholders(){return descriptions.map(r=>({...r,executable:null,desktop:null,installed:false,status:'checking',reason:'正在检测运行环境，请稍候',kind:'system',version:null,warning:null}));}
 export async function discoverRuntimes(preferences={},options={}){
   const programs=join(process.env.LOCALAPPDATA??join(home,'AppData/Local'),'Programs');
   const dsh=await first([preferences.dsh?.executable,...(options.dshRegistry??[]).filter(r=>typeof r.location==='string').map(r=>r.location&&join(r.location.replace(/^"|"$/g,''),'DeepSeek Harness.exe')),join(process.env.SystemDrive??'C:','DSH/DeepSeek Harness/DeepSeek Harness.exe'),join(programs,'DeepSeek Harness/DeepSeek Harness.exe')]);
@@ -54,12 +73,8 @@ export async function discoverRuntimes(preferences={},options={}){
   const kimi=await first([managedPreference?managed?.executable:preferred,managed?.executable,resolve(import.meta.dirname,'../../node_modules/@moonshot-ai/kimi-code/dist/main.mjs'),resolve(import.meta.dirname,'../../.runtime/kimi-code/node_modules/@moonshot-ai/kimi-code/dist/main.mjs'),join(home,'.local/bin/kimi.exe'),join(home,'.cargo/bin/kimi.exe')])??await inPath(['kimi.exe','kimi']);
   const agy=await first([preferences.antigravity?.executable,join(home,'.antigravity/antigravity.exe'),join(home,'.local/bin/agy.exe')])??await inPath(['agy.exe','antigravity.exe']);
   const agyDesktop=await first([preferences.antigravity?.desktop,join(programs,'antigravity/Antigravity.exe')]);
-  return hideQaRuntimes([
-    {id:'dsh',name:'DeepSeek Harness',short:'DSH',protocol:'native-web',executable:dsh,desktop:dsh,installed:!!dsh,mode:'integrated',tools:'完整原生工具 / Skills / MCP / 子代理',description:'原生 Harness 会话与完整界面'},
-    {id:'kimi',name:'Kimi Code',short:'Kimi',protocol:'acp',executable:kimi,installed:!!kimi,mode:'integrated',tools:'完整原生工具 / Skills / MCP / 子代理',description:'ACP 双向会话与原生审批'},
-    {id:'codex',name:'Codex CLI',short:'Codex',protocol:'exec-json / app-server',executable:codex,installed:!!codex,mode:'integrated',tools:'完整原生工具 / Skills / MCP / 子代理',description:'原生 exec JSONL；第三方模型使用 app-server'},
-    {id:'antigravity',name:'Antigravity',short:'AG',protocol:'stream-json',executable:agy,desktop:agyDesktop,installed:!!(agy||agyDesktop),mode:agy?'integrated':'native',tools:'完整原生工具 / Skills / MCP / 子代理',description:'独立 Gemini 模型源 · 原生 CLI / 桌面'}
-  ].map(r=>({...r,status:r.installed?'ready':'missing',reason:r.installed?null:'尚未安装，请到设置 → 开发环境安装或配置',kind:r.id==='kimi'?(r.executable===managed?.executable?'managed':r.executable?.includes('node_modules/@moonshot-ai')||r.executable?.includes('node_modules\\@moonshot-ai')?'bundled':'system'):'system',version:r.id==='kimi'&&r.executable===managed?.executable?managed.version:null})),options.env??process.env,{isPackaged:options.isPackaged});
+  const paths={dsh,kimi,codex,antigravity:agy};
+  return hideQaRuntimes(descriptions.map(r=>{const executable=paths[r.id],desktop=r.id==='dsh'?dsh:r.id==='antigravity'?agyDesktop:null;return {...r,executable,desktop,installed:r.id==='antigravity'?!!(agy||agyDesktop):!!executable,mode:r.id==='antigravity'&&agy?'integrated':r.mode};}).map(r=>({...r,status:r.installed?'ready':'missing',reason:r.installed?null:'尚未安装，请到设置 → 开发环境安装或配置',kind:r.id==='kimi'?(managed?.executable&&r.executable===managed.executable?'managed':r.executable?.includes('node_modules/@moonshot-ai')||r.executable?.includes('node_modules\\@moonshot-ai')?'bundled':'system'):'system',version:r.id==='kimi'&&managed?.executable&&r.executable===managed.executable?managed.version:null,warning:r.id==='kimi'?managed?.warning??null:null})),options.env??process.env,{isPackaged:options.isPackaged});
 }
 export function nativeNode(){
   if(process.versions.electron){const bundled=join(process.resourcesPath,'runtime/node.exe');if(existsSync(bundled))return {command:bundled,args:[],env:{}};const dev=resolve(import.meta.dirname,'../../assets/runtime/node.exe');if(existsSync(dev))return {command:dev,args:[],env:{}};return {command:process.execPath,args:[],env:{ELECTRON_RUN_AS_NODE:'1'}};}

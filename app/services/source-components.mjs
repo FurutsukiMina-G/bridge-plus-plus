@@ -38,7 +38,7 @@ export class SourceComponents extends EventEmitter {
   for(const registry of NPM_REGISTRIES){signal.throwIfAborted();const staging=join(root,'.'+row.version+'-'+randomUUID()),backup=join(root,'.replaced-'+randomUUID());await mkdir(staging);let displaced=false,activated=false;
    try{
     this.emitJob(job,'downloading',`正在从 ${new URL(registry).host} 下载 ${row.name} 组件及官方运行时`,0,null);
-    const result=await this.installer({directory:staging,package:row.package,version:row.version,registry,node:this.node,npm,fetchImpl:this.fetchImpl,execute:this.execute,signal,scripts:true,qoderRuntime:row.id==='qoder',onProgress:(received,total)=>this.emitJob(job,'downloading',`正在下载 ${row.name} 组件及官方运行时`,received,total)});
+    const result=await this.installer({directory:staging,package:row.package,version:row.version,registry,node:this.node,npm,fetchImpl:this.fetchImpl,execute:this.execute,signal,scripts:true,qoderRuntime:row.id==='qoder',lock:resolve(this.root,row.lock),onProgress:(received,total)=>this.emitJob(job,'downloading',`正在下载 ${row.name} 组件及官方运行时`,received,total)});
     if(result.code!==0)throw new Error(`npm 退出码 ${result.code}：${environmentStderr(result.stderr||result.stdout)}`);
     this.emitJob(job,'verifying',`正在验证 ${row.name} 版本、完整性和入口加载`);await this.verify(staging,row.id,signal);signal.throwIfAborted();
     await writeFile(join(staging,'bridgepp-source.json'),JSON.stringify({verified:true,package:row.package,version:row.version}),{mode:0o600});signal.throwIfAborted();job.cancelable=false;this.emitJob(job,'installing','校验通过，正在启用组件');

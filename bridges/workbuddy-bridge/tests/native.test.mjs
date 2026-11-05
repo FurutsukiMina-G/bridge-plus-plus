@@ -19,8 +19,15 @@ const usage={input_tokens:5000,output_tokens:20,cache_read_input_tokens:4000,cac
 const zero={input_tokens:0,output_tokens:0};
 const promptText=async prompt=>typeof prompt==='string'?prompt:(await prompt[Symbol.asyncIterator]().next()).value?.message?.content;
 /** The message sequence the official runtime produced in real native probes. */
-async function* turn({text='',calls=[],id='native-session',servers=[{name:'host',status:'connected'}],stop='end_turn',streamed=false}){
+async function* turn({text='',calls=[],id='native-session',servers=[{name:'host',status:'connected'}],stop='end_turn',streamed=false,thinkingOnly=false}){
   yield {type:'system',subtype:'init',model,session_id:id,mcp_servers:servers,tools:servers.length?tools.map(t=>'mcp__host__'+t.function.name):[]};
+  if(thinkingOnly){
+    yield {type:'stream_event',event:{type:'content_block_delta',index:0,delta:{type:'thinking_delta',thinking:'synthetic private reasoning'}}};
+    yield {type:'stream_event',event:{type:'message_delta',delta:{stop_reason:stop},usage}};
+    yield {type:'assistant',message:{model,content:[{type:'thinking',thinking:'synthetic private reasoning'}],usage,stop_reason:stop}};
+    yield {type:'assistant',message:{content:[{type:'text',text:'Max turns (1) exceeded'}]}};
+    throw new Error('Max turns (1) exceeded');
+  }
   if(streamed){
     // Recorded parallel shape: every call reuses block index 2 and only the first reaches an assistant message.
     yield {type:'stream_event',event:{type:'message_start',message:{model,usage:zero}}};
@@ -249,4 +256,48 @@ test('tool_choice none declares no host functions and answers in text',async t=>
   const {transport,seen}=await fixture(t,[{text:'Plain answer.',servers:[]}]);
   const {result}=await collect(transport,{...body,tool_choice:'none'});
   assert.deepEqual(seen[0].options.mcpServers,{});assert.equal(result.choices[0].message.content,'Plain answer.');
+});
+
+test('a thinking-only Max turns stop gets one correction in the same SDK session and counts both attempts',async t=>{
+  const {transport,seen}=await fixture(t,[{thinkingOnly:true},{calls:[{id:'call_recovered',name:'read',input:{file_path:'a.ts'}}]}]);
+  const run=transport.run;transport.run=async function*(input){
+    if(!seen.length){await input.options.canUseTool('mcp__host__read',{});await input.options.hooks.PreToolUse[0].hooks[0]({tool_name:'mcp__host__read'});}
+    yield* run(input);
+  };
+  const {result,raw,metrics}=await collect(transport);
+  assert.equal(seen.length,2);assert.equal(seen[1].options.resume,'native-session');assert.equal(seen[1].options.model,model);
+  assert.match(seen[1].prompt,/上一条没有给出工具调用或答复，请给出下一步/);
+  assert.equal(result.choices[0].message.tool_calls[0].id,'call_recovered');assert.doesNotMatch(raw,/Max turns/);
+  assert.equal(metrics.attempts[0].errorCode,'missing_native_output');
+  assert.deepEqual(metrics.attempts[0].observation,{thinkingCharacters:27,textCharacters:0,stopReasons:['end_turn'],deniedToolCount:2,deniedTools:['mcp__host__read']});
+  assert.doesNotMatch(JSON.stringify(metrics.attempts[0].observation),/synthetic private/);
+  assert.equal(result.usage.prompt_tokens,10000);assert.equal(result.bridge_usage.correction_calls,1);
+  assert.equal(result.bridge_usage.accounting.attempts,2);assert.equal(result.bridge_usage.accounting.known_prompt_tokens,10000);
+});
+
+test('repeated empty native stops fail clearly after one correction and identical HTTP retries are free replays',async t=>{
+  const {transport,seen}=await fixture(t,[{thinkingOnly:true},{thinkingOnly:true}],{decisionRetries:8});
+  const {raw,metrics}=await collect(transport);
+  assert.equal(seen.length,2);assert.match(raw,/模型这一步没有给出工具调用或答复/);assert.match(raw,/"automatic_retry":false/);assert.doesNotMatch(raw,/Max turns|\[DONE\]/);
+  assert.equal(metrics.attempts.length,2);assert.equal(metrics.knownUsage.prompt_tokens,10000);
+  assert.deepEqual(metrics.attempts[0].observation.deniedTools,[]);assert.equal(metrics.attempts[0].observation.deniedToolCount,0);
+  const event=raw.split('\n').filter(s=>s.startsWith('{')).map(s=>JSON.parse(s)).find(e=>e.bridge_usage);
+  assert.equal(event.bridge_usage.correction_calls,1);assert.equal(event.bridge_usage.accounting.attempts,2);
+  const replay=await collect(transport);assert.equal(seen.length,2);assert.match(replay.raw,/local-rejection-replay/);
+});
+
+test('thinking without calls cannot hide transport, authentication, mixed-stop or unexpected turn-limit errors',async t=>{
+  const failures=[new Error('Transport closed'),new Error('HTTP 401 authentication rejected'),new Error('Max turns (2) exceeded'),Object.assign(new Error('Max turns (1) exceeded'),{errors:['Max turns (1) exceeded','Transport closed']})];
+  for(const failure of failures){
+    const {transport,seen}=await fixture(t,[{thinkingOnly:true}]);const run=transport.run;
+    transport.run=async function*(input){try{yield* run(input);}catch{throw failure;}};
+    const {raw}=await collect(transport);assert.equal(seen.length,1);assert.doesNotMatch(raw,/missing_native_output|llm\/retry-started|\[DONE\]/);
+  }
+});
+
+test('empty native recovery honors zero retries and refuses output-budget stops',async t=>{
+  for(const [cfg,step,code] of [[{decisionRetries:0},{thinkingOnly:true},'missing_native_output'],[{}, {thinkingOnly:true,stop:'max_tokens'},'output_budget']]){
+    const {transport,seen}=await fixture(t,[step],cfg);const {raw}=await collect(transport);
+    assert.equal(seen.length,1);assert.match(raw,new RegExp(code));assert.doesNotMatch(raw,/Max turns|\[DONE\]/);
+  }
 });

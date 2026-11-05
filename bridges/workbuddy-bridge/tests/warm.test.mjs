@@ -27,7 +27,7 @@ async function fixture(t,steps,cfg={}){
   const run=({prompt,options})=>{
     const entry={options,prestarted:typeof prompt!=='string',connected:0,cleaned:0,started:false};const step=steps[runs.length];runs.push(entry);
     const query=(async function*(){
-      entry.prompt=typeof prompt==='string'?prompt:(await prompt[Symbol.asyncIterator]().next()).value?.message?.content;entry.started=true;yield* turn(step);
+      entry.prompt=typeof prompt==='string'?prompt:(await prompt[Symbol.asyncIterator]().next()).value?.message?.content;entry.started=true;if(step.denied)await options.canUseTool(step.denied,{});yield* turn(step);
     })();
     return Object.assign(query,{connect:async()=>{entry.connected++;},cleanup:()=>{entry.cleaned++;}});
   };
@@ -42,13 +42,14 @@ async function collect(transport,request){
 const next=(first,extra={})=>({...body,...extra,messages:[...body.messages,first.result.choices[0].message,{role:'tool',tool_call_id:'call_00_W',content:'HOST_RESULT'}]});
 const call={calls:[{id:'call_00_W',input:{file_path:'a.ts'}}]};
 test('the next turn runs on a runtime that booted while the host executed the calls',async t=>{
-  const {transport,runs}=await fixture(t,[call,{text:'a.ts 已检查完毕。'}]);
+  const {transport,runs}=await fixture(t,[call,{text:'a.ts 已检查完毕。',denied:'mcp__host__read'}]);
   const first=await collect(transport,body);await sleep(450);
   assert.equal(runs.length,2);assert.equal(runs[1].prestarted,true);assert.equal(runs[1].connected,1);assert.equal(runs[1].started,false);
   assert.equal(runs[1].options.resume,'warm-session');assert.equal(runs[1].options.mcpServers.host.type,'sdk');
   const second=await collect(transport,next(first));
   assert.equal(runs.length,2);assert.equal(second.metrics.warmStart,true);assert.equal(second.result.choices[0].message.content,'a.ts 已检查完毕。');
   assert.match(runs[1].prompt,/HOST_RESULT/);assert.equal(runs[1].cleaned,0);assert.equal(transport.warm.stats.used,1);assert.equal(second.metrics.attempts[0].warm,true);
+  assert.deepEqual(second.metrics.attempts[0].observation.deniedTools,['mcp__host__read']);
 });
 test('a turn whose options changed discards the prestarted runtime and starts its own',async t=>{
   const {transport,runs}=await fixture(t,[call,{text:'unused'},{text:'fresh runtime answer'}]);

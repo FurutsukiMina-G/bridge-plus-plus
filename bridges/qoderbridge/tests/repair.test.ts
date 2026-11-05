@@ -37,15 +37,14 @@ const closedCallsEnvelope = (array: string) => '<｜｜DSML｜｜ calls><｜｜D
   '<｜｜DSML｜｜ parameter name="calls" string="false">' + array +
   '</｜｜DSML｜｜ parameter></｜｜DSML｜｜ invoke></｜｜DSML｜｜ calls>';
 
-test('a fully closed DSML envelope can delimit complete edit calls missing only the final array close', () => {
+test('a fully closed DSML envelope cannot repair an unclosed calls array', () => {
   const calls = [
     { name: 'edit', arguments: { file_path: 'first.cs', old_string: '[DllImport("native.dll")]\nvoid Before();', new_string: '[DllImport("native.dll")]\nvoid After();' } },
     { name: 'edit', arguments: { file_path: 'second.cs', old_string: '    int count;\n', new_string: '    /// <summary>计数 [] {}</summary>\n    int count;\n' } },
   ];
   const repairs: DecisionRepair[] = [];
-  assert.deepEqual(parseDecision(closedCallsEnvelope(JSON.stringify(calls).slice(0, -1)), request, repair => repairs.push(repair)),
-    { kind: 'tool_calls', calls });
-  assert.deepEqual(repairs, [{ kind: 'decision_wrapper_close', tool: 'edit', parameter: 'calls' }]);
+  assert.throws(()=>parseDecision(closedCallsEnvelope(JSON.stringify(calls).slice(0, -1)), request, repair => repairs.push(repair)));
+  assert.deepEqual(repairs, []);
 });
 
 test('missing array-close recovery needs the entire explicit envelope and never completes arguments or drops data', () => {
@@ -62,11 +61,11 @@ test('missing array-close recovery needs the entire explicit envelope and never 
   }
 });
 
-test('recovered array tails still enforce every supplied tool schema and choice', () => {
+test('closed arrays still enforce every supplied tool schema and choice', () => {
   const source = closedCallsEnvelope(JSON.stringify([{ name: 'grep', arguments: { pattern: 'valid' } },
-    { name: 'edit', arguments: { file_path: 'file.cs' } }]).slice(0, -1));
+    { name: 'edit', arguments: { file_path: 'file.cs' } }]));
   assert.throws(() => parseDecision(source, request), /old_string|schema/);
-  const valid = closedCallsEnvelope(JSON.stringify([{ name: 'grep', arguments: { pattern: 'valid' } }]).slice(0, -1));
+  const valid = closedCallsEnvelope(JSON.stringify([{ name: 'grep', arguments: { pattern: 'valid' } }]));
   assert.throws(() => parseDecision(valid, ChatRequest.parse({ ...request, tool_choice: 'none' })), /forbids/);
   assert.throws(() => parseDecision(valid.replace('"grep"', '"unknown"'), request), /Unknown/);
   assert.throws(() => parseDecision(valid, ChatRequest.parse({ ...request,
@@ -640,15 +639,16 @@ test('duplicated tail recovery rejects extra data, incomplete arguments, invalid
   assert.throws(() => parseDecision(source.replace('"name":"pwsh"', '"name":"unknown"'), pwshRequest), /Unknown/);
 });
 
-test('missing final array and decision closes recover only complete call objects with unchanged arguments', () => {
+test('only a missing decision close recovers; an unclosed final array is rejected', () => {
   const first = { name: 'grep', arguments: { pattern: 'first' } };
   const second = { name: 'grep', arguments: { pattern: 'second' } };
   const full = JSON.stringify({ kind: 'tool_calls', calls: [first, second] });
-  for (const missing of [full.slice(0, -2), full.slice(0, -1)]) {
+  for (const missing of [full.slice(0, -1)]) {
     const repairs: DecisionRepair[] = [];
     assert.deepEqual(parseDecision(missing, request, repair => repairs.push(repair)), { kind: 'tool_calls', calls: [first, second] });
-    assert.deepEqual(repairs, [{ kind: 'decision_wrapper_close', tool: 'grep', parameter: 'calls' }]);
+    assert.deepEqual(repairs, [{ kind: 'missing_decision_close', tool: 'wrapper', parameter: 'calls' }]);
   }
+  assert.throws(() => parseDecision(full.slice(0, -2), request));
   assert.throws(() => parseDecision(full.slice(0, -3), request));
   assert.throws(() => parseDecision(full.slice(0, -5), request));
   assert.throws(() => parseDecision(full.slice(0, -2) + ',', request));
@@ -656,9 +656,9 @@ test('missing final array and decision closes recover only complete call objects
 });
 
 test('decision tail repair still validates every call and respects forbidden tools', () => {
-  const source = '{"kind":"tool_calls","calls":[{"name":"grep","arguments":{"pattern":"valid"}},{"name":"edit","arguments":{}}';
+  const source = '{"kind":"tool_calls","calls":[{"name":"grep","arguments":{"pattern":"valid"}},{"name":"edit","arguments":{}}]';
   assert.throws(() => parseDecision(source, request), /file_path|schema/);
-  const valid = '{"kind":"tool_calls","calls":[{"name":"grep","arguments":{"pattern":"valid"}}';
+  const valid = '{"kind":"tool_calls","calls":[{"name":"grep","arguments":{"pattern":"valid"}}]';
   assert.throws(() => parseDecision(valid, ChatRequest.parse({ ...request, tool_choice: 'none' })), /forbids/);
   assert.throws(() => parseDecision(valid.replace('"grep"', '"unknown"'), request), /Unknown/);
 });

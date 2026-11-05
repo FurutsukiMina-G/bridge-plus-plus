@@ -20,10 +20,11 @@ const permissionWarnings={dsh:{
 }};
 export const permissionWarning=(runtimeId,mode)=>permissionWarnings[runtimeId]?.[mode]??null;
 export const statusOf=r=>r?.status??(r?.installed?'ready':'missing');
-const statusNames={ready:'可用',missing:'未安装','needs-setup':'需要设置',error:'检测失败'};
-/** Why a runtime cannot be used, in the user's words. */
+const statusNames={ready:'可用',missing:'未安装','needs-setup':'需要设置',error:'检测失败',checking:'正在检测'};
+/** Why a runtime cannot be used, in the user's words. Until detection ends, what the last run saw says nothing about now. */
 export function unusableReason(r){
   if(!r)return'未选择运行环境';
+  if(r.checking&&!usable(r))return'正在检测这个运行环境';
   if(r.reason)return r.reason;
   return{missing:`${r.name} 尚未安装`,'needs-setup':`${r.name} 还需要完成设置`,error:`${r.name} 检测失败`}[statusOf(r)]??'';
 }
@@ -79,27 +80,27 @@ function environmentActions(env,r,{canOpenNative}){
 }
 /** One card on Settings › 运行环境; `env` is the backend's environment entry, when it has one. */
 export function environmentCardHtml(r,env,{permissions='',canOpenNative=false}={}){
-  const status=statusOf(r),busy=running(env?.job);
-  const label=busy?`正在${jobVerbs[env.job.action]??'处理'}`:statusNames[status]??status;
-  const reason=status!=='ready'?unusableReason(r):'';
-  const note=status!=='ready'&&networkNotes[r.id]?`<div class="env-note">${icon('info')}<span>${networkNotes[r.id]}</span></div>`:'';
-  return`<article class="runtime-card env-${esc(status)}"><div class="card-top">${tile(r)}<span class="card-status ${busy?'busy':status==='ready'?'ready':status==='missing'?'none':status==='error'?'error':'warn'}">${busy?'<span class="spinner"></span>':'<span class="status-dot"></span>'}${esc(label)}</span></div>
+  const status=statusOf(r),busy=running(env?.job),scanning=!!r.checking&&!busy;
+  const label=busy?`正在${jobVerbs[env.job.action]??'处理'}`:scanning?statusNames.checking:statusNames[status]??status;
+  const reason=status!=='ready'&&!scanning?unusableReason(r):'';
+  const note=status!=='ready'&&!scanning&&networkNotes[r.id]?`<div class="env-note">${icon('info')}<span>${networkNotes[r.id]}</span></div>`:'';
+  return`<article class="runtime-card env-${esc(status)}"><div class="card-top">${tile(r)}<span class="card-status ${busy||scanning?'busy':status==='ready'?'ready':status==='missing'?'none':status==='error'?'error':'warn'}">${busy||scanning?'<span class="spinner"></span>':'<span class="status-dot"></span>'}${esc(label)}</span></div>
     <h3>${esc(r.name)}<span class="proto">${esc(r.protocol)}</span></h3><p>${esc(r.description)}</p>
-    ${versionLine(env,r)}${reason?`<div class="env-reason">${icon('alert')}<span>${esc(reason)}</span></div>`:''}${note}${jobHtml(env?.job)}
+    ${versionLine(env,r)}${reason?`<div class="env-reason">${icon('alert')}<span>${esc(reason)}</span></div>`:''}${r.warning?`<div class="env-reason">${icon('alert')}<span>${esc(r.warning)}</span></div>`:''}${note}${jobHtml(env?.job)}
     ${usable(r)?`<div class="features">${esc(r.tools)}</div>${permissions}`:''}
     ${r.executable||r.desktop?`<div class="runtime-path mono" title="${esc(r.executable??r.desktop)}">${esc(r.executable??r.desktop)}</div>`:''}
-    ${environmentActions(env,r,{canOpenNative})}</article>`;
+    ${scanning?'':environmentActions(env,r,{canOpenNative})}</article>`;
 }
 
 /* ---------- model-source interfaces for other agents ---------- */
-const serviceStates={running:'运行中',stopped:'已停止',starting:'正在启动',error:'出错'};
+const serviceStates={running:'运行中',stopped:'已停止',starting:'正在启动',error:'出错',checking:'正在核实',unavailable:'不可用',crashed:'已异常退出'};
 const sourceLogos={qoder:'Q',workbuddy:'W'};
 const profileNames={dsh:'DeepSeek Harness',kimi:'Kimi Code',codex:'Codex CLI'};
 function serviceStatus(s){
   const busyPort=s.error?.code==='port_in_use'||!!s.portOwner;
-  const cls=s.status==='running'?'ready':s.status==='starting'?'busy':s.status==='error'||busyPort?'error':'none';
+  const pending=['starting','checking'].includes(s.status),cls=s.status==='running'?'ready':pending?'busy':['error','unavailable','crashed'].includes(s.status)||busyPort?'error':'none';
   const text=busyPort&&s.status!=='running'?'端口被占用':serviceStates[s.status]??s.status??'未知';
-  return`<span class="card-status ${cls}">${s.status==='starting'?'<span class="spinner"></span>':'<span class="status-dot"></span>'}${esc(text)}${s.status==='running'&&s.pid?`<span class="muted"> · pid ${esc(s.pid)}</span>`:''}</span>`;
+  return`<span class="card-status ${cls}">${pending?'<span class="spinner"></span>':'<span class="status-dot"></span>'}${esc(text)}${s.status==='running'&&s.pid?`<span class="muted"> · pid ${esc(s.pid)}</span>`:''}</span>`;
 }
 function copyRow(label,value,{id,mono=true,extra=''}){
   return`<div class="svc-row"><span class="svc-label">${label}</span><code class="svc-value${mono?' mono':''}" ${id?`id="${id}"`:''} title="${esc(value)}">${esc(value)}</code>${extra}</div>`;
@@ -119,7 +120,7 @@ function connectionsOf(s){
     // What the user needs to find it again: DSH's provider, Kimi's config file, the Codex profile to launch.
     const where=target==='codex'&&c.profile?`<span class="mono">codex --profile ${esc(c.profile)}</span>`:target==='kimi'&&c.path?file(c.path):c.providerId?`provider <span class="mono">${esc(c.providerId)}</span>`:c.path?file(c.path):'';
     const env=[c.requiredEnv].flat().filter(Boolean);
-    return`<div class="svc-dsh${env.length?' pending':''}">${icon(env.length?'alert':'check')}<span>${env.length?'差一步接入':'已接入'} ${esc(profileNames[target]??target)}${where?` · ${where}`:''}${env.length?` · 还需要设置环境变量 <span class="mono">${esc(env.join('、'))}</span>`:c.connectedAt?` · ${ago(c.connectedAt)}`:''}</span></div>`;
+    return`<div class="svc-dsh${env.length?' pending':''}">${icon(env.length?'alert':'check')}<span>${env.length?'差一步接入':'已接入'} ${esc(profileNames[target]??target)}${where?` · ${where}`:''}${env.length?` · 还需要设置环境变量 <span class="mono">${esc(env.join('、'))}</span>`:c.connectedAt?` · ${ago(c.connectedAt)}`:''}</span><button class="link-btn svc-disconnect" data-svc-disconnect="${esc(s.id)}|${esc(target)}" title="从 ${esc(profileNames[target]??target)} 的配置里移除这个接口">断开</button></div>`;
   }).join('');
 }
 /** The last failed request, in the upstream's own words. A day-old failure says nothing about now. */
@@ -131,6 +132,11 @@ function serviceFailure(e,now=Date.now()){
 /** One interface card on Settings › 对外接口. `view` holds what the user opened on this card. */
 export function serviceCardHtml(s,view={}){
   const id=esc(s.id),runningNow=s.status==='running',starting=s.status==='starting';
+  const top=`<div class="card-top"><span class="source-logo ${esc(s.source)}">${esc(sourceLogos[s.source]??'?')}</span>${serviceStatus(s)}</div>
+    <h3>${esc(s.name)}<span class="proto">${esc(s.sourceName??s.source)}</span></h3>`;
+  if(s.status==='checking')return`<article class="service-card" data-service="${id}">${top}<p class="svc-pending">正在核实这个接口的状态…</p></article>`;
+  // The rest of the card needs the service folder, which is exactly what failed.
+  if(s.status==='unavailable')return`<article class="service-card" data-service="${id}">${top}<div class="error-box">${esc(s.error?.message??'这个接口暂时不能使用')}</div><div class="card-actions"><button class="btn sm primary" data-svc-action="${id}|retry">${icon('refresh')}重试</button></div></article>`;
   const profiles=(s.profiles?.length?s.profiles:Object.keys(profileNames).map(p=>({id:p})));
   // "接入到" picks the agent this interface is registered in; it is also the contract plain /v1 answers with.
   const target=profiles.find(p=>p.id===s.defaultProfile)??profiles[0],targetName=profileNames[target?.id]??target?.name??target?.id;
@@ -138,10 +144,10 @@ export function serviceCardHtml(s,view={}){
   const key=view.key?`<code class="svc-value mono revealed">${esc(view.key)}</code>`:`<code class="svc-value mono">${esc(s.keyPreview??'未生成')}</code>`;
   const owner=s.portOwner?`<div class="error-box">端口 ${esc(s.port)} 已被 ${esc(s.portOwner.name??'其他程序')}（pid ${esc(s.portOwner.pid??'?')}）占用${s.portOwner.command?`：<span class="mono">${esc(s.portOwner.command)}</span>`:''}。请先停止占用它的程序，或换一个端口。</div>`:s.error?.message?`<div class="error-box">${esc(s.error.message)}</div>`:'';
   const autostart=s.autostart??{};
+  const stale=s.stale?`<div class="env-note">${icon('info')}<span>现在运行的是 ${esc(s.stale.running??'旧版本')}，这个接口空闲后会自动换成 ${esc(s.stale.current)}，也可以现在重启。</span></div>`:'';
   const requests=s.requests?.total?`<span class="muted">已处理 ${esc(s.requests.total)} 个请求${s.requests.failed?`，失败 ${esc(s.requests.failed)} 个`:''}${s.requests.lastAt?` · 最近 ${ago(s.requests.lastAt)}`:''}</span>`:'<span class="muted">还没有请求</span>';
   const models=s.models??{};
-  return`<article class="service-card" data-service="${id}"><div class="card-top"><span class="source-logo ${esc(s.source)}">${esc(sourceLogos[s.source]??'?')}</span>${serviceStatus(s)}</div>
-    <h3>${esc(s.name)}<span class="proto">${esc(s.sourceName??s.source)}</span></h3>
+  return`<article class="service-card" data-service="${id}">${top}
     <div class="svc-rows">
       <div class="svc-row"><span class="svc-label">接入到</span><select class="svc-select" data-svc-profile="${id}" title="底下的「接入」按钮登记到这个 Agent；不带前缀的 /v1 也按它的工具约定回答">${profiles.map(p=>`<option value="${esc(p.id)}" ${p.id===target?.id?'selected':''}>${esc(profileNames[p.id]??p.name??p.id)}</option>`).join('')}</select></div>
       ${copyRow('地址',address,{extra:`<button class="icon-btn xs" data-copy-text="${esc(address)}" title="复制地址">${icon('copy')}</button>`})}
@@ -149,11 +155,11 @@ export function serviceCardHtml(s,view={}){
       <div class="svc-row"><span class="svc-label">端口</span><input class="svc-port" type="number" min="1024" max="65535" value="${esc(s.port??'')}" data-svc-port="${id}"><button class="btn sm" data-svc-apply-port="${id}">应用</button></div>
       <label class="svc-row svc-toggle"><span class="svc-label">开机启动</span><input type="checkbox" data-svc-autostart="${id}" ${autostart.enabled?'checked':''}><span>登录 Windows 时在后台启动</span>${autostart.enabled&&autostart.valid===false?`<span class="svc-issue">${icon('alert')}${esc(autostart.issue??'开机任务需要修复')}</span>`:''}</label>
     </div>
-    ${owner}
+    ${owner}${stale}
     <div class="card-foot"><span><b>${esc(models.count??'—')}</b> 个模型${models.refreshedAt?` · ${ago(models.refreshedAt)}刷新`:''}</span>${requests}</div>
     ${models.error?`<div class="error-box">${esc(models.error)}</div>`:''}
     ${serviceFailure(s.requests?.lastError)}
-    <div class="card-actions">${runningNow?`<button class="btn sm" data-svc-action="${id}|restart">${icon('refresh')}重启</button><button class="btn sm danger" data-svc-action="${id}|stop">${icon('stop')}停止</button>`:`<button class="btn sm primary" data-svc-action="${id}|start" ${starting?'disabled':''}>${icon('play')}启动</button>`}<button class="btn sm" data-svc-models="${id}">${icon('list')}${view.models?'收起模型':'查看模型'}</button><button class="btn sm" data-svc-refresh="${id}">${icon('refresh')}刷新模型</button><button class="btn sm${runningNow?' primary':''}" data-svc-connect="${id}|${esc(target?.id??'dsh')}" ${runningNow&&!view.connecting?'':'disabled'} title="${runningNow?`把这个接口登记到 ${esc(targetName)}`:'先启动接口'}">${view.connecting?`<span class="spinner"></span>接入中…`:`${icon('plug')}接入 ${esc(targetName)}`}</button></div>
+    <div class="card-actions">${runningNow?`<button class="btn sm" data-svc-action="${id}|restart">${icon('refresh')}重启</button><button class="btn sm danger" data-svc-action="${id}|stop">${icon('stop')}停止</button>`:`<button class="btn sm primary" data-svc-action="${id}|start" ${starting?'disabled':''}>${icon('play')}${s.status==='crashed'?'重新启动':'启动'}</button>`}<button class="btn sm" data-svc-models="${id}">${icon('list')}${view.models?'收起模型':'查看模型'}</button><button class="btn sm" data-svc-refresh="${id}">${icon('refresh')}刷新模型</button><button class="btn sm${runningNow?' primary':''}" data-svc-connect="${id}|${esc(target?.id??'dsh')}" ${runningNow&&!view.connecting?'':'disabled'} title="${runningNow?`把这个接口登记到 ${esc(targetName)}`:'先启动接口'}">${view.connecting?`<span class="spinner"></span>接入中…`:`${icon('plug')}接入 ${esc(targetName)}`}</button></div>
     ${connectionsOf(s)}
     ${view.models?serviceModelsHtml(view.list):''}</article>`;
 }
@@ -170,11 +176,12 @@ function guideEnvRow(r,env){
   const status=statusOf(r),busy=running(env?.job),a=env?.actions??{};
   let side;
   if(busy)side=`<span class="guide-state"><span class="spinner"></span>${env.job.state==='downloading'&&env.job.total?`${Math.round(100*(env.job.received??0)/env.job.total)}%`:'处理中'}</span>`;
+  else if(r.checking&&status!=='ready')side='<span class="guide-state"><span class="spinner"></span>检测中</span>';
   else if(status==='ready')side=`<span class="guide-state ok">${icon('check')}${esc(env?.installed?.version?`已就绪 · ${env.installed.version}`:'已就绪')}</span>`;
   else if(a.install)side=`<button class="btn sm primary" data-env-install="${esc(r.id)}">${icon('download')}下载安装</button>`;
   else if(env?.page)side=`<button class="btn sm" data-env-page="${esc(r.id)}">${icon('external')}官方页面</button>`;
   else side=`<button class="btn sm" data-configure-runtime="${esc(r.id)}">指定路径</button>`;
-  const sub=status==='ready'?r.description:busy?'':unusableReason(r)+(networkNotes[r.id]?` · ${networkNotes[r.id]}`:'');
+  const sub=status==='ready'?r.description:busy?'':r.checking?r.description:unusableReason(r)+(networkNotes[r.id]?` · ${networkNotes[r.id]}`:'');
   return`<div class="guide-row">${tile(r)}<span class="guide-main"><span class="guide-name">${esc(r.name)}${recommended.has(r.id)?'<span class="mi-tag">推荐</span>':''}</span><span class="guide-sub">${esc(sub)}</span>${env?.job?.state==='failed'?`<span class="guide-error">${esc(env.job.message??'失败')}</span>`:''}</span>${side}</div>`;
 }
 const sourceTitles={qoder:'Qoder CN',workbuddy:'WorkBuddy',antigravity:'Antigravity · Gemini'};
@@ -210,7 +217,7 @@ export function sourceCardHtml(id,description,c,component){
 /** The welcome guide: at least one environment, a model source and a folder. */
 export function onboardingHtml(snap){
   const envs=new Map((snap.environments??[]).map(e=>[e.id,e]));
-  const ready=snap.runtimes.filter(usable).length;
+  const ready=snap.runtimes.filter(usable).length,scanning=snap.runtimes.some(r=>r.checking);
   const order=[...snap.runtimes].sort((a,b)=>(recommended.has(b.id)?1:0)-(recommended.has(a.id)?1:0));
   const sources=['qoder','workbuddy'].map(id=>guideSourceRow(id,snap)).join('');
   const folders=snap.projects.length?`<div class="guide-row">${icon('folder','guide-icon')}<span class="guide-main"><span class="guide-name">工作文件夹</span><span class="guide-sub">已打开 ${snap.projects.length} 个</span></span><span class="guide-state ok">${icon('check')}已完成</span></div>`:`<div class="guide-row">${icon('folder','guide-icon')}<span class="guide-main"><span class="guide-name">工作文件夹</span><span class="guide-sub">Agent 只在你打开的文件夹里工作</span></span><button class="btn sm" id="guide-add-project">${icon('folderPlus')}打开文件夹</button></div>`;
@@ -218,5 +225,5 @@ export function onboardingHtml(snap){
     <h3><span class="guide-step">1</span>开发环境${ready?`<span class="guide-count">${ready} 个可用</span>`:''}</h3><div class="guide-list">${order.map(r=>guideEnvRow(r,envs.get(r.id))).join('')}</div>
     <h3><span class="guide-step">2</span>模型源</h3><div class="guide-list">${sources}</div>
     <h3><span class="guide-step">3</span>工作文件夹</h3><div class="guide-list">${folders}</div>
-    <div class="modal-actions"><button id="guide-later" class="btn">稍后</button><button id="guide-done" class="btn primary" ${ready?'':'disabled'} title="${ready?'':'至少需要一个可用的开发环境'}">开始使用</button></div></div>`;
+    <div class="modal-actions"><button id="guide-later" class="btn">稍后</button><button id="guide-done" class="btn primary" ${ready?'':'disabled'} title="${ready?'':scanning?'正在检测开发环境':'至少需要一个可用的开发环境'}">开始使用</button></div></div>`;
 }

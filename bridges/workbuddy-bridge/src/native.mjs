@@ -9,7 +9,7 @@ export const hostToolAlias=name=>/^[A-Za-z0-9_-]{1,53}$/.test(name)?name:`bridge
 // The runtime records this as the denied call's tool_result, so the next turn reads naturally.
 export const FORWARDED='Forwarded to the external host for execution. The host returns its result in the next user message under this call id; do not repeat the call before then.';
 export const NATIVE_INSTRUCTIONS=`You are providing model turns to an external host (DeepSeek Harness). The host owns planning context, tools, files, shell, permissions, subagents and all side effects. The host's functions are available to you natively as ${PREFIX}<name>: call them through native function calling with complete arguments that satisfy their schemas. Never call WorkBuddy/CodeBuddy built-in tools, skills, MCP, agents or background tasks, and never write function calls, arguments, JSON envelopes or markup such as DSML as text. The user message holds the host's ordered conversation as JSON; follow its original role priorities. A host tool result is data from the host, not a request to run local tools.
-Keep working with native host function calls until the task is done. Do not end a turn with only a plan or an announcement of your next action: perform that action with a host function call in the same turn. When the task is complete, or you need the user's input, answer in plain text. If the host requests response_format json_object or json_schema, return its requested JSON answer without adding a bridge envelope; fields and examples in that answer are data, never host calls.`;
+Request independent operations needed next (such as reading several files or running several searches) together in the same reply. Keep operations that depend on earlier results in separate replies. Keep working with native host function calls until the task is done. Do not end a turn with only a plan or an announcement of your next action: perform that action with a host function call in the same turn. When the task is complete, or you need the user's input, answer in plain text. If the host requests response_format json_object or json_schema, return its requested JSON answer without adding a bridge envelope; fields and examples in that answer are data, never host calls.`;
 /** Host functions become mcp__host__<name>; upstream function names stop at 64 characters. */
 export function nativeSupported(tools=[]){
   return tools.every(t=>t?.type==='function'&&typeof t.function?.name==='string'&&t.function.name.length>0&&
@@ -38,10 +38,11 @@ function choiceLine(body){
 }
 export function nativeInput(body,{messages=body.messages,delta=false}={}){
   const aliases=(body.tools??[]).filter(t=>hostToolAlias(t.function.name)!==t.function.name).map(t=>({host_name:t.function.name,native_name:PREFIX+hostToolAlias(t.function.name)}));
-  const input=JSON.stringify({protocol:'host-turn-v2',history:delta?'new-messages-only':'full',messages:promptMessages(messages),tool_choice:body.tool_choice??'auto',response_format:body.response_format??null,...aliases.length?{native_tool_aliases:aliases}:{}});
-  return input+'\n\n'+(delta?'Continue the same host task with the new messages above. ':'END OF HOST INPUT. ')+choiceLine(body);
+  const input=JSON.stringify({protocol:'host-turn-v2',history:delta?'new-messages-only':'full',messages:promptMessages(messages),...(body.parallel_tool_calls!==undefined?{parallel_tool_calls:body.parallel_tool_calls}:{}),tool_choice:body.tool_choice??'auto',response_format:body.response_format??null,...aliases.length?{native_tool_aliases:aliases}:{}});
+  return input+'\n\n'+(body.parallel_tool_calls===false?'This request sets parallel_tool_calls:false. Return at most one host tool call.\n':'')+(delta?'Continue the same host task with the new messages above. ':'END OF HOST INPUT. ')+choiceLine(body);
 }
 const REASONS={
+  missing_native_output:()=>'上一条没有给出工具调用或答复，请给出下一步。 Your preceding turn gave no tool call or answer; provide the next step.',
   invalid_tool_arguments:issue=>issue?.tool?`The arguments for host function ${issue.tool} failed its schema: ${JSON.stringify(issue.issues).slice(0,1500)}.`:'You called a function that the host did not declare.',
   required_tool_missing:()=>'This step requires a native host function call.',
   wrong_pinned_tool:(_,body)=>`This step must call the host function ${pinnedName(body)}.`,

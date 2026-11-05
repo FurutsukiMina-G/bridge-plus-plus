@@ -30,7 +30,8 @@ export class Store extends EventEmitter {
         if(raw!==null)await writeFile(join(this.root,'workspace.displaced-'+randomUUID()+'.json'),raw,{flag:'wx',mode:0o600});
         value=backup;raw=backupRaw;this.recovery={source:'backup',reason:emptyIndex?'empty_index_with_backup':failure?.code==='ENOENT'?'missing_index':'invalid_index'};
       }else if(emptyWithHistory||failure&&(journals.length||failure.code!=='ENOENT'||backupError?.code!=='ENOENT')){
-        throw new Error('Cannot load saved workspace: '+(emptyWithHistory||journals.length?'会话索引缺失或为空，但原始会话日志仍存在；未覆盖数据，请恢复索引备份。':(failure??backupError)?.message??'Invalid workspace backup'));
+        const detail=emptyWithHistory?`会话索引为空，但原始会话日志仍存在；未覆盖数据。索引路径：${this.file}。`:failure?.code==='ENOENT'?`会话索引缺失：${this.file}；原始会话日志或备份仍需保留。`:`会话索引 ${this.file} 已损坏或无法解析，原文件保留在该路径，未覆盖数据。`;
+        throw new Error(detail+`请从备份 ${this.backupFile} 恢复索引；操作前请先复制现有文件。`);
       }
     }
     if(value){this.state=value;this.persisted=raw;}

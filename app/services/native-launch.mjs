@@ -1,7 +1,7 @@
 import {mkdir,writeFile,readdir,stat,rm} from 'node:fs/promises';
 import {join} from 'node:path';
 import {randomUUID} from 'node:crypto';
-export const quotePowerShell=value=>"'"+String(value).replaceAll("'","''")+"'";
+export const quotePowerShell=value=>"'"+String(value).replace(/['\u2018-\u201B]/g,'$&$&')+"'";
 export async function writeNativeLauncher(root,{projectPath,setup='',executable,args=[]}){
   const dir=join(root,'native-launch');await mkdir(dir,{recursive:true});const file=join(dir,randomUUID()+'.ps1');
   // PowerShell parses the script before executing it. Remove the credential-bearing file

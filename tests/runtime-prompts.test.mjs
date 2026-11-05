@@ -8,6 +8,7 @@ import {Gateway} from '../app/services/gateway.mjs';
 import {Sessions} from '../app/services/sessions.mjs';
 import {Store} from '../app/core/store.mjs';
 import {normalizeWorkbuddy,normalizeAntigravity,variantFor} from '../app/core/catalog.mjs';
+import {ResponseProjection} from '../app/services/responses.mjs';
 
 const credential={accessToken:'local-fixture',uid:'fixture',domain:'www.workbuddy.cn'};
 const names={dsh:'DeepSeek Harness',kimi:'Kimi Code',codex:'Codex CLI'};
@@ -17,6 +18,8 @@ test('each runtime selects its own system contract and preserves provider-specif
   for(const [runtimeId,name]of Object.entries(names)){
     const prompts=bridgePromptConfig(runtimeId);
     for(const text of [prompts.qoder.system,...Object.values(prompts.qoder.decisionContract),...Object.values(prompts.workbuddy.hostPrompts)]){
+      assert.doesNotMatch(text,/Honor parallel_tool_calls=false|Return at most one host tool call/);
+      assert.match(text,/Request independent operations/);
       assert.ok(text.includes(name));
       for(const other of Object.values(names).filter(n=>n!==name))assert.ok(!text.includes(other),`${runtimeId} leaked ${other}`);
     }
@@ -33,6 +36,32 @@ test('each runtime selects its own system contract and preserves provider-specif
   assert.match(bridgePromptConfig('codex').qoder.system,/arguments.input/);
   assert.ok(runtimeProfile('antigravity').nativeOnly);
   for(const id of [undefined,'unknown','__proto__','antigravity'])assert.throws(()=>bridgePromptConfig(id));
+});
+
+test('all selected WorkBuddy hosts return complete native and JSON batches and enforce explicit serial requests',async t=>{
+  const calls=[{name:'Read',arguments:{path:'a'}},{name:'Read',arguments:{path:'b'}}];
+  for(const runtimeId of Object.keys(names))for(const native of [false,true]){
+    const seen=[],config=bridgePromptConfig(runtimeId).workbuddy;
+    const transport=new SdkTransport({runtime:await directory(),cliPath:process.execPath,toolMode:native?'native':'json',decisionRetries:0,...config},{get:async()=>credential},{run:async function*({prompt}){
+      seen.push(prompt);
+      yield {type:'system',subtype:'init',model:'fixture',session_id:'batch-session',mcp_servers:native?[{name:'host',status:'connected'}]:[]};
+      yield {type:'assistant',message:{model:'fixture',content:native?calls.map((c,i)=>({type:'tool_use',id:'call_'+i,name:'mcp__host__'+c.name,input:c.arguments})):[{type:'text',text:JSON.stringify({action:'tool_calls',calls})}]}};
+      yield {type:'result',subtype:'success',is_error:false};
+    }});
+    t.after(()=>transport.close());
+    const body={model:'fixture',max_tokens:128,messages:[{role:'user',content:'Read both files'}],tools:[{type:'function',function:{name:'Read',parameters:{type:'object',properties:{path:{type:'string'}},required:['path']}}}]};
+    const wire=await (await transport.chat(body,new AbortController().signal)).text();
+    const events=wire.split('\n\n').filter(s=>s.startsWith('data: {')).map(s=>JSON.parse(s.slice(6)));
+    assert.deepEqual(events.flatMap(e=>e.choices??[]).flatMap(c=>c.delta?.tool_calls??[]).map(c=>JSON.parse(c.function.arguments)),calls.map(c=>c.arguments));
+    if(runtimeId==='codex'){
+      const projection=new ResponseProjection('fixture',()=>{});for(const event of events)projection.accept(event);
+      const response=projection.finish();assert.deepEqual(response.output.filter(item=>item.type==='function_call').map(item=>JSON.parse(item.arguments)),calls.map(c=>c.arguments));
+    }
+    assert.doesNotMatch(seen[0],/Return at most one host tool call/);
+    const serial=await (await transport.chat({...body,parallel_tool_calls:false},new AbortController().signal)).text();
+    assert.match(serial,/invalid_decision/);assert.doesNotMatch(serial,/\[DONE\]/);
+    assert.match(seen.at(-1),/Return at most one host tool call/);
+  }
 });
 
 test('WorkBuddy runtime-specific system survives native and JSON format corrections',async t=>{

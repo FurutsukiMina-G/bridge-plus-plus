@@ -7,14 +7,14 @@ import {ActivityTracker,argsOf,toolSummary,gatewayNotice} from './activity.js';
 import {PendingAttachments,KINDS,allowedKinds,capabilityKey,fileSize,formatsText,kindName,kindOf,markBroken,markerHtml,mediaCardHtml,mediaUrl,refusal,replaceMarkers,trayHtml,userMediaHtml} from './attachments.js';
 import {cjkEmphasis} from './markdown-cjk.js';
 import {foldRuns,foldSummary,toolStatus} from './tool-groups.js';
-import {limitNotice,sameUpstream,stopLabel,stopNote,upstreamHtml} from './upstream.js';
+import {limitNotice,sameUpstream,stopLabel,stopNote,turnExtras,upstreamHtml} from './upstream.js';
 import {mathExtension,replaceMath} from './math.js';
 import {fileLinks,toolFilePath,webLink} from './file-links.js';
 import {usable,unusableReason,permissionWarning,environmentCardHtml,servicesPageHtml,serviceCardsHtml,serviceModelsHtml,onboardingHtml,sourceCardHtml} from './setup.js';
 
 const $=selector=>document.querySelector(selector);
 const esc=value=>String(value??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'})[c]);
-const labels={idle:'准备就绪',starting:'正在连接',running:'运行中',waiting:'等待授权',completed:'已完成',failed:'运行失败',interrupted:'已中断'};
+const labels={idle:'准备就绪',starting:'正在连接',running:'运行中',waiting:'等待授权',completed:'已完成',failed:'运行失败',interrupted:'已中断',paused:'已暂停'};
 const sourceNames={qoder:'Qoder CN',workbuddy:'WorkBuddy',antigravity:'Antigravity · Gemini'};
 const tiles={dsh:'DS',kimi:'Ki',codex:'Cx',antigravity:'AG'};
 const choiceLabels={approve:'允许这次','approve-session':'本会话始终允许',reject:'拒绝','reject-session':'本会话始终拒绝'};
@@ -439,7 +439,8 @@ function renderComposerControls(){
   const envChip=`<button class="chip-btn${s?' locked':''}${envOk?'':' unavailable'}" id="env-chip" data-value="${esc(env?.id??'')}" title="${s?'会话创建后不能更换运行环境':envOk?'先选择运行环境':esc(unusableReason(env))}">${tile(env)}<span class="chip-text">${esc(env?.name??'选择环境')}</span>${icon(s?'lock':'chevronDown','caret')}</button>`;
   const modelChip=`<button class="chip-btn model-chip" id="model-chip" data-value="${esc(selection.modelKey??'')}" title="${s?'查看或调整此会话的参数':'选择模型、思考强度与上下文窗口'}">${icon('layers')}<span class="chip-text">${modelLabel(selection,model)}</span>${icon('chevronDown','caret')}</button>`;
   const permChip=permissionChipHtml(s,env);
-  el.innerHTML=`<div class="composer-left">${attachButtonHtml()}${folder}${envChip}<span class="chip-sep">${icon('chevronRight')}</span>${modelChip}${permChip}</div><button class="send${running?' stop':''}" id="send" title="${running?'停止本轮':'发送 (Enter)'}" aria-label="${running?'停止本轮':'发送'}" ${p&&envOk?'':'disabled'}>${icon(running?'stop':'arrowUp')}</button>`;
+  const waiting=!running&&!!env?.checking;
+  el.innerHTML=`<div class="composer-left">${attachButtonHtml()}${folder}${envChip}<span class="chip-sep">${icon('chevronRight')}</span>${modelChip}${permChip}</div><button class="send${running?' stop':''}" id="send" title="${running?'停止本轮':waiting?'正在检测运行环境，稍等几秒':'发送 (Enter)'}" aria-label="${running?'停止本轮':'发送'}" ${p&&envOk&&!waiting?'':'disabled'}>${icon(running?'stop':'arrowUp')}</button>`;
   if(menu&&!$('#popover').classList.contains('hidden'))placeMenu();
 }
 /* ---------- permission modes (native approval policy per runtime and session) ---------- */
@@ -529,11 +530,15 @@ function renderBanner(){
   }
   if(!s&&project()){
     const env=runtime(state.runtimeId);
+    if(!state.snapshot.runtimes.some(usable)&&env?.checking){
+      el.innerHTML=`<div class="banner"><span class="spinner"></span><span>正在检测开发环境…</span></div>`;
+      return;
+    }
     if(!state.snapshot.runtimes.some(usable)){
       el.innerHTML=`<div class="banner warn">${icon('alert')}<span>还没有可用的开发环境。装好 DeepSeek Harness 或 Kimi Code 中的任意一个就能开始。</span><span class="banner-actions"><button class="btn primary sm" id="open-guide">查看引导</button></span></div>`;
       return;
     }
-    if(env&&!usable(env))notes.push(`${unusableReason(env)}。请换一个运行环境，或到设置 → 运行环境处理。`);
+    if(env&&!usable(env))notes.push(env.checking?`${unusableReason(env)}…`:`${unusableReason(env)}。请换一个运行环境，或到设置 → 运行环境处理。`);
     else if(!state.modelKey)notes.push(state.runtimeId==='dsh'?'DSH 统一会话需要 Qoder CN 或 WorkBuddy 模型。请在设置 → 模型源下载组件并登录。':'请选择模型。');
     else if(state.modelKey!=='native'&&!currentModel())notes.push('所选模型不在当前目录中，请重新选择或刷新模型源。');
   }
@@ -683,10 +688,11 @@ function diffBlock(e){
   return`<details class="tool diff-event" data-expand="diff-${esc(e.turnId??e.id)}"><summary>${icon('fileDiff','tool-status')}<span class="tool-name">代码变更</span><span class="tool-summary">${esc(text?diffStat(text):'工作区变更')}</span>${icon('chevronRight','tool-caret')}</summary><div class="tool-body">${text?diffHtml(text):`<pre>${esc(clip(pretty(e.data)))}</pre>`}</div></details>`;
 }
 function turnEndBlock(e){
-  const t=e.turnId?metrics.turn(e.turnId):null,why=e.status==='completed'?'':stopLabel(e.reason),parts=[{completed:'本轮完成',interrupted:'已停止',failed:'本轮未完成'}[e.status]??'本轮结束',...why?[why]:[],clock(e.at)];
+  const t=e.turnId?metrics.turn(e.turnId):null,why=['completed','paused'].includes(e.status)?'':stopLabel(e.reason),parts=[{completed:'本轮完成',interrupted:'已停止',failed:'本轮未完成',paused:'已暂停'}[e.status]??'本轮结束',...why?[why]:[],clock(e.at)];
   if(t?.input!=null)parts.push(`输入 ${compact(t.input)}`);
   if(t?.output!=null)parts.push(`输出 ${compact(t.output)}`);
   if(t?.cacheRatio!=null)parts.push(`缓存 ${t.cacheStatus==='estimated'?'≈':''}${pct(t.cacheRatio)}`);
+  parts.push(...turnExtras(e.stats));
   return`<div class="turn-end ${esc(e.status)}"><span>${parts.map(esc).join(' · ')}</span></div>`;
 }
 /** `quiet` renders blocks that were already there (opening a session, rebuilding the view) without entrance animation. */
@@ -825,7 +831,7 @@ function fileMenuHtml(){
   const f=menu.file,here=f.inside&&f.exists,name=f.path.split(/[\\/]/).filter(Boolean).pop()??f.path;
   const item=(id,glyph,label,on=true)=>`<button class="menu-item" data-file-menu="${id}" ${on?'':'disabled'}>${icon(glyph,'mi-icon')}<span class="mi-main"><span class="mi-name">${label}</span></span></button>`;
   const note=here?'':`<div class="menu-note">${icon('info')}<span>${f.inside?'这个文件已经不存在':'不在当前工作文件夹里，只能复制路径'}</span></div>`;
-  return`<div class="menu-label" title="${esc(f.path)}">${esc(name)}</div>${item('preview','eye','预览',here&&!!f.preview)}${item('reveal','folder','在资源管理器中显示',here)}${item('open','external','用默认应用打开',here&&f.kind==='file')}${item('copy','copy','复制路径')}${note}`;
+  return`<div class="menu-label" title="${esc(f.path)}">${esc(name)}</div>${item('preview','eye','预览',here&&!!f.preview)}${item('reveal','folder','在资源管理器中显示',here)}${item('open','external','用默认应用打开',here&&f.kind==='file'&&f.openable!==false)}${item('copy','copy','复制路径')}${note}${here&&f.kind==='file'&&f.openable===false?`<div class="menu-note">${icon('info')}<span>这类文件可能会运行程序，不能直接打开，可以在资源管理器里查看</span></div>`:''}`;
 }
 function linkMenuHtml(){
   const {host}=new URL(menu.url);
@@ -839,7 +845,7 @@ async function previewFile(f,line){
     if(!found?.url)throw new Error('这张图片不能预览');
     openLightbox(found.url,found.name??f.relative);return;
   }
-  if(f.preview!=='text')throw new Error('这种文件不能在这里预览，右键可以用默认应用打开');
+  if(f.preview!=='text')throw new Error(f.openable===false?'这种文件不能在这里预览，可以右键在资源管理器中显示':'这种文件不能在这里预览，右键可以用默认应用打开');
   setRightTab('files');await openFile(f.relative,false);
   // Rough is fine: the viewer has no line numbers to aim at.
   const view=document.querySelector('#preview-pane .code-view');
@@ -857,7 +863,7 @@ function folderMenuHtml(){
 function envMenuHtml(){
   const s=session();
   if(s){const r=runtime(s.runtimeId);return`<div class="menu-label">运行环境</div><div class="menu-static">${tile(r)}<span class="mi-main"><span class="mi-name">${esc(r?.name??s.runtimeId)}</span><span class="mi-sub">会话创建后不能更换运行环境。要换环境，请新建会话。</span></span>${icon('lock','mi-check')}</div>`;}
-  return`<div class="menu-label">运行环境 · 先选环境，再选模型</div>${state.snapshot.runtimes.map(r=>{const ok=usable(r),current=ok&&r.id===state.runtimeId;return`<button class="menu-item env-item${current?' selected':''}" data-env="${r.id}" ${ok?'':'disabled'}>${tile(r)}<span class="mi-main"><span class="mi-name">${esc(r.name)}<span class="mi-tag">${esc(r.protocol)}</span></span><span class="mi-sub">${ok?esc(r.description):`${esc(unusableReason(r))} · 可在设置 → 运行环境里安装或指定路径`}</span></span>${current?icon('check','mi-check'):''}</button>`;}).join('')}<div class="menu-sep"></div><button class="menu-item subtle" data-open-settings="runtimes">${icon('settings','mi-icon')}<span class="mi-main"><span class="mi-name">管理运行环境…</span></span></button>`;
+  return`<div class="menu-label">运行环境 · 先选环境，再选模型</div>${state.snapshot.runtimes.map(r=>{const ok=usable(r),current=ok&&r.id===state.runtimeId;return`<button class="menu-item env-item${current?' selected':''}" data-env="${r.id}" ${ok?'':'disabled'}>${tile(r)}<span class="mi-main"><span class="mi-name">${esc(r.name)}<span class="mi-tag">${esc(r.protocol)}</span></span><span class="mi-sub">${ok?esc(r.description):r.checking?esc(unusableReason(r)):`${esc(unusableReason(r))} · 可在设置 → 运行环境里安装或指定路径`}</span></span>${current?icon('check','mi-check'):''}</button>`;}).join('')}<div class="menu-sep"></div><button class="menu-item subtle" data-open-settings="runtimes">${icon('settings','mi-icon')}<span class="mi-main"><span class="mi-name">管理运行环境…</span></span></button>`;
 }
 function sessionMenuHtml(){
   const s=session();
@@ -1264,6 +1270,7 @@ async function submit(){
     if(s&&busy(s)){toast('Agent 仍在执行。可以等待本轮结束，或点击停止按钮。');return;}
     if(s?.selectionIssue)throw new Error(s.selectionIssue+'；请先刷新来源并重新确认模型');
     if(submitting)return;
+    if(runtime(s?s.runtimeId:state.runtimeId)?.checking){toast('正在检测运行环境，稍等几秒再发送');return;}
     const text=state.draft.trim(),queued=pending.list(views.draftKey(state));
     if(queued.some(x=>x.status==='staging')){toast('附件还在处理，稍等一下再发送');return;}
     if(queued.some(x=>x.status==='error')){toast('有附件没能添加，请先移除它们',true);return;}
@@ -1530,6 +1537,14 @@ document.addEventListener('click',e=>{
     }).finally(()=>{view.connecting=false;refreshSettingsLive();});
     return;
   }
+  if((el=hit('[data-svc-disconnect]'))){
+    const [id,target]=el.dataset.svcDisconnect.split('|'),name={dsh:'DeepSeek Harness',kimi:'Kimi Code',codex:'Codex CLI'}[target]??target;
+    modal(`断开 ${name}`,`<p class="modal-text">会从 ${esc(name)} 的配置里移除这个接口和它的密钥，其他配置不变。修改前会留一份备份。</p>`,async()=>{
+      const r=await call('bridgeService:disconnect',{id,target});
+      await serviceCall(null,null,r?.changed===false?`${name} 里没有这个接口`:r?.message??`已断开 ${name}`);
+    },{confirm:'断开',danger:true});
+    return;
+  }
   if((el=hit('[data-svc-apply-port]'))){
     const id=el.dataset.svcApplyPort,input=document.querySelector(`[data-svc-port="${CSS.escape(id)}"]`),port=Number(input?.value);
     void action(async()=>{if(!Number.isInteger(port)||port<1024||port>65535)throw new Error('端口需要是 1024–65535 之间的整数');input.blur();await serviceCall('bridgeService:configure',{id,port},`端口已改为 ${port}`);});
@@ -1706,7 +1721,12 @@ async function refreshFromBackend(){
   if(refreshing){refreshAgain=true;return;}
   refreshing=true;
   try{
+    const wasChecking=state.snapshot?.startup?.environments==='checking';
     await snapshot();
+    if(wasChecking&&state.snapshot.startup?.environments!=='checking'){
+      capCache.clear();
+      if(!guideShown&&!state.snapshot.runtimes.some(usable))openGuide();
+    }
     for(const id of stopping)if(!busy(state.snapshot.sessions.find(x=>x.id===id)))stopping.delete(id);
     const s=session(),wasBusy=lastBusy;
     lastBusy=busy(s);
@@ -1783,7 +1803,8 @@ async function start(){
     renderAll();tick();
     // First run means no folders and no conversations yet; people upgrading keep their workspace undisturbed.
     const firstRun=state.snapshot.onboarding?.show&&!state.snapshot.projects.length&&!state.snapshot.sessions.length;
-    if(!guideShown&&(firstRun||!state.snapshot.runtimes.some(usable)))openGuide();
+    const scanning=state.snapshot.startup?.environments==='checking';
+    if(!guideShown&&(firstRun||!scanning&&!state.snapshot.runtimes.some(usable)))openGuide();
     await Promise.all(state.snapshot.projects.map(async p=>{
       const terminal=views.terminal(p.id),revision=terminal.revision;
       const saved=await call('terminal:state',{projectId:p.id});

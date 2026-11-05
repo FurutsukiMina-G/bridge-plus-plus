@@ -10,14 +10,14 @@ export const DECISION_INSTRUCTIONS=`You are providing one bounded model decision
 Return exactly one JSON object without markdown or surrounding text:
 {"action":"final","content":"the assistant's complete answer"}
 or {"action":"tool_calls","calls":[{"name":"exact declared host function name","arguments":{...}}]}.
-Use only declared host functions, their exact JSON Schema, and the requested tool_choice. Arguments must be an object. The host executes calls and supplies their results on the next request. Do not fabricate tool results. Respect tool_choice none, required, and a pinned function. If a tool is required, request it through the JSON calls field, never a native WorkBuddy tool call.`;
+Use only declared host functions, their exact JSON Schema, and the requested tool_choice. Request independent operations needed next (such as reading several files or running several searches) together in the same reply. Keep operations that depend on earlier results in separate replies. Arguments must be an object. The host executes calls and supplies their results on the next request. Do not fabricate tool results. Respect tool_choice none, required, and a pinned function. If a tool is required, request it through the JSON calls field, never a native WorkBuddy tool call.`;
 export function decisionInput(body,{messages=body.messages,toolsReused=false,delta=false}={}){
   const input=JSON.stringify({protocol:'host-decision-v1',history:delta?'new-messages-only':'full',messages:promptMessages(messages),
-    ...(toolsReused?{tools_unchanged:true}:{tools:body.tools??[]}),tool_choice:body.tool_choice??'auto',response_format:body.response_format??null});
+    ...(toolsReused?{tools_unchanged:true}:{tools:body.tools??[]}),...(body.parallel_tool_calls!==undefined?{parallel_tool_calls:body.parallel_tool_calls}:{}),tool_choice:body.tool_choice??'auto',response_format:body.response_format??null});
   // Keep the transport contract after long host instructions and code blocks.
   // Host roles still govern the task; this line governs only its wire encoding.
   const reminder='END OF HOST INPUT. Return only the next host-decision-v1 JSON object. To request host functions use {"action":"tool_calls","calls":[{"name":"<declared name>","arguments":{}}]}; for an actual final answer use {"action":"final","content":"..."}. Never call a native WorkBuddy function or put commentary outside JSON.';
-  return input+'\n\n'+(delta?'Continue the same host task. Earlier messages and unchanged tool definitions remain in this native session. If no new messages were supplied, reconsider the last host task under the current tool_choice. Return only the next host-decision-v1 JSON decision.':reminder);
+  return input+'\n\n'+(body.parallel_tool_calls===false?'This request sets parallel_tool_calls:false. Return at most one host tool call.\n':'')+(delta?'Continue the same host task. Earlier messages and unchanged tool definitions remain in this native session. If no new messages were supplied, reconsider the last host task under the current tool_choice. Return only the next host-decision-v1 JSON decision.':reminder);
 }
 export function compileTools(tools=[]){
   const signature=digest(tools);if(toolCache.has(signature))return toolCache.get(signature);

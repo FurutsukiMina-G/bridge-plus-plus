@@ -1,7 +1,8 @@
 import {mkdir,appendFile,stat,rename,rm} from 'node:fs/promises';
 import {dirname} from 'node:path';
 import {StringDecoder} from 'node:string_decoder';
-export const redactWorkerText=text=>String(text).replace(/Bearer\s+[^\s"']+|sk-[\w-]+/gi,'[redacted]').replace(/((?:access[_-]?token|refresh[_-]?token|api[_-]?key|authorization|password)["']?\s*[:=]\s*["']?)[^\s,"'}]+/gi,'$1[redacted]').replace(/([?&]token=)[^&\s]+/gi,'$1[redacted]');
+import {redactSecrets} from './redact-secrets.mjs';
+export const redactWorkerText=text=>redactSecrets(text);
 /** One current and one rotated log; line buffering keeps split credentials redactable. */
 export class WorkerLog {
   constructor(file,{maxBytes=512*1024}={}){Object.assign(this,{file,maxBytes});this.decoder=new StringDecoder('utf8');this.buffer='';this.queue=Promise.resolve();}

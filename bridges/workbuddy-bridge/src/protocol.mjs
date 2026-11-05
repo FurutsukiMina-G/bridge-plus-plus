@@ -56,7 +56,7 @@ export class Completion {
     if(chunk.error){const e=chunk.error;throw new BridgeError(e.upstream_status===429||e.code==='upstream_rate_limited'?429:e.code==='workbuddy_11128'?400:502,e.code??'upstream_stream_error',e.message??'WorkBuddy returned an error inside the stream',Object.fromEntries(['upstream_status','reset_at','request_id','automatic_retry'].filter(key=>e[key]!==undefined).map(key=>[key,e[key]])));}
     if(chunk.model&&chunk.model!==upstreamId)throw new BridgeError(502,'model_mismatch','Upstream returned a different model; stream stopped');
     this.bytes+=Buffer.byteLength(data);if(this.bytes>32*1024*1024)throw new BridgeError(502,'response_too_large','Response exceeds bridge limit');
-    this.id??=chunk.id;this.created??=chunk.created;if(chunk.usage)this.usage=chunk.usage;
+    this.id??=chunk.id;this.created??=chunk.created;if(chunk.usage)this.usage=chunk.usage;if(chunk.bridge_usage)this.bridgeUsage=chunk.bridge_usage;
     for(const choice of chunk.choices??[]){
       if(choice.index!==0)throw new BridgeError(502,'invalid_choice','Unexpected completion choice');
       const d=choice.delta??{};this.content+=d.content??'';this.reasoning+=d.reasoning_content??'';
@@ -78,5 +78,5 @@ export class Completion {
       if(!t.id||!declared.has(t.function.name)||!args||typeof args!=='object'||Array.isArray(args))throw new BridgeError(502,'invalid_tool_call','WorkBuddy returned an undeclared or invalid tool call');}
     if(this.tools.size&&this.finish!=='tool_calls')throw new BridgeError(502,'invalid_tool_finish','Tool output did not finish with tool_calls');
   }
-  result(){const message={role:'assistant',content:this.content||null};if(this.reasoning)message.reasoning_content=this.reasoning;if(this.tools.size)message.tool_calls=[...this.tools.entries()].sort((a,b)=>a[0]-b[0]).map(([,t])=>t);return {id:this.id,object:'chat.completion',created:this.created,model:this.model,choices:[{index:0,message,finish_reason:this.finish}],usage:this.usage};}
+  result(){const message={role:'assistant',content:this.content||null};if(this.reasoning)message.reasoning_content=this.reasoning;if(this.tools.size)message.tool_calls=[...this.tools.entries()].sort((a,b)=>a[0]-b[0]).map(([,t])=>t);return {id:this.id,object:'chat.completion',created:this.created,model:this.model,choices:[{index:0,message,finish_reason:this.finish}],usage:this.usage,...(this.bridgeUsage?{bridge_usage:this.bridgeUsage}:{})};}
 }

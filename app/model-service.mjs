@@ -2,7 +2,7 @@
 // instance lock, or read/write the GUI workspace.json.
 import {join,resolve} from 'node:path';
 import {fileURLToPath} from 'node:url';
-import {mkdir,appendFile,stat,writeFile} from 'node:fs/promises';
+import {mkdir,appendFile,stat,writeFile,readFile} from 'node:fs/promises';
 import {randomUUID} from 'node:crypto';
 import {ModelServiceStore} from './services/model-service-store.mjs';
 import {ModelServiceServer} from './services/model-service-server.mjs';
@@ -31,7 +31,7 @@ export async function runModelService({id,userData,node={command:process.execPat
    // Exit normally so the scheduler does not keep restarting an unusable process.
    return {needsComponent:true};
   }
-  server=await ModelServiceServer.open(store,node,{...serverOptions,components:manager});const result=await server.run();
+  const installation={version:JSON.parse(await readFile(new URL('../package.json',import.meta.url),'utf8')).version,...serverOptions?.installation};server=await ModelServiceServer.open(store,node,{...serverOptions,installation,components:manager});const result=await server.run();
   if(result.running){for(const signal of ['SIGINT','SIGTERM'])process.once(signal,()=>{void server.shutdown();});}else await server.providers.close?.();return {server,...result};
  }catch(error){
   const diagnostic=serviceError(error,store.key);

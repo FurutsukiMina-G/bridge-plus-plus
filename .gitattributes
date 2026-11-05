@@ -8,3 +8,6 @@
 *.md text eol=lf
 # Preserve upstream license formatting without applying source whitespace rules.
 assets/licenses/** -whitespace
+
+# Recorded tool output: the bytes are the point.
+tests/fixtures/windows-zh-CN/** -text

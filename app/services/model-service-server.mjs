@@ -5,6 +5,7 @@ import {Gateway,gatewayAuthorized} from './gateway.mjs';
 import {ProviderService} from './providers.mjs';
 import {serviceCatalog,SERVICE_PROFILES} from './model-service-catalog.mjs';
 import {servicePortOwner} from './model-service-system.mjs';
+import {serviceProof} from './model-service-proof.mjs';
 import {failureDetails,failureText} from './failure-details.mjs';
 const alive=pid=>{try{process.kill(pid,0);return true;}catch(error){return error.code!=='ESRCH';}};
 export class ModelServiceServer extends Gateway {
@@ -32,8 +33,14 @@ export class ModelServiceServer extends Gateway {
   async route(req,res){
     const send=(status,value)=>{res.writeHead(status,{'content-type':'application/json','cache-control':'no-store'});res.end(JSON.stringify(value));};
     if((req.url??'').startsWith('/_bridge/')){
+      const url=new URL(req.url,'http://127.0.0.1');
+      if(url.pathname==='/_bridge/identify'){
+        if(req.headers.origin!==undefined||!/^127\.0\.0\.1:\d+$/.test(req.headers.host??'')){send(403,{error:{message:'Local loopback request required'}});return;}
+        if(req.method!=='GET'){send(405,{});return;}const nonce=url.searchParams.get('nonce');if(!/^[a-f0-9]{64}$/.test(nonce??'')){send(400,{error:{message:'Invalid identity nonce'}});return;}
+        const identity={kind:'bridgepp-model-service',id:this.service.id,instanceId:this.instanceId,pid:process.pid,baseURL:this.base};send(200,{...identity,proof:serviceProof(this.key,{nonce,...identity})});return;
+      }
       if(!gatewayAuthorized(req,this.key)){send(403,{error:{message:'Local Bearer key required'}});return;}
-      if(req.url==='/_bridge/health'&&req.method==='GET'){send(200,await this.serviceStore.read('status.json'));return;}
+      if(req.url==='/_bridge/health'&&req.method==='GET'){send(200,{...await this.serviceStore.read('status.json'),active:this.inflight.size});return;}
       if(req.method!=='POST'){send(405,{});return;}
       if(req.url==='/_bridge/refresh'){req.resume();try{await this.refresh();send(200,{ok:true});}catch(error){send(502,{error:{message:error.message}});}return;}
       if(req.url==='/_bridge/configure'){let text='';for await(const chunk of req){text+=chunk;if(text.length>4096){send(413,{});return;}}try{const body=JSON.parse(text);await this.serviceStore.configure({defaultProfile:body.defaultProfile});this.service.defaultProfile=this.serviceStore.settings.defaultProfile;send(200,{ok:true});}catch{send(400,{error:{message:'无效客户端配置'}});}return;}

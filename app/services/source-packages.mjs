@@ -1,8 +1,8 @@
 import {readFile,stat,readdir} from 'node:fs/promises';
 import {join,resolve,relative,isAbsolute} from 'node:path';
 export const SOURCE_DEFINITIONS=Object.freeze([
- Object.freeze({id:'qoder',name:'Qoder CN',package:'@qodercn-ai/qodercn-agent-sdk',version:'1.0.50',entry:'dist/index.js',page:'https://qoder.cn/',signIn:'需要 Qoder CN 账号。安装官方客户端或 CLI 并登录后，再回到这里重新检测。'}),
- Object.freeze({id:'workbuddy',name:'WorkBuddy',package:'@tencent-ai/agent-sdk',version:'0.3.286',entry:'lib/index.js',page:'https://www.workbuddy.cn/',signIn:'需要 WorkBuddy 账号。安装官方桌面端并登录后，再回到这里重新检测。'})
+ Object.freeze({id:'qoder',name:'Qoder CN',package:'@qodercn-ai/qodercn-agent-sdk',version:'1.0.50',entry:'dist/index.js',lock:'assets/source-locks/qoder-1.0.50.package-lock.json',page:'https://qoder.cn/',signIn:'需要 Qoder CN 账号。安装官方客户端或 CLI 并登录后，再回到这里重新检测。'}),
+ Object.freeze({id:'workbuddy',name:'WorkBuddy',package:'@tencent-ai/agent-sdk',version:'0.3.286',entry:'lib/index.js',lock:'assets/source-locks/workbuddy-0.3.286.package-lock.json',page:'https://www.workbuddy.cn/',signIn:'需要 WorkBuddy 账号。安装官方桌面端并登录后，再回到这里重新检测。'})
 ]);
 export const SOURCE_ROOT=resolve(import.meta.dirname,'../..');
 export function sourceDefinition(id){const row=SOURCE_DEFINITIONS.find(row=>row.id===id);if(!row)throw new Error('未知模型源组件');return row;}

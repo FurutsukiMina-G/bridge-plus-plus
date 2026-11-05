@@ -1,4 +1,14 @@
 const valid=n=>Number.isSafeInteger(n)&&n>=0;
+/** Same per-dimension coverage contract as Qoder; missing usage stays unknown. */
+export function usageAccounting(items){
+  const out={attempts:items.length,sources:[...new Set(items.filter(Boolean).map(u=>u.bridge_usage_source??'unspecified_usage'))]};
+  for(const dimension of ['prompt','completion','reasoning']){
+    const values=items.map(u=>dimension==='reasoning'?u?.completion_tokens_details?.reasoning_tokens:u?.[dimension+'_tokens']);
+    const unknown=values.filter(n=>!valid(n)).length,known=values.filter(valid).reduce((n,v)=>n+v,0);
+    out[dimension+'_tokens']=unknown?null:known;out['known_'+dimension+'_tokens']=known;out['unknown_'+dimension+'_attempts']=unknown;
+  }
+  return out;
+}
 export function normalizedUsage(message){
   const u=message?.usage;if(!u||!valid(u.input_tokens)||!valid(u.output_tokens))return null;
   // WorkBuddy's runtime reports TOTAL input, with cache categories as subsets.

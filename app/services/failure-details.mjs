@@ -1,10 +1,7 @@
+import {redactSecrets} from './redact-secrets.mjs';
 export function failureText(value,limit=1200,secrets=[]){
  let text=value;for(let depth=0;depth<5&&typeof text!=='string';depth++)text=typeof text==='number'?String(text):text?.message??text?.text??text?.error??text?.cause??text?.reason??text?.kind??'';if(typeof text!=='string')text='';
- for(const secret of secrets)if(typeof secret==='string'&&secret)text=text.replaceAll(secret,'[redacted]');
- return text.replace(/\b(?:cookie|set-cookie)\b["']?\s*[:=]\s*(?:"[^"]*"|'[^']*'|[^\r\n]*)/gi,'[redacted]')
-  .replace(/Bearer\s+[^\s,;"']+|\bsk-[\w-]+/gi,'[redacted]')
-  .replace(/\b(?:access[_-]?token|refresh[_-]?token|api[_-]?key|token|authorization|password|secret)["']?\s*[:=]\s*(?:"[^"]*"|'[^']*'|[^\s,;"'}]+)/gi,'[redacted]')
-  .replace(/[\x00-\x08\x0b\x0c\x0e-\x1f]/g,'').slice(0,limit);
+ return redactSecrets(text,secrets).replace(/[\x00-\x08\x0b\x0c\x0e-\x1f]/g,'').slice(0,limit);
 }
 export function failureDetails(error={},status,secrets=[]){
  const message=failureText(error.upstream_message??error.message??error.text,1200,secrets)||'上游请求失败，未提供具体原因';

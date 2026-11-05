@@ -47,6 +47,16 @@ export function stopNote(reason,shown=new Set()){
   return reset?`${reason.message}（${reset}）`:reason.message;
 }
 
+/** What a turn cost beyond its answer: every request here sent the whole history again. */
+export function turnExtras(stats){
+  const parts=[];
+  if(stats?.requests)parts.push(`请求 ${stats.requests} 次`);
+  if(stats?.failedRequests)parts.push(`失败 ${stats.failedRequests} 次`);
+  if(stats?.corrections)parts.push(`格式纠正 ${stats.corrections} 次`);
+  if(stats?.continuations)parts.push(`自动续作 ${stats.continuations} 次`);
+  return parts;
+}
+
 /** Sending again during a known limit will fail too, so say so next to the composer. */
 export function limitNotice(failure,now=Date.now()){
   if(failure?.kind!=='upstream'||!failure.resetAt||!(new Date(failure.resetAt).getTime()>now))return'';

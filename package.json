@@ -1,7 +1,7 @@
 {
   "name": "bridge-plus-plus",
   "productName": "Bridge++",
-  "version": "0.1.17",
+  "version": "0.1.18",
   "description": "Windows agent development workspace with independent model sources and native agent runtimes",
   "private": true,
   "type": "module",
@@ -22,7 +22,6 @@
     "test": "node --test tests/*.test.mjs",
     "check": "node scripts/check.mjs",
     "test:bridges": "npm test -w qoderbridge && npm test -w workbuddy-bridge",
-    "probe": "node scripts/probe.mjs",
     "package:win": "npm run build && electron-builder --win dir --publish never",
     "package:installer": "npm run build && electron-builder --win nsis --publish never"
   },
@@ -63,7 +62,11 @@
     "files": [
       "app/**/*",
       "assets/**/*",
+      "assets/source-locks/**",
+      "assets/licenses/KaTeX-fonts-OFL-1.1.txt",
       "!assets/runtime/**/*",
+      "!node_modules/@moonshot-ai/kimi-code/native/darwin/prebuilds/**",
+      "!node_modules/@moonshot-ai/kimi-code/native/linux/prebuilds/**",
       "!node_modules/@qodercn-ai/**",
       "!node_modules/@tencent-ai/**",
       "package.json",
@@ -94,7 +97,8 @@
       "createStartMenuShortcut": true,
       "runAfterFinish": true,
       "shortcutName": "Bridge++",
-      "artifactName": "Bridge++-Setup-${version}.${ext}"
+      "artifactName": "Bridge++-Setup-${version}.${ext}",
+      "include": "build/installer.nsh"
     },
     "win": {
       "target": [

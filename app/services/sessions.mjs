@@ -17,12 +17,14 @@ import {failureText,failureValue,runtimeReason} from './failure-details.mjs';
 
 const defaults={dsh:DshAdapter,kimi:KimiAcpAdapter,codex:CodexAdapter,antigravity:AntigravityAdapter};
 export class Sessions {
-  constructor(store,providers,gateway,runtimes,{constructors=defaults,identifyProcess=processIdentity,media,capabilities,runtimeReady}={}){
-    this.media=media;this.capabilities=capabilities;this.runtimeReady=runtimeReady;
-    Object.assign(this,{store,providers,gateway,runtimes,constructors,identifyProcess});this.adapters=new Map();this.runs=new Map();this.rebinding=new Set();this.permissionChanging=new Set();this.external=new Map();this.closed=false;
+  constructor(store,providers,gateway,runtimes,{constructors=defaults,identifyProcess=processIdentity,media,capabilities,runtimeReady,now=Date.now,adapterIdleMs=600000,adapterMaxIdle=4,adapterSweepMs=60000}={}){
+    this.media=media;this.capabilities=capabilities;this.runtimeReady=runtimeReady;this.now=now;this.adapterIdleMs=adapterIdleMs;this.adapterMaxIdle=adapterMaxIdle;
+    Object.assign(this,{store,providers,gateway,runtimes,constructors,identifyProcess});this.adapters=new Map();this.adapterUsed=new Map();this.runs=new Map();this.rebinding=new Set();this.permissionChanging=new Set();this.external=new Map();this.closed=false;this.adapterTimer=setInterval(()=>{void this.recycleAdapters().catch(()=>{});},adapterSweepMs);this.adapterTimer.unref();
     for(const session of store.state?.sessions??[])if(Number.isSafeInteger(session.nativeClientPid)&&session.nativeClientPid>0){try{process.kill(session.nativeClientPid,0);this.external.set(session.id,{restoredPid:session.nativeClientPid});}catch(error){if(error.code!=='ESRCH')this.external.set(session.id,{restoredPid:session.nativeClientPid});}}
     if(gateway){gateway.requestContext=id=>this.runs.get(id)?.id;gateway.onUsage=(id,event,turnId)=>{const run=this.runs.get(id);if(!run||run.id!==turnId)return Promise.resolve();return this.receive(this.store.session(id),run.adapter,event);};gateway.onSuccess=(id,turnId)=>gateway.onUsage(id,{type:'native-event',source:'gateway',name:'gateway/request-completed'},turnId);}
   }
+  touchAdapter(id){if(this.adapters.has(id))this.adapterUsed.set(id,this.now());}
+  async recycleAdapters(){if(this.closed)return;const candidates=[];for(const [id,adapter]of this.adapters){const session=this.store.session(id),run=this.runs.get(id);if(session.runtimeId==='dsh'||session.runtimeId==='codex'&&session.selection.modelKey==='native'||run||this.external.has(id)||run?.approvals.size||adapter.requests?.size)continue;candidates.push({id,adapter,used:this.adapterUsed.get(id)??0});}candidates.sort((a,b)=>a.used-b.used);const remove=new Set(candidates.filter(row=>this.now()-row.used>this.adapterIdleMs).map(row=>row.id));for(const row of candidates){if(candidates.length-remove.size<=this.adapterMaxIdle)break;remove.add(row.id);}for(const row of candidates)if(remove.has(row.id)&&this.adapters.get(row.id)===row.adapter){this.adapters.delete(row.id);this.adapterUsed.delete(row.id);await row.adapter.close().catch(()=>{});}}
   ensureReady(runtimeId){return assertRuntimeReady(this.runtimes.find(r=>r.id===runtimeId),this.runtimeReady?.(runtimeId));}
   validate(runtimeId,selection){
     if(!selection||typeof selection.modelKey!=='string')throw new Error('请选择模型');
@@ -51,7 +53,7 @@ export class Sessions {
     this.ensureReady(session.runtimeId);
     session.selection=this.validate(session.runtimeId,session.selection);
     if(run?.cancelled||this.closed)throw new CancelledError();
-    const cached=this.adapters.get(session.id);if(cached&&!cached.closed&&!cached.rpc?.closedError)return cached;
+    const cached=this.adapters.get(session.id);if(cached&&!cached.closed&&!cached.rpc?.closedError){this.touchAdapter(session.id);return cached;}
     if(cached){this.adapters.delete(session.id);await cached.close().catch(()=>{});}
     const runtime=this.runtimes.find(r=>r.id===session.runtimeId);if(!runtime?.installed)throw new Error('Native runtime is unavailable');
     const project=this.store.project(session.projectId),dir=join(this.store.root,'sessions',session.id);await mkdir(dir,{recursive:true});
@@ -71,7 +73,7 @@ export class Sessions {
       if(!model)throw new Error('DSH 统一会话需选择 Qoder CN 或 WorkBuddy 模型；原生模型可在完整界面使用。');
       this.dsh??=new DshHost(this.store,runtime,{gateway:this.gateway});options.host=this.dsh;
     }
-    adapter=new this.constructors[session.runtimeId](options);this.adapters.set(session.id,adapter);return adapter;
+    adapter=new this.constructors[session.runtimeId](options);this.adapters.set(session.id,adapter);this.touchAdapter(session.id);return adapter;
   }
   receive(session,adapter,event){
     if(event.type==='usage'&&adapter?.endpoint&&event.source!=='gateway')return Promise.resolve();
@@ -86,6 +88,9 @@ export class Sessions {
         return;
       }
       event=redactMedia(event);
+      if(event.type==='usage')run.stats.requests++;
+      if(event.type==='upstream-error')run.stats.failedRequests++;
+      if(event.name==='llm/retry-started')run.stats.corrections++;
       if(event.type==='error'||event.type==='turn-end'&&event.status!=='completed')event=failureValue(event,[adapter?.endpoint?.key]);
       if(event.type==='upstream-error')run.upstreamFailure={kind:'upstream',code:event.code,message:failureText(event.message),...(event.resetAt?{resetAt:event.resetAt}:{}),source:event.provider==='workbuddy'?'WorkBuddy':'Qoder'};
       if(event.source==='gateway'&&event.name==='gateway/request-completed')run.upstreamFailure=null;
@@ -141,6 +146,9 @@ export class Sessions {
           });
           return;
         }
+        if(issue.canContinue){
+          await this.finish(session,run,'paused',{...event,reason:{kind:'unfinished',code:'unfinished_task',message:'模型停下了，还有未完成的工作。发送“继续”可以接着做。',pending:issue.pending}});return;
+        }
         await this.store.event(session.id,{type:'error',source:'task-completion',code:'unfinished_task',turnId:run.id,text:issue.reason==='missing_result'?'原生后端结束时没有返回任务结果，本轮未完成。':'原生后端仍有未完成工作，有界续作已停止；本轮未标记为完成。'});
         await this.finish(session,run,'failed',{...event,reason:{kind:'unfinished',code:'unfinished_task',message:issue.reason==='missing_result'?'原生后端结束时没有返回任务结果，本轮未完成。':'原生后端仍有未完成工作，有界续作已停止。'}});return;
       }
@@ -157,14 +165,14 @@ export class Sessions {
       reason={...reason,kind:['upstream','cancelled','runtime','unfinished'].includes(reason?.kind)?reason.kind:'runtime',message:failureText(reason.message??reason)||'原生后端未完成本轮任务，未提供具体原因。',...(reason.code?{code:failureText(reason.code,100)}:{})};
     }
     for(const approvalId of run.approvals)await this.store.event(session.id,{type:'approval-resolved',approvalId,choice:'expired',turnId:run.id});run.approvals.clear();
-    await this.store.event(session.id,{...event,type:'turn-end',status,...reason?{reason}:{},turnId:run.id});
-    await this.store.mutate(()=>{session.status=status;session.updatedAt=new Date().toISOString();if(reason)session.lastFailure={kind:reason.kind,...reason.code?{code:reason.code}:{},message:reason.message,...reason.resetAt?{resetAt:reason.resetAt}:{},...reason.source?{source:reason.source}:{},at:session.updatedAt};else delete session.lastFailure;});
+    await this.store.event(session.id,{...event,type:'turn-end',status,...reason?{reason}:{},turnId:run.id,stats:{...run.stats,continuations:run.continuations}});
+    await this.store.mutate(()=>{session.status=status;session.updatedAt=new Date().toISOString();if(reason&&status!=='paused')session.lastFailure={kind:reason.kind,...reason.code?{code:reason.code}:{},message:reason.message,...reason.resetAt?{resetAt:reason.resetAt}:{},...reason.source?{source:reason.source}:{},at:session.updatedAt};else delete session.lastFailure;});
     }catch(error){
       status='failed';session.status=status;
       this.store.emit('event',{type:'error',sessionId:session.id,turnId:run.id,id:randomUUID(),at:new Date().toISOString(),text:'会话记录无法保存：'+error.message});throw error;
     }finally{
     if(this.runs.get(session.id)===run)this.runs.delete(session.id);
-    if(status!=='completed'&&!(status==='interrupted'&&event.retainAdapter===true)&&this.adapters.get(session.id)===run.adapter){this.adapters.delete(session.id);void run.adapter?.close().catch(()=>{});}
+    if(['completed','paused'].includes(status))this.touchAdapter(session.id);if(!['completed','paused'].includes(status)&&!(status==='interrupted'&&event.retainAdapter===true)&&this.adapters.get(session.id)===run.adapter){this.adapters.delete(session.id);this.adapterUsed.delete(session.id);void run.adapter?.close().catch(()=>{});}
     }
     })();return run.finishing;
   }
@@ -178,7 +186,7 @@ export class Sessions {
     if(this.rebinding.has(id))throw new Error('正在确认模型更新，请稍候');
     if(this.permissionChanging.has(id))throw new Error('正在更新授权模式，请稍候');
     this.validate(session.runtimeId,session.selection);
-    let prepared;const run={id:randomUUID(),cancelled:false,terminal:false,adapter:null,events:Promise.resolve(),approvals:new Set(),prepared:new Promise(resolve=>{prepared=resolve;}),intent:null,plan:[],tailText:'',hasError:false,continuations:0,endedNativeTurns:new Set()};
+    let prepared;const run={id:randomUUID(),cancelled:false,terminal:false,adapter:null,events:Promise.resolve(),approvals:new Set(),prepared:new Promise(resolve=>{prepared=resolve;}),intent:null,plan:[],tailText:'',hasError:false,continuations:0,stats:{requests:0,failedRequests:0,corrections:0},endedNativeTurns:new Set()};
     this.runs.set(id,run);
     let attachments=[];
     try{
@@ -290,7 +298,7 @@ export class Sessions {
     }finally{this.rebinding.delete(id);}
   }
   async close(){
-    this.closed=true;await Promise.all([...this.runs.keys()].map(id=>this.cancel(id).catch(()=>{})));
-    await Promise.all([...this.adapters.values()].map(a=>a.close().catch(()=>{})));this.adapters.clear();await this.dsh?.close();
+    this.closed=true;clearInterval(this.adapterTimer);this.adapterTimer=null;await Promise.all([...this.runs.keys()].map(id=>this.cancel(id).catch(()=>{})));
+    await Promise.all([...this.adapters.values()].map(a=>a.close().catch(()=>{})));this.adapters.clear();this.adapterUsed.clear();await this.dsh?.close();
   }
 }

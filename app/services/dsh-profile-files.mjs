@@ -1,4 +1,5 @@
-import {readFile,writeFile,open,rename,rm,stat} from 'node:fs/promises';
+import {readFile,writeFile,rename,rm,stat} from 'node:fs/promises';
+import {withFileLock} from './file-lock.mjs';
 import {join} from 'node:path';
 import {homedir} from 'node:os';
 import {createHash,randomBytes} from 'node:crypto';
@@ -37,18 +38,7 @@ async function replace(file,text){
 }
 export class DshProfileFiles {
  constructor({home=process.env.DSH_HOME||join(homedir(),'.dsh'),profile='desktop',namespaces=names,pidAlive=alive,lockTimeoutMs=30000}={}){if(!['desktop','web'].includes(profile))throw new Error('不支持的 DSH profile');Object.assign(this,{home,profile,namespaces,pidAlive,lockTimeoutMs});this.patch=join(home,'profiles',profile,'cordis.patch.yml');this.credentials=join(home,'.credentials.yaml');}
- async locked(file,action){
-  const lock=file+'.lock',started=Date.now();let handle;
-  for(let n=0;;n++){
-   try{handle=await open(lock,'wx',0o600);await handle.writeFile(`${process.pid}\n`);break;}catch(error){
-    if(error.code!=='EEXIST')throw error;
-    const pid=Number((await readFile(lock,'utf8').catch(()=>'')).trim());
-    if(Number.isSafeInteger(pid)&&pid>0&&!this.pidAlive(pid)){await rm(lock,{force:true});continue;}
-    if(Date.now()-started>=this.lockTimeoutMs)throw new Error('等待 DSH 配置锁超时，未修改文件');await delay(Math.min(200,25*2**n));
-   }
-  }
-  try{return await action();}finally{await handle.close();await rm(lock,{force:true});}
- }
+ async locked(file,action){return withFileLock(file+'.lock',action,{pidAlive:this.pidAlive,lockTimeoutMs:this.lockTimeoutMs,timeoutMessage:'等待 DSH 配置锁超时，未修改文件'});}
  async readPatch(){const info=await stat(join(this.home,'profiles',this.profile)).catch(error=>{if(error.code==='ENOENT')return null;throw error;});if(!info?.isDirectory())throw new Error(this.profile==='desktop'?'未找到 DSH 桌面配置，请先启动一次 DSH 再接入。':'未找到 DSH 私有 Host 配置。');let text;try{text=await readFile(this.patch,'utf8');}catch(error){if(error.code==='ENOENT')return {doc:parse('[]\n'),text:null};throw error;}const doc=parse(text);if(!isSeq(doc.contents))throw new Error('DSH 补丁配置必须是 YAML 数组，未修改文件');return {doc,text};}
  async describe(){const {doc}=await this.readPatch();return {writable:true,namespaces:Object.keys(this.namespaces).map(ns=>{const config=configAt(doc,ns);return {ns,revision:revision(config),section:{},user:config};})};}
  async mutate({ns,expectedRevision,ops}){
@@ -72,6 +62,13 @@ export class DshProfileFiles {
    await replace(this.credentials,next);return {};
   });
  }
+ async unsetCredential({ref}){
+  if(!/^[A-Za-z_][A-Za-z0-9_]*$/.test(ref))throw new Error('无效的 DSH 凭据引用');
+  await this.readPatch();return this.locked(this.credentials,async()=>{
+   const text=await readFile(this.credentials,'utf8').catch(error=>{if(error.code==='ENOENT')return null;throw error;});if(text==null||!text.trim())return {};const doc=parse(text);if(!isMap(doc.contents)||doc.get('version')!==1)throw new Error('DSH 凭据文件版本不受支持，未修改文件');if(!doc.hasIn(['refs',ref]))return {};
+   const masks=maskFor(doc,['refs'],[ref]),original=doc.clone();doc.deleteIn(['refs',ref]);const next=doc.toString({lineWidth:0}),check=parse(next);if(!isDeepStrictEqual(documentProjection(original,masks),documentProjection(check,masks))||!isDeepStrictEqual(doc.toJS(),check.toJS()))throw new Error('DSH 凭据配置校验失败，除目标引用外的内容发生变化，未写入');await replace(this.credentials,next);return {};
+  });
+ }
  async modelCatalog(){const {doc}=await this.readPatch(),providers=configAt(doc,'llm-pi-ai').providers??{};return {groups:Object.entries(providers).map(([id,p])=>({id,models:(p.models??[]).map(model=>({id:model.id}))}))};}
- async rpc(method,args={}){if(method==='settings/describe')return this.describe();if(method==='credentials/set')return this.setCredential(args);if(method==='settings/mutate')return this.mutate(args);if(method==='session/modelCatalog')return this.modelCatalog();throw new Error('不支持的 DSH 配置操作');}
+ async rpc(method,args={}){if(method==='settings/describe')return this.describe();if(method==='credentials/set')return this.setCredential(args);if(method==='credentials/unset')return this.unsetCredential(args);if(method==='settings/mutate')return this.mutate(args);if(method==='session/modelCatalog')return this.modelCatalog();throw new Error('不支持的 DSH 配置操作');}
 }

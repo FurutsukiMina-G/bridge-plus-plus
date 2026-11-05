@@ -1,6 +1,12 @@
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
-import {limitNotice,rateLimited,resetText,sameUpstream,stopLabel,stopNote,upstreamHtml,upstreamText,upstreamTitle} from '../app/ui/upstream.js';
+import {limitNotice,rateLimited,resetText,sameUpstream,stopLabel,stopNote,turnExtras,upstreamHtml,upstreamText,upstreamTitle} from '../app/ui/upstream.js';
+
+test('a turn lists only the extra requests it really made',()=>{
+  assert.deepEqual(turnExtras({requests:59,failedRequests:3,corrections:0,continuations:2}),['请求 59 次','失败 3 次','自动续作 2 次']);
+  assert.deepEqual(turnExtras({requests:1,failedRequests:0,corrections:0,continuations:0}),['请求 1 次']);
+  assert.deepEqual(turnExtras(undefined),[],'older journals have no counts');
+});
 import {serviceCardHtml} from '../app/ui/setup.js';
 import {ActivityTracker} from '../app/ui/activity.js';
 import {displayEvents} from '../app/ui/view-state.js';

@@ -5,7 +5,9 @@ import {tmpdir} from 'node:os';
 import {join,dirname} from 'node:path';
 import {childEnvironment} from '../core/process.mjs';
 
-const exec=promisify(execFile),cache=new Map();
+const exec=promisify(execFile),cache=new Map(),durable=new Map();
+export function hydrateRuntimePermissionCache(probes={}){cache.clear();durable.clear();for(const [key,value]of Object.entries(probes))if(value&&typeof value==='object'&&value.unavailable!==true&&!value.error){durable.set(key,value);cache.set(key,Promise.resolve(value));}}
+export function successfulPermissionProbes(){return new Map(durable);}
 const labels={ask:'每次询问','auto-review':'自动审查',auto:'一键授权',readonly:'只读'};
 const mode=(id,description,native)=>({id,label:labels[id],description,native});
 export const KIMI_PERMISSION_IDS={ask:'default','auto-review':'auto',auto:'yolo',readonly:'plan'};
@@ -141,7 +143,7 @@ export async function withRuntimePermissions(runtimes,preferences={},probe=inspe
       if(runtime.status&&runtime.status!=='ready'||!runtime.executable)return runtimePermissionView({...runtime,permissions:permissionCatalog(runtime,{unavailable:true,reason:runtime.reason??'运行程序未安装'})},preferences[runtime.id]);
       const info=runtime.executable?await stat(runtime.executable):null,key=JSON.stringify([runtime.id,runtime.executable,info?.size,info?.mtimeMs]);
       let flight=cache.get(key);if(!flight){flight=probe(runtime);cache.set(key,flight);flight.catch(()=>cache.delete(key));}
-      evidence=await flight;
+      evidence=await flight;if(evidence&&typeof evidence==='object'&&evidence.unavailable!==true&&!evidence.error)durable.set(key,evidence);
     }catch(error){evidence={unavailable:true,error:'原生授权能力检测失败：'+error.message};}
     return runtimePermissionView({...runtime,permissions:permissionCatalog(runtime,evidence)},preferences[runtime.id]);
   }));

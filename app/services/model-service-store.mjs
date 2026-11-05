@@ -2,10 +2,10 @@ import {mkdir,readFile,writeFile,rename,rm,appendFile,stat} from 'node:fs/promis
 import {join,resolve} from 'node:path';
 import {randomBytes,randomUUID} from 'node:crypto';
 import {serviceDefinition,validateServiceSettings} from './model-service-catalog.mjs';
-import {protectServiceDirectory} from './model-service-system.mjs';
+import {ensureServiceDirectoryProtected} from './model-service-system.mjs';
 async function replaceFile(tmp,file){for(let n=0;;n++)try{await rename(tmp,file);return;}catch(error){if(n>=5||!['EPERM','EBUSY','EACCES'].includes(error.code))throw error;await new Promise(r=>setTimeout(r,25*2**n));}}
 export class ModelServiceStore {
-  constructor(userData,id,{protect=protectServiceDirectory}={}){this.definition=serviceDefinition(id);this.root=resolve(userData,'model-services',id);this.protect=protect;this.queue=Promise.resolve();}
+  constructor(userData,id,{protect=ensureServiceDirectoryProtected}={}){this.definition=serviceDefinition(id);this.root=resolve(userData,'model-services',id);this.protect=protect;this.queue=Promise.resolve();}
   async open(){await mkdir(this.root,{recursive:true});await this.protect(this.root);this.settings=validateServiceSettings(await this.read('settings.json',{port:this.definition.port,defaultProfile:'dsh',autostart:false}));await this.initialize('settings.json',this.settings);this.key=await this.secret();return this;}
   async read(name,fallback=null){for(let n=0;;n++)try{return JSON.parse(await readFile(join(this.root,name),'utf8'));}catch(error){if(error.code==='ENOENT')return fallback;if(!(error instanceof SyntaxError)||n>=4)throw new Error(`模型服务文件 ${name} 无法读取`);await new Promise(r=>setTimeout(r,25*2**n));}}
   async installIfMissing(name,text){try{await writeFile(join(this.root,name),text,{flag:'wx',mode:0o600});}catch(error){if(error.code!=='EEXIST')throw error;}}

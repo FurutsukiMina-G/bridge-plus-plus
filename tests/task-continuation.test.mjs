@@ -71,11 +71,52 @@ test('a new plan-only question does not inherit an old unfinished plan',async t=
   await f.manager.prompt(f.session.id,'接下来只给审查计划即可，不要使用工具。');const a=f.instances[0];await a.emit({type:'text',text:'1. 读取文件\n2. 检查配置'});await a.emit({type:'turn-end',status:'completed',nativeTurn:1});
   assert.equal(a.sent.length,1);assert.equal(f.session.status,'completed');
 });
-test('repeated phase summaries stop at the continuation limit and never become completed',async t=>{
+test('repeated phase summaries pause at the limit and a user continuation resumes the same task and adapter',async t=>{
   const f=await fixture(t);await f.manager.prompt(f.session.id,task);const a=f.instances[0];await a.emit({type:'plan',data:{entries:open}});
   for(let i=1;i<=TASK_CONTINUATION_LIMIT+1;i++){await a.emit({type:'text',text:phase});await a.emit({type:'turn-end',status:'completed',nativeTurn:i});if(i<=TASK_CONTINUATION_LIMIT)await until(()=>a.sent.length===i+1);}
-  assert.equal(a.sent.length,TASK_CONTINUATION_LIMIT+1);assert.equal(f.session.status,'failed');assert.equal(a.closed,true);
-  const events=await f.store.events(f.session.id);assert.equal(events.filter(e=>e.type==='turn-end').length,1);assert.equal(events.at(-1).status,'failed');assert.ok(events.some(e=>e.code==='unfinished_task'));
+  assert.equal(a.sent.length,TASK_CONTINUATION_LIMIT+1);assert.equal(f.session.status,'paused');assert.ok(!a.closed);
+  assert.equal(f.manager.runs.has(f.session.id),false);assert.equal(f.session.lastFailure,undefined);
+  const events=await f.store.events(f.session.id);assert.equal(events.filter(e=>e.type==='turn-end').length,1);
+  assert.deepEqual(events.at(-1).stats,{requests:0,failedRequests:0,corrections:0,continuations:TASK_CONTINUATION_LIMIT});
+  assert.equal(events.at(-1).status,'paused');assert.deepEqual(events.at(-1).reason,{kind:'unfinished',code:'unfinished_task',message:'模型停下了，还有未完成的工作。发送“继续”可以接着做。',pending:1});
+  assert.equal(events.filter(e=>e.type==='error').length,0);
+  await f.manager.prompt(f.session.id,'继续');assert.equal(f.instances.length,1);assert.equal(a.sent.at(-1),'继续');
+  const resumed=f.manager.runs.get(f.session.id);assert.equal(resumed.intent.task,task);assert.deepEqual(resumed.plan,open);assert.equal(resumed.continuations,0);
+  await a.emit({type:'plan',data:{entries:done}});await a.emit({type:'text',text:'检查报告已完成：测试文件内容正确。'});await a.emit({type:'turn-end',status:'completed',nativeTurn:TASK_CONTINUATION_LIMIT+2});
+  assert.equal(f.session.status,'completed');
+});
+
+test('turn statistics count accepted usage, upstream errors and corrections once and reset on the next user turn',async t=>{
+  const f=await fixture(t);await f.manager.prompt(f.session.id,'hello');const a=f.instances[0],run=f.manager.runs.get(f.session.id);
+  await a.emit({type:'usage',data:{prompt_tokens:999}}); // Native duplicate: bridged sessions count gateway usage only.
+  await f.manager.receive(f.session,a,{type:'usage',source:'gateway',data:{prompt_tokens:20}});
+  await a.emit({type:'upstream-error',code:'transient',message:'synthetic retry',retrying:true});
+  await a.emit({type:'native-event',source:'gateway',name:'llm/retry-started'});
+  await f.manager.gateway.onSuccess(f.session.id,run.id);
+  await a.emit({type:'text',text:'Hello.'});await a.emit({type:'turn-end',status:'completed',nativeTurn:1});
+  let events=await f.store.events(f.session.id);assert.deepEqual(events.at(-1).stats,{requests:1,failedRequests:1,corrections:1,continuations:0});
+  await a.emit({type:'usage',source:'gateway'}); // A terminal turn cannot accumulate more usage.
+  await f.manager.prompt(f.session.id,'hello again');await a.emit({type:'text',text:'Hello again.'});await a.emit({type:'turn-end',status:'completed',nativeTurn:2});
+  events=await f.store.events(f.session.id);assert.deepEqual(events.at(-1).stats,{requests:0,failedRequests:0,corrections:0,continuations:0});
+});
+
+test('paused sessions survive store recovery and satisfy the archive idle-state guard',async t=>{
+  const f=await fixture(t);await f.store.mutate(()=>{f.session.status='paused';f.session.nativeId='preserved-native';});
+  const restored=await new Store(f.store.root).open();t.after(()=>restored.close());
+  assert.equal(restored.session(f.session.id).status,'paused');assert.equal(restored.session(f.session.id).nativeId,'preserved-native');
+  // Read the existing IPC handler because this task does not permit edits to main.mjs.
+  const {readFile}=await import('node:fs/promises');const main=await readFile('app/main.mjs','utf8');
+  const handler=main.match(/async 'session:archive'\(\{sessionId\}\)\{([^\n]+)\},/)[1];
+  const archive=new Function('store','id',`return async sessionId=>{${handler}}`)(restored,x=>x);
+  await archive(f.session.id);assert.equal(restored.session(f.session.id).archived,true);
+});
+
+test('an empty bridged result is a real failure and never a pause',async t=>{
+  const f=await fixture(t);await f.manager.prompt(f.session.id,task);const a=f.instances[0];
+  await a.emit({type:'plan',data:{entries:open}});await a.emit({type:'turn-end',status:'completed',nativeTurn:1});
+  assert.equal(f.session.status,'failed');assert.equal(a.closed,true);assert.equal(a.sent.length,1);
+  const events=await f.store.events(f.session.id);assert.ok(events.some(e=>e.type==='error'&&e.code==='unfinished_task'));
+  assert.equal(events.at(-1).status,'failed');assert.equal(f.session.lastFailure.code,'unfinished_task');
 });
 test('cancelling when continuation is announced prevents the next native prompt',async t=>{
   const f=await fixture(t);await f.manager.prompt(f.session.id,task);const a=f.instances[0];let cancelled;
