@@ -28,6 +28,12 @@ test('tool decisions honor selected name and JSON Schema; tool results remain in
     { role: 'tool', tool_call_id: 'call_1', content: 'SENTINEL_OK' }] });
   assert.match(conversationPrompt(next), /SENTINEL_OK/);
   assert.match(conversationPrompt(next), /call_1/);
+  for (const prompt of [conversationPrompt(req), conversationPrompt(next, { historyMode: 'delta' })])
+    assert.doesNotMatch(prompt, /at most one|parallel_tool_calls:false|bounded model turns|one tool call at a time/i);
+  const serial = ChatRequest.parse({ ...task, parallel_tool_calls: false });
+  assert.match(conversationPrompt(serial), /This request sets parallel_tool_calls:false\. Return at most one host tool call\./);
+  assert.throws(() => parseDecision('{"kind":"tool_calls","calls":[{"name":"read_file","arguments":{"path":"a.txt"}},{"name":"read_file","arguments":{"path":"b.txt"}}]}', serial),
+    /parallel_tool_calls false permits only one host call/);
 });
 test('compact prompt preserves tool names and required parameter keys while shrinking long descriptions', () => {
   const req = ChatRequest.parse({ ...task, tools: [{ type: 'function', function: {

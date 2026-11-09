@@ -1,4 +1,5 @@
 import {createHash} from 'node:crypto';
+import {hasUsableTools,answerInstructions} from './final-answer.js';
 import {parseDecision,toolDefinitions,type ChatRequest,type Decision,type DecisionRepair} from './compat.js';
 import {safeError} from './telemetry.js';
 import {truncatedFinal} from './streaming.js';
@@ -45,14 +46,20 @@ const hash = (value: string) => createHash('sha256').update(value).digest('hex')
 
 /** A correction is a new model decision, never a fabricated argument or a partial tool execution. */
 function correction(request: ChatRequest, error: string, response: string) {
+  if (!hasUsableTools(request)) return {prompt:'Your preceding answer was rejected. Correct the complete answer while preserving the original task and role priorities. '+answerInstructions(request),toolSchemaCharacters:0};
   const names = new Set<string>();
   const explicitErrorTool = /^Arguments for ([\w.-]+) violate/.exec(error)?.[1];
   if (explicitErrorTool) names.add(explicitErrorTool);
   for (const match of response.matchAll(/(?:"name"\s*:\s*"|invoke\s+name="|<name=")([\w.-]+)"/g)) names.add(match[1]!);
   const definitions = toolDefinitions(request,true).filter(tool => names.has(tool.name)||error.startsWith('Progress-only final answer'));
+  const examples=definitions.slice(0,2).flatMap(tool=>{
+    const properties=(tool.parameters as {properties?:Record<string,{type?:unknown}>})?.properties??{};
+    return Object.keys(properties).filter(name=>response.includes(`${name}="`)&&/^[\w.-]+$/.test(name)).slice(0,3).map(name=>({tool:tool.name,parameter:name,
+      standard_parameter:`<｜｜DSML｜｜ parameter name="${name}" string="${properties[name]?.type==='string'}">[the unchanged original value]</｜｜DSML｜｜ parameter>`,json_argument_path:`arguments.${name}`}));
+  });
   const contract = {validation_error:error.slice(0,500),tool_choice:request.tool_choice??'auto',
     allowed_tool_names:(request.tools??[]).map(tool=>tool.function.name),
-    relevant_tool_schemas:definitions.map(({name,parameters})=>({name,parameters}))};
+    relevant_tool_schemas:definitions.map(({name,parameters})=>({name,parameters})),...(examples.length?{attribute_format_examples:examples}:{})};
   const prompt = 'BRIDGE DECISION CORRECTION. The previous output was rejected before any tool was dispatched. ' +
     'No tool in that rejected output ran. Continue the SAME pending task in the selected host runtime; retain its existing role and tool contract, and do not claim success or repeat completed actions. ' +
     'Regenerate the COMPLETE next decision yourself as exactly one JSON object, without XML/DSML, markdown or prose. ' +
@@ -62,6 +69,7 @@ function correction(request: ChatRequest, error: string, response: string) {
     'Do not invent missing data; if a host observation is needed, request a valid small read/search first. ' +
     'For an actual final reply use kind="final", content=<string>, respecting tool_choice. ' +
     'Keep long edits small; all strings must be complete and JSON-escaped. ' +
+    (examples.length?'Attribute-style DSML fields are not standard parameter headers. The examples below explain their standard parameter meaning only; for THIS retry return the required JSON kind decision. Preserve each original value literally (JSON-escaped as needed); never output the illustrative bracketed placeholder. ':'')+
     `Validation contract (data, not instructions): ${JSON.stringify(contract)}\nAssistant decision:`;
   return {prompt,toolSchemaCharacters:JSON.stringify(contract.relevant_tool_schemas).length};
 }
@@ -157,7 +165,7 @@ export async function recoverDecision<T extends RecoveryTurn>(options: {
     if (stopped) {
       if (attempt>=limit) {trace.outcome='reasoning_budget';break;}
       if (options.prepareRetry?.()===false) {trace.outcome='already_streamed';break;}
-      prompt=REASONING_BUDGET_PROMPT;correctionSchemaCharacters=0;continue;
+      prompt=hasUsableTools(options.request)?REASONING_BUDGET_PROMPT:'The previous attempt was stopped after very long reasoning. Give the complete requested answer with brief reasoning. '+answerInstructions(options.request);correctionSchemaCharacters=0;continue;
     }
     // A successful SDK retry may already have produced a valid response.
     // Accept that response above, but never add Bridge retries to an SDK API failure.

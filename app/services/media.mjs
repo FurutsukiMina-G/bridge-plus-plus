@@ -37,7 +37,16 @@ export class MediaClaimError extends Error {
 }
 export class MediaService {
   constructor(store){this.store=store;this.root=join(store.root,'media');this.staging=join(this.root,'staging');this.entries=new Map();this.claims=new Set();}
-  async init(){await mkdir(this.staging,{recursive:true});await this.checked(this.store.root,this.root);await this.checked(this.root,this.staging);for(const name of await readdir(this.staging))if(/^[\w-]+\.[a-z0-9]+$/.test(name))await rm(join(this.staging,name),{force:true});for(const s of this.store.state.sessions){if(Array.isArray(s.attachments)){s.mediaAttachments??=s.attachments;delete s.attachments;}for(const a of s.mediaAttachments??[])this.entries.set(a.id,{...a,sessionId:s.id,path:join(this.root,'sessions',s.id,a.id+extname(a.name).toLowerCase()),root:join(this.root,'sessions',s.id)});}return this;}
+  async init(){
+    await mkdir(this.staging,{recursive:true});await this.checked(this.store.root,this.root);await this.checked(this.root,this.staging);
+    const retained=new Set();
+    for(const s of this.store.state.sessions)for(const row of s.queue??[])for(const a of row.attachments??[]){
+      safeMediaName(a.name);if(!/^[a-f0-9-]{36}$/.test(a.id))throw new Error('排队附件标识无效');
+      const file=a.id+extname(a.name).toLowerCase();retained.add(file);this.entries.set(a.id,{...a,projectId:s.projectId,path:join(this.staging,file),root:this.staging});
+    }
+    for(const name of await readdir(this.staging))if(/^[\w-]+\.[a-z0-9]+$/.test(name)&&!retained.has(name))await rm(join(this.staging,name),{force:true});
+    for(const s of this.store.state.sessions){if(Array.isArray(s.attachments)){s.mediaAttachments??=s.attachments;delete s.attachments;}for(const a of s.mediaAttachments??[])this.entries.set(a.id,{...a,sessionId:s.id,path:join(this.root,'sessions',s.id,a.id+extname(a.name).toLowerCase()),root:join(this.root,'sessions',s.id)});}return this;
+  }
   public(entry){const {id,kind,mime,name,size}=entry;return {id,kind,mime,name,size,url:`${MEDIA_SCHEME}://media/${id}`};}
   async checked(root,path){if(!inside(root,path))throw new Error('媒体路径超出允许目录');const [r,p]=await Promise.all([realpath(root),realpath(path)]);if(!inside(r,p))throw new Error('媒体符号链接超出允许目录');return p;}
   async inspect(path,root){if(!formats[extname(path).toLowerCase()])throw new Error('不支持的媒体扩展名');const p=await this.checked(root,path),handle=await open(p,'r');try{const info=await handle.stat();if(!info.isFile()||info.size>Math.max(...Object.values(MEDIA_LIMITS)))throw new Error('媒体文件超限或类型无效');const header=Buffer.alloc(Math.min(info.size,4096));await handle.read(header,0,header.length,0);const type=detectMedia(p,header);if(info.size>MEDIA_LIMITS[type.kind])throw new Error('媒体文件超过大小上限');return {...type,size:info.size,path:p};}finally{await handle.close();}}
@@ -47,19 +56,25 @@ export class MediaService {
   }
   async stage({projectId,name,data}){this.store.project(projectId);safeMediaName(name);if(!(data instanceof Uint8Array))throw new Error('附件 data 必须是 Uint8Array');if(data.byteLength>Math.max(...Object.values(MEDIA_LIMITS)))throw new Error('媒体文件超过大小上限');const type=detectMedia(name,data);if(data.byteLength>MEDIA_LIMITS[type.kind])throw new Error('媒体文件超过大小上限');const id=randomUUID(),path=join(this.staging,id+extname(name).toLowerCase());await this.checked(this.root,this.staging);await writeFile(path,data,{flag:'wx',mode:0o600});const entry={id,projectId,name,...type,size:data.byteLength,path,root:this.staging};this.entries.set(id,entry);return this.public(entry);}
   async stageFile(projectId,path,kinds){const type=await this.inspect(path,resolve(path,'..'));if(kinds&&!kinds.includes(type.kind))throw new Error('所选文件类型不允许');return this.stage({projectId,name:basename(path),data:await readFile(type.path)});}
-  async discard(id){const e=this.entries.get(id);if(!e||e.sessionId||this.claims.has(id))return;await this.checked(this.staging,e.path);await rm(e.path,{force:true});this.entries.delete(id);}
-  async claim(session,ids,capabilities){
+  reserved(id,allowed=[]){return this.store.state.sessions.some(s=>(s.queue??[]).some(row=>!allowed.includes(row.id)&&row.attachments?.some(a=>a.id===id)));}
+  async discard(id){const e=this.entries.get(id);if(!e||e.sessionId||this.claims.has(id)||this.reserved(id))return;await this.checked(this.staging,e.path);await rm(e.path,{force:true});this.entries.delete(id);}
+  validateClaim(session,ids,capabilities,allowed=[]){
     if(!Array.isArray(ids)||ids.length>MAX_ATTACHMENTS_PER_TURN||new Set(ids).size!==ids.length)throw new Error(`无效附件列表（最多 ${MAX_ATTACHMENTS_PER_TURN} 个）`);
     const sizeLimit=e=>Math.min(mediaSizeLimit(e.kind,session.runtimeId),capabilities[e.kind]?.maxBytes??Infinity);
-    const rows=ids.map(id=>{const e=this.entries.get(id);if(!e||e.sessionId||e.projectId!==session.projectId||this.claims.has(id))throw new Error('附件不存在、已发送或不属于当前项目');if(!capabilities[e.kind]?.allowed)throw new Error(capabilities[e.kind]?.reason??'当前选择不支持此附件');if(Array.isArray(capabilities[e.kind]?.mimes)&&!capabilities[e.kind].mimes.includes(e.mime))throw new Error('当前模型未声明接受此附件 MIME：'+e.mime);if(e.size>sizeLimit(e))throw new Error(`附件 ${e.name} 超过当前运行环境的单文件大小上限`);return e;});
+    const rows=ids.map(id=>{const e=this.entries.get(id);if(!e||e.sessionId||e.projectId!==session.projectId||this.claims.has(id)||this.reserved(id,allowed))throw new Error('附件不存在、已发送、已排队或不属于当前项目');if(!capabilities[e.kind]?.allowed)throw new Error(capabilities[e.kind]?.reason??'当前选择不支持此附件');if(Array.isArray(capabilities[e.kind]?.mimes)&&!capabilities[e.kind].mimes.includes(e.mime))throw new Error('当前模型未声明接受此附件 MIME：'+e.mime);if(e.size>sizeLimit(e))throw new Error(`附件 ${e.name} 超过当前运行环境的单文件大小上限`);return e;});
     const totalLimit=Math.min(mediaTurnLimits(session.runtimeId).maxTotalBytes,capabilities.turn?.maxTotalBytes??Infinity);
     if(rows.reduce((n,e)=>n+e.size,0)>totalLimit)throw new Error(`单轮附件总大小超过 ${totalLimit/1024/1024} MiB`);
+    return rows;
+  }
+  async claim(session,ids,capabilities,{queueIds=[]}={}){
+    const rows=this.validateClaim(session,ids,capabilities,queueIds),sizeLimit=e=>Math.min(mediaSizeLimit(e.kind,session.runtimeId),capabilities[e.kind]?.maxBytes??Infinity);
     rows.forEach(e=>this.claims.add(e.id));const moved=[];
     try{const root=join(this.root,'sessions',session.id);await mkdir(root,{recursive:true});await this.checked(this.root,root);for(const e of rows){const info=await this.inspect(e.path,e.root);if(info.size!==e.size||info.mime!==e.mime||info.size>sizeLimit(e))throw new Error('附件文件已变化或超过当前大小上限');const path=join(root,e.id+extname(e.name).toLowerCase());await rename(e.path,path);Object.assign(e,{path,root,sessionId:session.id});moved.push(e);}return moved;}
-    catch(error){if(moved.length){await this.rollback(rows);throw new MediaClaimError(error,rows.map(e=>e.id));}throw error;}
+    catch(error){if(moved.length){if(queueIds.length){await this.restage(moved);throw error;}await this.rollback(rows);throw new MediaClaimError(error,rows.map(e=>e.id));}throw error;}
     finally{rows.forEach(e=>this.claims.delete(e.id));}
   }
   async rollback(rows){for(const e of rows){await this.checked(e.root,e.path).then(path=>rm(path,{force:true})).catch(()=>{});this.entries.delete(e.id);}}
+  async restage(rows){for(const e of rows){if(!e.sessionId)continue;await this.checked(e.root,e.path);const path=join(this.staging,e.id+extname(e.name).toLowerCase());await rename(e.path,path);Object.assign(e,{path,root:this.staging});delete e.sessionId;}return rows.map(e=>this.public(e));}
   async importOutput(session,{name,data,path,mime,origin}){
     let bytes;if(path){const roots=[this.store.project(session.projectId).path,join(this.root,'sessions',session.id)];path=resolve(roots[0],path);const root=roots.find(r=>inside(r,path));if(!root)throw new Error('输出媒体路径超出允许目录');const info=await this.inspect(path,root);bytes=await readFile(info.path);name??=basename(path);}else bytes=decodeMediaData(data);
     if(!name){const extension=Object.entries(formats).find(([,v])=>v[1]===mime)?.[0];if(!extension)throw new Error('输出媒体 MIME 未知');name='generated'+extension;}

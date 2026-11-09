@@ -6,12 +6,16 @@ import { InputQueue } from './queue.js';
 import { selectModel } from './model.js';
 import { Telemetry, safeError } from './telemetry.js';
 import { type ChatRequest, type Decision, type DecisionRepair, conversationPrompt, conversationMessages, parseDecision, toolDefinitions } from './compat.js';
-import { hasConversationPrefix, routeConversation, prefixIssue,evictionCandidate } from './routing.js';
+import { hasConversationPrefix, routeConversation, prefixIssue,evictionCandidate,prunedConversationPrefix } from './routing.js';
+import {pruningThreshold,pruningAllowed} from './history-pruning.js';
 import { abortable } from './async.js';
 import { prefixCacheEstimate, withCachedTokens, ZERO_USAGE, type OpenAIUsage } from './usage.js';
 import {recoverDecision,decisionRetryLimit,decisionCorrectionPrompt,type RecoveryTrace} from './decision-recovery.js';
 import { cacheFromCredits, sharedTierCalendar } from './billing.js';
 import {sdkMediaPrompt} from './media-input.js';
+import {IsolationCache} from './isolation-cache.js';
+import {startupTransport,runtimeMemory,DISABLED_RUNTIME_MEMORY,type StartupAttempt} from './startup-phases.js';
+import {hasUsableTools} from './final-answer.js';
 
 export type InferHooks = { signal?: AbortSignal; onText?: (text: string) => void;
   onCorrection?: (retry:number,error:string)=>void;
@@ -33,6 +37,9 @@ type RecordSession = {
   policyCalls: Array<{ purpose: string; model: string; context_window: number | null; reasoning_effort: string | null }>;
   /** Prompt tokens of this Qoder session's latest completed model request: the next request's exact prefix. */
   lastPromptTokens: number | null;
+  contextUsageRatio?:number|null;
+  startupPhases?:{attempts:StartupAttempt[];total_ms:number;isolation_cache:{enabled:boolean;hit:boolean;status:string;cli_version:string|null;declared_cli_version:string|null}};
+  nativeReleased?:boolean;
   lastFailedDecision: {hash:string;response:string;error:string;recovery:RecoveryTrace} | null;
   lastCompletionId: string | null;
   lastFinishReason?: 'length';
@@ -50,6 +57,16 @@ export class QoderPool {
   private byToolId = new Map<string, string>();
   private byClientSession = new Map<string, string>();
   private nextWarm: Promise<RecordSession> | null = null;
+  private warmTimer?: ReturnType<typeof setTimeout>;
+  private extraWarm:Promise<RecordSession>[]=[];
+  private warmReady=new Map<Promise<RecordSession>,RecordSession>();
+  private warmTimers=new Map<Promise<RecordSession>,ReturnType<typeof setTimeout>>();
+  private warmTarget=1;
+  private lastDemand=Date.now();
+  private openingControllers=new Set<AbortController>();
+  private cacheReady?:Promise<IsolationCache|null>;
+  private cacheInfo={enabled:false,hit:false,status:'disabled',cli_version:null as string|null,declared_cli_version:null as string|null};
+  private closed = false;
   private openingByClient = new Map<string, Promise<RecordSession>>();
   private pendingSlots=0;
   private prewarmError: string | null = null;
@@ -62,6 +79,8 @@ export class QoderPool {
   private sweeper = setInterval(() => this.sweepIdle(), SWEEP_MS);
   constructor(readonly config: Config, private readonly startRuntime: typeof startup = startup) {
     this.sweeper.unref();
+    if(!Number.isSafeInteger(config.blankWarmLimit??2)||(config.blankWarmLimit??2)<0||(config.blankWarmLimit??2)>4||!Number.isSafeInteger(config.blankWarmTtlMs??120000)||(config.blankWarmTtlMs??120000)<1){clearInterval(this.sweeper);throw new Error('Invalid Qoder blank runtime limit or TTL');}
+    try{pruningThreshold(config.prunedHistoryReuseRatio);}catch(error){clearInterval(this.sweeper);throw error;}
     try { decisionRetryLimit(config.decisionRetries); }
     catch(error) { clearInterval(this.sweeper); throw error; }
     if (config.sessionIdleMs !== undefined && (!Number.isSafeInteger(config.sessionIdleMs) || config.sessionIdleMs < 60_000)) {
@@ -74,26 +93,51 @@ export class QoderPool {
       throw new Error('reasoningGuardTokens must be 0 (disabled) or an integer >=1024');
     }
   }
-  private primeNext(): Promise<RecordSession> {
-    if (this.nextWarm) return this.nextWarm;
-    const pending = this.open();
-    this.nextWarm = pending;
-    void pending.then(() => { this.prewarmError = null; }, error => {
-      if (this.nextWarm === pending) this.nextWarm = null;
+  private dropWarm(pending:Promise<RecordSession>){
+    clearTimeout(this.warmTimers.get(pending));this.warmTimers.delete(pending);this.warmReady.delete(pending);
+    if(this.nextWarm===pending)this.nextWarm=this.extraWarm.shift()??null;else this.extraWarm=this.extraWarm.filter(p=>p!==pending);
+  }
+  private newWarm():Promise<RecordSession>{
+    const pending=this.open();
+    void pending.then(record => { this.prewarmError = null;
+      if(this.closed){this.close(record);return;}
+      if(this.nextWarm!==pending&&!this.extraWarm.includes(pending))return;
+      this.warmReady.set(pending,record);const timer=setTimeout(()=>{this.dropWarm(pending);this.close(record);},this.config.blankWarmTtlMs??120000);timer.unref();this.warmTimers.set(pending,timer);
+    }, error => {
+      this.dropWarm(pending);
       this.prewarmError = safeError(error);
       process.stderr.write(`[bridge] Prewarm failed: ${this.prewarmError}\n`);
     });
     return pending;
   }
-  prewarm() { return this.primeNext().then(() => {}); }
+  private primeNext():Promise<RecordSession>{if(this.nextWarm)return this.nextWarm;return this.nextWarm=this.newWarm();}
+  private replenish(){
+    if(this.closed||Date.now()-this.lastDemand>(this.config.blankWarmTtlMs??120000)||!(this.config.blankWarmLimit??2))return;
+    void this.primeNext();
+    while(1+this.extraWarm.length<Math.min(this.warmTarget,this.config.blankWarmLimit??2))this.extraWarm.push(this.newWarm());
+  }
+  prewarm() {this.lastDemand=Date.now();if(!(this.config.blankWarmLimit??2))return Promise.resolve();return this.primeNext().then(() => {});}
+  private oneShot(request:ChatRequest){return !hasUsableTools(request)&&!request.prompt_cache_key&&request.messages.length===2&&request.messages[0]?.role==='system'&&request.messages[1]?.role==='user'&&request.messages.every(m=>typeof m.content==='string');}
+  private async cache(){
+    if(!this.config.isolationCacheDir)return null;
+    this.cacheReady??=IsolationCache.open(this.config.isolationCacheDir,this.config.sessionSettings??'{}',this.config.cliPath,this.config.isolationRuntimeIdentity).then(cache=>{
+      cache.plugins.forEach(id=>this.disabledPlugins.add(id));cache.skills.forEach(id=>this.disabledSkills.add(id));this.cacheInfo={enabled:true,hit:cache.hit,status:'ready',cli_version:cache.observedCliVersion,declared_cli_version:cache.declaredCliVersion};return cache;
+    }).catch(()=>{this.cacheInfo={enabled:true,hit:false,status:'unavailable',cli_version:null,declared_cli_version:null};return null;});return this.cacheReady;
+  }
   private async open(): Promise<RecordSession> {
+    const openingAt=performance.now(),attempts:StartupAttempt[]=[];
     await mkdir('.runtime', { recursive: true });
+    const cache=await this.cache();
+    if(this.closed)throw new Error('Qoder pool closed during startup');
     for (let attempt = 0; attempt < 2; attempt++) {
     const controller = new AbortController();
+    this.openingControllers.add(controller);
     const queue = new InputQueue<SDKUserMessage>();
     let warm: Warm | undefined;
     const policyCalls: RecordSession['policyCalls'] = [];
     const policy: RecordSession['policy'] = { reasoning: null };
+    const phase:StartupAttempt={attempt:attempt+1,transport_kind:'unobserved',transport_initialize_ms:null,sdk_startup_ms:0,sdk_initialize_ms:null,initialization_result_ms:0,isolate_ms:0,get_available_models_ms:0,total_ms:0,isolation_retry:false,memory:{...DISABLED_RUNTIME_MEMORY}};
+    attempts.push(phase);const phaseAt=performance.now();
     try {
       const options = baseOptions(this.config, controller);
       const raw: unknown = this.config.sessionSettings;
@@ -108,6 +152,7 @@ export class QoderPool {
       settings = { ...settings, enabledPlugins: { ...settings.enabledPlugins as object, ...Object.fromEntries([...this.disabledPlugins].map(id => [id, false])) },
         skillOverrides: { ...settings.skillOverrides as object, ...Object.fromEntries([...this.disabledSkills].map(name => [name, 'off'])) } };
       options.settings = JSON.stringify(settings);
+      const appliedPlugins=new Set(this.disabledPlugins),appliedSkills=new Set(this.disabledSkills),pid=startupTransport(options,phase);
       options.resolveModel = context => {
         const selected = selectModel(context.availableModels,
           policy.reasoning ? { ...this.config, reasoning: policy.reasoning } : this.config);
@@ -116,24 +161,31 @@ export class QoderPool {
           reasoning_effort: selected.parameters?.reasoningEffort ?? null });
         return selected;
       };
-      warm = await this.startRuntime({ options, initializeTimeoutMs: this.config.timeout });
+      let mark=performance.now();try{warm = await this.startRuntime({ options, initializeTimeoutMs: this.config.timeout });}finally{phase.sdk_startup_ms=performance.now()-mark;phase.sdk_initialize_ms=phase.transport_initialize_ms===null?null:Math.max(0,phase.sdk_startup_ms-phase.transport_initialize_ms);}
+      controller.signal.throwIfAborted();
       const q = warm.query(queue);
-      const isolation = await isolateSession(q);
+      mark=performance.now();const init=await q.initializationResult();phase.initialization_result_ms=performance.now()-mark;
+      mark=performance.now();const isolation = await isolateSession(q,init);phase.isolate_ms=performance.now()-mark;
       const plugins = isolation.remaining_plugins, skills = (isolation.context_skills.items??[]).map(item => item.name);
-      const discovered = plugins.some(id => !this.disabledPlugins.has(id)) || skills.some(name => !this.disabledSkills.has(name));
-      for (const id of plugins) this.disabledPlugins.add(id);
-      for (const name of skills) this.disabledSkills.add(name);
-      if (isolation.error || plugins.length || isolation.context_skills.count) {
-        if (attempt === 0 && discovered) { queue.close(); warm.close(); controller.abort(); continue; }
+      const observedPlugins=[...new Set([...isolation.initial_plugins,...plugins])],observedSkills=[...new Set([...isolation.initial_skills,...skills])];
+      const discovered = observedPlugins.some(id => !appliedPlugins.has(id)) || observedSkills.some(name => !appliedSkills.has(name));
+      for (const id of observedPlugins) this.disabledPlugins.add(id);
+      for (const name of observedSkills) this.disabledSkills.add(name);
+      if(discovered&&cache)await cache.remember([...this.disabledPlugins],[...this.disabledSkills]).catch(()=>{this.cacheInfo.status='write_failed';});
+      if (isolation.error || plugins.length || isolation.context_skills.count || discovered) {
+        if (attempt === 0 && discovered) {phase.isolation_retry=true; queue.close(); warm.close(); controller.abort(); continue; }
         throw new Error(`Thin session isolation failed: Qoder 里有无法关闭的插件或技能；plugins=${JSON.stringify(plugins)}; skills=${JSON.stringify(skills)}${isolation.error ? '；插件隔离操作返回错误' : ''}`);
       }
-      const selected = selectModel(await q.getAvailableModels(), this.config);
+      controller.signal.throwIfAborted();mark=performance.now();const selected = selectModel(await q.getAvailableModels(), this.config);phase.get_available_models_ms=performance.now()-mark;
+      phase.memory=await runtimeMemory(pid());phase.total_ms=performance.now()-phaseAt;
       return { id: randomUUID(), warm, q, queue, controller, messages: [],
+        startupPhases:{attempts,total_ms:performance.now()-openingAt,isolation_cache:{...this.cacheInfo}},
         touched: Date.now(), locked: Promise.resolve(), lastCredits: null, model: selected.model, busy: 0,
         toolSignature: null, retryHint: null, retryMessageHash: null, policyCalls,
         closed: false, lastSuccessHash: null, lastDecision: null, sdkSessionId: null, lastPromptTokens: null,
         lastFailedDecision:null,lastCompletionId:null, policy };
     } catch (error) { queue.close(); warm?.close(); controller.abort(); throw error; }
+    finally{phase.total_ms=performance.now()-phaseAt;this.openingControllers.delete(controller);}
     }
     throw new Error('Thin session isolation failed: Qoder 隔离重试已用尽');
   }
@@ -146,30 +198,49 @@ export class QoderPool {
     record.queue.close(); record.warm.close(); record.controller.abort();
   }
   private sweepIdle() {
-    for (const record of this.sessions.values()) if (!record.busy && Date.now() - record.touched > (this.config.sessionIdleMs ?? IDLE_MS)) this.close(record);
+    for (const record of this.sessions.values()) if (!record.busy && Date.now() - record.touched > (record.nativeReleased ? 120_000 : this.config.sessionIdleMs ?? IDLE_MS)) this.close(record);
     // A failed startup prewarm (e.g. network not ready at logon) retries until the runtime is reachable.
-    if (this.prewarmError && !this.nextWarm) void this.primeNext();
+    if (this.prewarmError && !this.nextWarm) this.replenish();
   }
   private sweep(scope?:string) {
     this.sweepIdle();
-    if (this.sessions.size+this.pendingSlots < MAX_SESSIONS) return;
-    const oldest = evictionCandidate(this.sessions.values(),scope);
+    const active=[...this.sessions.values()].filter(r=>!r.nativeReleased);
+    if (active.length+this.pendingSlots < MAX_SESSIONS) return;
+    for(const r of this.sessions.values())if(r.nativeReleased&&!r.busy)this.close(r);
+    const oldest = evictionCandidate([...this.sessions.values()].filter(r=>!r.nativeReleased),scope);
     if (oldest) this.close(oldest);
     else throw new Error('All QoderBridge conversation slots are active');
   }
-  private matching(request: ChatRequest): RecordSession | undefined {
-    const id = routeConversation(request, this.sessions, this.byClientSession, this.byToolId);
-    return id ? this.sessions.get(id) : undefined;
+  private matching(request: ChatRequest,hash:string): RecordSession | undefined {
+    const eligible=new Map([...this.sessions].filter(([,r])=>!r.nativeReleased||r.lastSuccessHash===hash&&Boolean(r.lastDecision)&&Date.now()-r.touched<120_000||r.lastFailedDecision?.hash===hash));
+    const id = routeConversation(request, eligible, this.byClientSession, this.byToolId);
+    if(id)return this.sessions.get(id);
+    const candidates=this.related(request).filter(record=>!record.busy&&pruningAllowed(record.contextUsageRatio,pruningThreshold(this.config.prunedHistoryReuseRatio))&&prunedConversationPrefix(record.messages,request.messages));
+    return candidates.length===1?candidates[0]:undefined;
   }
-  private async acquire(request: ChatRequest) {
-    const existing = this.matching(request);
-    if (existing) return { record: existing, reused: true };
-    // Concurrent identical first prompts may be different subagents. Never deduplicate openings by content.
+  private related(request:ChatRequest):RecordSession[]{
+    if(typeof request.bridge_scope==='string')return [...this.sessions.values()].filter(r=>!r.nativeReleased&&r.bridgeScope===request.bridge_scope&&r.clientKey===request.prompt_cache_key&&!r.busy);
+    if(request.prompt_cache_key){const prior=this.sessions.get(this.byClientSession.get(request.prompt_cache_key)??'');return prior&&!prior.nativeReleased&&prior.bridgeScope===undefined?[prior]:[];}
+    const owners=new Set(request.messages.flatMap(m=>[m.tool_call_id,...(m.tool_calls??[]).flatMap(c=>c&&typeof c==='object'&&'id' in c&&typeof c.id==='string'?[c.id]:[])]).flatMap(id=>id?[this.byToolId.get(id)]:[]));
+    return [...this.sessions.values()].filter(r=>!r.nativeReleased&&r.bridgeScope===undefined&&owners.has(r.id));
+  }
+  private resetPrior(request:ChatRequest){
+    const related=this.related(request);if(related.length===1)return related[0];
+    const scored=related.map(record=>({record,at:prefixIssue(record.messages,request.messages)?.first_changed_index??record.messages.length})).sort((a,b)=>b.at-a.at);
+    return scored[0]&&scored[0].at>0&&scored[0].at!==scored[1]?.at?scored[0].record:undefined;
+  }
+  private async acquire(request: ChatRequest, hash: string, resetFrom?: RecordSession) {
     const key = request.bridge_scope?undefined:request.prompt_cache_key;
-    const opening = key ? this.openingByClient.get(key) : undefined;
-    if (opening) return { record: await opening, reused: true };
-    const prior=!request.bridge_scope&&key?this.sessions.get(this.byClientSession.get(key)??''):undefined;
-    const contextReset=prior?prefixIssue(prior.messages,request.messages):null;
+    if(!resetFrom){
+      const existing = this.matching(request,hash);
+      if (existing) return { record: existing, reused: true };
+      // Concurrent identical first prompts may be different subagents. Never deduplicate openings by content.
+      const opening = key ? this.openingByClient.get(key) : undefined;
+      if (opening) return { record: await opening, reused: true };
+    }
+    const prior=resetFrom??(this.oneShot(request)?undefined:this.resetPrior(request));
+    const issue=prior?prefixIssue(prior.messages,request.messages):null,pruned=prior&&prunedConversationPrefix(prior.messages,request.messages),threshold=pruningThreshold(this.config.prunedHistoryReuseRatio);
+    const contextReset=issue?{...issue,...resetFrom?{reason:'history_changed_while_waiting'}:{},...pruned?{prune_reuse_rejected:threshold===0?'disabled':prior?.contextUsageRatio==null?'context_usage_unknown':'context_usage_high',context_usage_ratio:prior?.contextUsageRatio??null,threshold}:{}}:null;
     const created = this.acquireNew(request);
     if (key) this.openingByClient.set(key, created);
     try { return { record: await created, reused: false, contextReset }; }
@@ -179,9 +250,13 @@ export class QoderPool {
     this.sweep(request.bridge_scope);
     this.pendingSlots++;
     try{
-    const pending = this.nextWarm;
-    this.nextWarm = null;
+    const pending = this.nextWarm,ready=!!pending&&this.warmReady.has(pending);
+    clearTimeout(this.warmTimer);
+    // Refill immediately, including while the claimed runtime is still initializing.
+    if(pending){this.dropWarm(pending);this.replenish();}const waitAt=performance.now();
     const record = pending ? await pending : await this.open();
+    (record as RecordSession&{startupWaitMs?:number;warmStart?:boolean}).startupWaitMs=performance.now()-waitAt;
+    (record as RecordSession&{warmStart?:boolean}).warmStart=ready;
     this.sessions.set(record.id, record);
     if(typeof request.bridge_scope==='string'){record.bridgeScope=request.bridge_scope;record.clientKey=request.prompt_cache_key;}
     const key = request.prompt_cache_key;
@@ -191,13 +266,14 @@ export class QoderPool {
       // A client key routes only to its newest session, so a replaced branch (rollback, compaction) is unreachable.
       if (superseded && superseded !== record && !superseded.busy) this.close(superseded);
     }
-    void this.primeNext();
+    this.replenish();
     return record;
     }finally{this.pendingSlots--;}
   }
   bindTool(id: string, record: RecordSession) { this.byToolId.set(id, record.id); }
-  stats() { return { sessions: this.sessions.size, busy: [...this.sessions.values()].filter(row => row.busy > 0).length,
+  stats() { return { sessions: [...this.sessions.values()].filter(row => !row.nativeReleased).length, busy: [...this.sessions.values()].filter(row => row.busy > 0).length,
     opening: this.openingByClient.size, prewarmed: this.nextWarm !== null, prewarm_error: this.prewarmError,
+    blank_runtimes:{target:Math.min(this.warmTarget,this.config.blankWarmLimit??2),limit:this.config.blankWarmLimit??2,ready:this.warmReady.size,pending:Number(!!this.nextWarm)+this.extraWarm.length-this.warmReady.size,ttl_ms:this.config.blankWarmTtlMs??120000},
     decision_recovery:{max_correction_calls:decisionRetryLimit(this.config.decisionRetries),
       recovered_requests:this.recoveredRequests,exhausted_requests:this.exhaustedRequests},
     reasoning_guard:{max_reasoning_tokens:this.guardTokens(),trips:this.reasoningGuardTrips},
@@ -205,14 +281,34 @@ export class QoderPool {
   private guardTokens() { return this.config.reasoningGuardTokens ?? DEFAULT_REASONING_GUARD_TOKENS; }
   async infer(request: ChatRequest, hooks: InferHooks = {}) {
     const start = performance.now();
+    this.lastDemand=Date.now();if(this.oneShot(request))this.warmTarget=Math.min(2,this.config.blankWarmLimit??2);
+    const requestHash = createHash('sha256').update(JSON.stringify({ model: request.model,
+      messages: conversationMessages(request.messages), tools: request.tools, choice: request.tool_choice,
+      temperature: request.temperature, max_tokens: request.max_tokens,response_format:request.response_format,parallel_tool_calls:request.parallel_tool_calls,
+      max_completion_tokens: request.max_completion_tokens, reasoning: hooks.reasoningEffort ?? null })).digest('hex');
     const signal = AbortSignal.any([AbortSignal.timeout(this.config.timeout), ...(hooks.signal ? [hooks.signal] : [])]);
-    const acquired=await abortable(this.acquire(request), signal);
-    const { record, reused } = acquired;
-    record.busy++;
-    let unlock!: () => void;
-    const previous = record.locked;
-    record.locked = new Promise<void>(resolve => { unlock = resolve; });
-    let ownsTurn = false;
+    const acquireWithSignal = async (resetFrom?: RecordSession) => {
+      const acquiring = this.acquire(request, requestHash, resetFrom);
+      try { return await abortable(acquiring, signal); }
+      catch (error) { void acquiring.then(value => { if (!value.reused) this.close(value.record); }, () => {}); throw error; }
+    };
+    let acquired = await acquireWithSignal();
+    let { record, reused } = acquired;
+    let unlock!: () => void, previous = record.locked, ownsTurn = false, locked = false;
+    const lock = (target: RecordSession) => {
+      record = target; record.busy++; previous = record.locked;
+      record.locked = new Promise<void>(resolve => { unlock = resolve; });
+      ownsTurn = false; locked = true;
+    };
+    const release = () => {
+      if (!locked) return;
+      locked = false; record.busy--;
+      if (ownsTurn && this.oneShot(request) && !record.nativeReleased) {
+        record.nativeReleased = true; record.queue.close(); record.warm.close(); record.controller.abort();
+      }
+      if (ownsTurn) unlock(); else void previous.then(unlock, unlock);
+    };
+    lock(record);
     // Interrupt and drain a native terminal before reusing a cancelled lane.
     // Aborting the SDK controller destroys all history, so that is a fallback
     // only when the runtime cannot establish a clean boundary promptly.
@@ -226,10 +322,6 @@ export class QoderPool {
       ownsTurn = true;
       signal.throwIfAborted();
       if (record.closed) throw new Error('Qoder session closed before this queued request');
-      const requestHash = createHash('sha256').update(JSON.stringify({ model: request.model,
-        messages: conversationMessages(request.messages), tools: request.tools, choice: request.tool_choice,
-        temperature: request.temperature, max_tokens: request.max_tokens,
-        max_completion_tokens: request.max_completion_tokens, reasoning: hooks.reasoningEffort ?? null })).digest('hex');
       // An exhausted identical request must not restart another paid retry loop
       // just because an HTTP client retries the same body. A changed request
       // (including an explicit new user message) can start a new decision.
@@ -240,6 +332,7 @@ export class QoderPool {
         return {record,decision:null,decisionError:failed.error,response:failed.response,completionId:undefined,
           recovery:localRecovery,report:{...new Telemetry().snapshot(),response:failed.response,
             error:null as string|null,stage:'local_rejected_replay',model:record.model,
+            context_reset:null,pruned_history_reuse:null,startup_phases:null,warm_start:false,startup_wait_ms:0,
             session_id:record.sdkSessionId,reused_session:true,startup_ms:0,prompt_chars:0,
             available_tool_definition_chars:0,sent_tool_definition_chars:0,tool_definitions_reused:true,
             tool_detail_mode:'reused',history_mode:'delta',sent_message_count:0,model_policy_calls:[],
@@ -250,12 +343,12 @@ export class QoderPool {
             decision_recovery:localRecovery,
           }};
       }
-      record.lastFailedDecision=null;
       if (record.lastSuccessHash === requestHash && record.lastDecision && Date.now() - record.touched < 120_000) {
         hooks.validateDecision?.(record.lastDecision);
         return { record, decision: record.lastDecision, decisionError: null, response: JSON.stringify(record.lastDecision),
           completionId:record.lastCompletionId??undefined,
           report: { ...new Telemetry().snapshot(), finish_reason:record.lastFinishReason, session_id: record.sdkSessionId, model: record.model,
+            context_reset:null,pruned_history_reuse:null,startup_phases:null,warm_start:false,startup_wait_ms:0,
             response: JSON.stringify(record.lastDecision), error: null as string | null, stage: 'local_replay',
             reused_session: true, startup_ms: 0, prompt_chars: 0, available_tool_definition_chars: 0,
             sent_tool_definition_chars: 0, tool_definitions_reused: true, tool_detail_mode: 'reused',
@@ -268,8 +361,19 @@ export class QoderPool {
             client_cache_usage: 'omitted', cache_estimate_tokens: null as number | null,
             cache_estimate_ratio: null as number | null } };
       }
-      const prefix = reused && hasConversationPrefix(record.messages, request.messages);
-      const delta = prefix ? request.messages.slice(record.messages.length) : request.messages;
+      const exactPrefix = reused && !record.nativeReleased && hasConversationPrefix(record.messages, request.messages);
+      const pruned=reused&&!record.nativeReleased&&!exactPrefix&&pruningAllowed(record.contextUsageRatio,pruningThreshold(this.config.prunedHistoryReuseRatio))?prunedConversationPrefix(record.messages,request.messages):null;
+      if(reused&&!exactPrefix&&!pruned){
+        const prior=record.nativeReleased?undefined:record;release();if(!prior)this.close(record);
+        acquired=await acquireWithSignal(prior);
+        ({record,reused}=acquired);lock(record);
+        await abortable(previous,signal);ownsTurn=true;signal.throwIfAborted();
+        if(record.closed)throw new Error('Qoder session closed before this queued request');
+      }
+      record.lastFailedDecision=null;
+      const prefix = exactPrefix||!!pruned;
+      const delta = prefix ? request.messages.slice(pruned?pruned.delta_start:record.messages.length) : request.messages;
+      const pruning=pruned?{removed_message_count:pruned.removed_message_count,removed_roles:pruned.removed_roles,context_usage_ratio:record.contextUsageRatio,threshold:pruningThreshold(this.config.prunedHistoryReuseRatio),native_retains_pruned_results:true}:null;
       const toolSignature = JSON.stringify(request.tools ?? []);
       const omitUnchangedTools = reused && record.toolSignature === toolSignature;
       if (record.retryMessageHash !== requestHash) { record.retryHint = null; record.retryMessageHash = null; }
@@ -345,6 +449,10 @@ export class QoderPool {
           const turnPolicies = record.policyCalls.slice(policyStart);
           const windows = new Set(turnPolicies.map(call => call.context_window));
           const report = telemetry.snapshot(windows.size === 1 ? [...windows][0]! : null);
+          if(report.cli_version&&this.cacheReady){this.cacheInfo.cli_version=report.cli_version;if(record.startupPhases)record.startupPhases.isolation_cache.cli_version=report.cli_version;const cache=await this.cacheReady;if(cache&&cache.observedCliVersion!==report.cli_version)await cache.remember([...this.disabledPlugins],[...this.disabledSkills],report.cli_version).catch(()=>{this.cacheInfo.status='write_failed';});}
+          const ratio=report.context_usage_ratio??(report.context_window&&report.normalized_usage&&report.normalized_usage.prompt_tokens>0?report.normalized_usage.prompt_tokens/report.context_window:null);
+          const occupancy=typeof ratio==='number'&&report.context_window&&report.normalized_usage?ratio+report.normalized_usage.completion_tokens/report.context_window:ratio;
+          record.contextUsageRatio=!inferenceError&&typeof occupancy==='number'&&Number.isFinite(occupancy)&&occupancy>=0?occupancy:null;
           const measured = report.normalized_usage_source === 'qoder_context_ratio+stream_token_deltas' ? report.normalized_usage : null;
           const previousPrompt = record.lastPromptTokens;
           const cacheEstimate = measured ? prefixCacheEstimate(measured.prompt_tokens, previousPrompt) : null;
@@ -415,7 +523,8 @@ export class QoderPool {
         record.retryMessageHash = requestHash;
       }
       return {record,decision,decisionError,response:turn.response,recovery,completionId:record.lastCompletionId??undefined,report:{...turn,reused_session:reused,
-        context_reset:'contextReset' in acquired?acquired.contextReset:null,prompt_optimization:optimization,
+        startup_phases:reused?null:record.startupPhases??null,warm_start:!reused&&(record as RecordSession&{warmStart?:boolean}).warmStart===true,startup_wait_ms:reused?0:(record as RecordSession&{startupWaitMs?:number}).startupWaitMs??0,
+        context_reset:'contextReset' in acquired?acquired.contextReset:null,pruned_history_reuse:pruning,prompt_optimization:optimization,
         history_mode:prefix?'delta':'full',sent_message_count:delta.length,
         wall_ms:performance.now()-start,
         credits_delta_source:recovery.attempts>1?'sum_of_decision_attempts':turn.credits_delta_source,
@@ -439,14 +548,17 @@ export class QoderPool {
         decision_recovery:recovery}};
     } finally {
       signal.removeEventListener('abort', abort);
-      record.busy--;
-      if (ownsTurn) unlock(); else void previous.then(unlock, unlock);
+      release();
     }
   }
   closeAll() {
+    this.closed=true;clearTimeout(this.warmTimer);
     clearInterval(this.sweeper);
+    for(const controller of this.openingControllers)controller.abort();this.openingControllers.clear();
+    for(const timer of this.warmTimers.values())clearTimeout(timer);this.warmTimers.clear();this.warmReady.clear();
     for (const record of this.sessions.values()) this.close(record);
     this.nextWarm?.then(record => this.close(record)).catch(() => {});
+    for(const pending of this.extraWarm)void pending.then(record=>this.close(record)).catch(()=>{});this.extraWarm=[];
     this.nextWarm = null;
   }
 }

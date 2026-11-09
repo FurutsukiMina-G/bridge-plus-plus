@@ -70,6 +70,12 @@ export class CodexAppServerAdapter extends RuntimeLifecycle {
     const event=codexEvent(message);if(event.type==='turn-end'){this.running=false;this.turnId=null;this.requests.clear();}await this.emit(event);
   }
   async prompt(text,attachments=[]){await this.ensureStarted();this.checkOpen();const input=[...(text?[{type:'text',text,text_elements:[]}]:[]),...attachments.map(a=>{if(a.kind!=='image'&&a.kind!=='audio')throw new Error('Codex 未核实支持此附件');return {type:a.kind==='image'?'localImage':'localAudio',path:a.path};})];this.running=true;this.turnId=null;try{const result=await this.rpc.request('turn/start',{threadId:this.threadId,input,...(this.session.selection.reasoning?{effort:this.session.selection.reasoning}:{})});if(this.running)this.turnId=result.turn?.id;}catch(e){this.running=false;throw e;}}
+  async steer(text,attachments=[],id=randomUUID()){
+    this.checkOpen();if(!this.running||!this.turnId)throw new Error('Codex 原生轮次尚未开始或已经结束');
+    const input=[...(text?[{type:'text',text,text_elements:[]}]:[]),...attachments.map(a=>{if(a.kind!=='image'&&a.kind!=='audio')throw new Error('Codex 未核实支持此附件');return {type:a.kind==='image'?'localImage':'localAudio',path:a.path};})];
+    try{await this.rpc.request('turn/steer',{threadId:this.threadId,expectedTurnId:this.turnId,input,clientUserMessageId:id});}
+    catch(error){if(!error.rpcRejected)error.nativeAdmissionUnknown=true;throw error;}return {delivered:true};
+  }
   async approve(id,choice,answer){this.checkOpen();const message=this.requests.get(id);if(!message)throw new Error('Approval is no longer pending');const result=codexApprovalResult(message,choice,answer);this.rpc.respond(message.id,result);this.requests.delete(id);}
   async cancel(){if(this.turnId)await this.rpc.request('turn/interrupt',{threadId:this.threadId,turnId:this.turnId});}
   async close(){this.closed=true;this.running=false;this.ready=false;this.requests.clear();await this.rpc?.close();}

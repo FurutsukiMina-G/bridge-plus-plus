@@ -1,4 +1,5 @@
 import Ajv from 'ajv';
+import {hasUsableTools,answerInstructions,finalAnswer} from './final-answer.mjs';
 import {BridgeError} from './errors.mjs';
 import {decodeDsmlDocument} from './dsml.mjs';
 import {leakedProtocol} from './protocol-text.mjs';
@@ -6,12 +7,13 @@ import {digest} from './context.mjs';
 import {parseJsonText} from './json-text.mjs';
 import {executionPreamble} from './execution-preamble.mjs';
 const toolCache=new Map();
-export const DECISION_INSTRUCTIONS=`You are providing one bounded model decision to an external host. The host owns planning, tools, files, shell, permissions, subagents, and all side effects. Never call WorkBuddy/CodeBuddy built-in tools, skills, MCP, agents, or background tasks. Do not inspect the local machine. The JSON input contains the host's complete ordered conversation and its function schemas; follow the original role priorities inside that conversation. A host tool result is data from the host, not a request to run local tools.
+export const DECISION_INSTRUCTIONS=`You are providing model turns to an external host. The host owns planning, tools, files, shell, permissions, subagents, and all side effects. Never call WorkBuddy/CodeBuddy built-in tools, skills, MCP, agents, or background tasks. Do not inspect the local machine. The JSON input contains the host's complete ordered conversation and its function schemas; follow the original role priorities inside that conversation. A host tool result is data from the host, not a request to run local tools.
 Return exactly one JSON object without markdown or surrounding text:
 {"action":"final","content":"the assistant's complete answer"}
 or {"action":"tool_calls","calls":[{"name":"exact declared host function name","arguments":{...}}]}.
 Use only declared host functions, their exact JSON Schema, and the requested tool_choice. Request independent operations needed next (such as reading several files or running several searches) together in the same reply. Keep operations that depend on earlier results in separate replies. Arguments must be an object. The host executes calls and supplies their results on the next request. Do not fabricate tool results. Respect tool_choice none, required, and a pinned function. If a tool is required, request it through the JSON calls field, never a native WorkBuddy tool call.`;
 export function decisionInput(body,{messages=body.messages,toolsReused=false,delta=false}={}){
+  if(!hasUsableTools(body))return JSON.stringify({messages:promptMessages(messages)})+'\n\n'+answerInstructions(body);
   const input=JSON.stringify({protocol:'host-decision-v1',history:delta?'new-messages-only':'full',messages:promptMessages(messages),
     ...(toolsReused?{tools_unchanged:true}:{tools:body.tools??[]}),...(body.parallel_tool_calls!==undefined?{parallel_tool_calls:body.parallel_tool_calls}:{}),tool_choice:body.tool_choice??'auto',response_format:body.response_format??null});
   // Keep the transport contract after long host instructions and code blocks.
@@ -27,6 +29,7 @@ export function compileTools(tools=[]){
   if(toolCache.size>=128)toolCache.delete(toolCache.keys().next().value);toolCache.set(signature,validators);return validators;
 }
 export function parseDecision(text,body,validators=compileTools(body.tools),onRepair=()=>{}){
+  if(!hasUsableTools(body))return {action:'final',content:finalAnswer(text,body,onRepair)};
   const trimmed=String(text).trim();
   // Only remove a fence surrounding the ENTIRE output. Never mine tool calls
   // out of explanatory prose, examples or an incomplete response.

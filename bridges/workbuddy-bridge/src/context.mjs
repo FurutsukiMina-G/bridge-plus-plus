@@ -3,6 +3,7 @@ import {mkdir,rm,readdir,readFile,writeFile} from 'node:fs/promises';
 import {join,resolve,relative,isAbsolute} from 'node:path';
 import {BridgeError} from './errors.mjs';
 import {imageSource} from './media-input.mjs';
+import {pruningThreshold,pruningAllowed,toolPrunedPrefix,historyReset} from './history-pruning.mjs';
 
 export function stable(value){
   if(Array.isArray(value))return value.map(stable);
@@ -19,6 +20,7 @@ export function evictionCandidate(records,scope){
 // Ignore only that host bookkeeping tag when checking whether prior history is unchanged.
 const stripAcp=text=>String(text).replace(/^(?:<acp\b[^>]*>m\d+<\/acp>\r?\n?)+/,'');
 const historyDigest=m=>digest(typeof m?.content==='string'?{...m,content:stripAcp(m.content)}:m);
+const historyEntry=m=>({key:historyDigest(m),role:m.role,...m.tool_call_id?{toolId:m.tool_call_id}:{},callIds:(m.tool_calls??[]).flatMap(c=>typeof c?.id==='string'?[c.id]:[])});
 export function textContent(content){
   if(content==null)return '';
   if(typeof content==='string')return content;
@@ -40,7 +42,7 @@ export async function abortable(promise,signal){
 }
 /** Resume transcripts, never authenticated idle processes. Store hashes of host history. */
 export class ContextPool {
-  constructor(cfg){this.cfg=cfg;this.records=new Map();this.clients=new Map();this.tools=new Map();this.locks=new Map();this.pendingCleanup=new Set();this.closed=false;
+  constructor(cfg){pruningThreshold(cfg.prunedHistoryReuseRatio);this.cfg=cfg;this.records=new Map();this.clients=new Map();this.tools=new Map();this.locks=new Map();this.pendingCleanup=new Set();this.closed=false;
     this.cleanup=this.sweepOrphans();this.timer=setInterval(()=>{void this.sweep();void this.sweepOrphans();},60000);this.timer.unref();}
   async sweepOrphans(){
     const parent=join(this.cfg.runtime,'sdk');const entries=await readdir(parent,{withFileTypes:true}).catch(()=>[]);
@@ -66,18 +68,31 @@ export class ContextPool {
     if(this.closed)throw new BridgeError(503,'shutting_down','Context pool closed');
     // Native and JSON transcripts record host calls differently, so they never share a session.
     const scoped=typeof body.bridge_scope==='string';
-    const scope=digest({model:body.model,publicModel:body.bridge_public_model,...scoped?{bridgeScope:body.bridge_scope}:{effort:body.reasoning_effort,max:body.max_tokens},uid:credential.uid,domain:credential.domain,...(mode==='json'?{}:{mode})});
-    const messages=semanticMessages(body.messages),hashes=messages.map(historyDigest),requestHash=digest({...body,messages,stream:undefined,stream_options:undefined});
+    const scope=digest({model:body.model,publicModel:body.bridge_public_model,nativeContextWindow:body.bridge_native_context_window,...scoped?{bridgeScope:body.bridge_scope}:{effort:body.reasoning_effort,max:body.max_tokens},uid:credential.uid,domain:credential.domain,...(mode==='json'?{}:{mode})});
+    const messages=semanticMessages(body.messages),entries=messages.map(historyEntry),hashes=entries.map(e=>e.key),requestHash=digest({...body,messages,stream:undefined,stream_options:undefined});
+    const threshold=pruningThreshold(this.cfg.prunedHistoryReuseRatio);
+    const prunedMatch=r=>r.historyEntries&&toolPrunedPrefix(r.historyEntries,entries);
+    const canPrune=r=>pruningAllowed(r.contextUsageRatio,threshold)&&prunedMatch(r);
+    const resetFor=r=>{
+      const reset=historyReset(r.historyEntries??r.history.map(key=>({key,role:'unknown'})),entries),pruned=prunedMatch(r);
+      return reset?{...reset,...pruned?{prune_reuse_rejected:threshold===0?'disabled':r.contextUsageRatio==null?'context_usage_unknown':'context_usage_high',context_usage_ratio:r.contextUsageRatio??null,threshold}:{}}:null;
+    };
     const client=!scoped&&body.prompt_cache_key?scope+':'+digest(body.prompt_cache_key):null;
     let owner=client?this.clients.get(client):undefined;
     if(!client&&!scoped)for(const m of [...messages].reverse()){
       const ids=[m.tool_call_id,...(m.tool_calls??[]).map(c=>c.id)].filter(Boolean);
       owner=ids.map(id=>this.tools.get(scope+':'+id)).find(Boolean);if(owner)break;
     }
+    let diagnosticReset=null;
     if(scoped){
-      const candidates=[...this.records.values()].filter(r=>r.scope===scope&&r.clientKey===body.prompt_cache_key&&!r.busy&&
+      const related=[...this.records.values()].filter(r=>r.scope===scope&&r.clientKey===body.prompt_cache_key&&!r.busy&&Date.now()-r.touched<(this.cfg.sessionIdleMs??3600000));
+      const candidates=related.filter(r=>
         (r.requestHash===requestHash||r.history.length&&r.history.length<=hashes.length&&r.history.every((h,i)=>h===hashes[i]))&&Date.now()-r.touched<(this.cfg.sessionIdleMs??3600000)).sort((a,b)=>b.history.length-a.history.length);
       owner=candidates.length>1&&candidates[0].history.length===candidates[1].history.length?undefined:candidates[0]?.id;
+      if(!candidates.length){const pruned=related.filter(canPrune);if(pruned.length===1)owner=pruned[0].id;}
+      if(!owner){const scored=related.map(record=>({record,at:resetFor(record)?.first_changed_index??record.history.length})).sort((a,b)=>b.at-a.at);
+        if(scored.length===1||scored[0]?.at>0&&scored[0]?.at!==scored[1]?.at)diagnosticReset=resetFor(scored[0].record);
+      }
     }
     const lockKey=client??this.records.get(owner)?.lockKey??randomUUID();const prior=this.locks.get(lockKey)??Promise.resolve();let unlock;
     const gate=new Promise(r=>{unlock=r;});const tail=prior.then(()=>gate);this.locks.set(lockKey,tail);
@@ -88,13 +103,13 @@ export class ContextPool {
       await abortable(prior,signal);owns=true;signal.throwIfAborted();
       if(this.closed)throw new BridgeError(503,'shutting_down','Context pool closed');
       if(client)owner=this.clients.get(client);
-      record=this.records.get(owner);let reset=null;
+      record=this.records.get(owner);let reset=diagnosticReset,pruned=null;
       if(record){
         const same=record.requestHash===requestHash;
         const prefix=record.history.length<=hashes.length&&record.history.every((h,i)=>h===hashes[i]);
-        if(record.scope!==scope||(!same&&!prefix)||Date.now()-record.touched>(this.cfg.sessionIdleMs??3600000)){
-          let at=0;while(at<Math.min(record.history.length,hashes.length)&&record.history[at]===hashes[at])at++;
-          reset={reason:hashes.length<record.history.length?'history_shortened':'history_rewritten',firstChangedIndex:at,previousMessages:record.history.length,currentMessages:hashes.length,previousHash:record.history[at]??null,currentHash:hashes[at]??null};
+        if(!same&&!prefix)pruned=canPrune(record);
+        if(record.scope!==scope||(!same&&!prefix&&!pruned)||Date.now()-record.touched>(this.cfg.sessionIdleMs??3600000)){
+          reset=resetFor(record);
           await this.remove(record);record=null;
         }else if(!record.sessionId&&!same){await this.remove(record);record=null;reset={reason:'sdk_session_id_unavailable'};}
       }
@@ -113,12 +128,26 @@ export class ContextPool {
       record.busy=true;
       const replay=record.requestHash===requestHash&&record.response&&Date.now()-record.completedAt<(this.cfg.replayMs??120000);
       const reused=!!record.sessionId&&!replay;
-      // The last validated assistant decision is already in the native transcript.
-      // Only its host-assigned tool IDs need an acknowledgement, never its large arguments;
-      // native calls already carry the runtime's own IDs and need none.
-      const delta=reused?messages.slice(record.history.length):messages;
-      let echo=null,echoCharactersAvoided=0;
-      if(reused&&record.echo!==false&&record.message?.tool_calls?.length){
+      // Native transcripts can omit calls or rewrite their IDs, so echo the exact batch the host received.
+      const delta=reused?messages.slice(pruned?pruned.delta_start:record.history.length):messages;
+      let echo=null,echoCharactersAvoided=0,nativeEcho={calls:0,characters:0,truncated:false};
+      if(reused&&record.echo==='native'&&record.message?.tool_calls?.length){
+        let truncated=false;
+        const shorten=value=>{
+          if(typeof value==='string'&&value.length>600){truncated=true;return `${value.slice(0,600)}…(shortened here; the host received all ${value.length} characters)`;}
+          if(Array.isArray(value))return value.map(shorten);
+          if(value&&typeof value==='object')return Object.fromEntries(Object.entries(value).map(([key,item])=>[key,shorten(item)]));
+          return value;
+        };
+        // The bridge serialized these arguments itself; a parse failure still must not fail the request.
+        const args=text=>{try{return shorten(JSON.parse(text));}catch{return shorten(String(text));}};
+        const calls=record.message.tool_calls.map(c=>({id:c.id,name:c.function.name,arguments:args(c.function.arguments)}));
+        const content='These are all calls from your preceding reply that the host actually received and executed. The runtime transcript may show only some of them, with different IDs, followed by Max turns (1) exceeded; that is only a host-handoff marker, not a limit on you. The tool results below correspond to these calls by ID. If you intended more calls that are absent here, the host did not receive them; resend them now if needed, keeping independent calls in the same reply.';
+        const render=detailed=>({role:'assistant',host_received_calls:calls.map((call,index)=>index<detailed?call:{id:call.id,name:call.name}),content});
+        let detailed=calls.length;echo=render(detailed);
+        while(JSON.stringify(echo).length>6000&&detailed>0){truncated=true;echo=render(--detailed);}
+        nativeEcho={calls:calls.length,characters:JSON.stringify(echo).length,truncated};
+      }else if(reused&&record.echo!==false&&record.message?.tool_calls?.length){
         echo={role:'assistant',prior_decision_calls:record.message.tool_calls.map(c=>({id:c.id,name:c.function.name,arguments_sha256:digest(c.function.arguments)})),content:'Host assigned these IDs to your preceding validated decision; arguments are unchanged. Only the following tool results describe execution.'};
         echoCharactersAvoided=JSON.stringify(record.message).length;
         if(JSON.stringify(echo).length<echoCharactersAvoided)echoCharactersAvoided-=JSON.stringify(echo).length;
@@ -126,10 +155,11 @@ export class ContextPool {
       }
       const toolSignature=digest(body.tools??[]),toolsReused=reused&&record.toolSignature===toolSignature;
       return {record,messages:echo?[echo,...delta]:delta,replay:replay?record.response:null,reused,toolsReused,
-        metrics:{historyMode:reused?'delta':'full',sentMessageCount:delta.length,toolsReused,echoCharactersAvoided,reset,localReplay:!!replay},
+        metrics:{historyMode:reused?'delta':'full',sentMessageCount:delta.length,toolsReused,echoCharactersAvoided,nativeEcho,reset:reset?{...reset,firstChangedIndex:reset.first_changed_index,previousMessages:reset.previous_message_count,currentMessages:reset.current_message_count}:null,context_reset:reset,
+          pruned_history_reuse:pruned?{removed_message_count:pruned.removed_message_count,removed_roles:pruned.removed_roles,context_usage_ratio:record.contextUsageRatio,threshold,native_retains_pruned_results:true}:null,localReplay:!!replay},
         commit:(response,message,{echo=true}={})=>{
           record.requestHash=requestHash;record.response=response;record.message=message;record.completedAt=Date.now();record.toolSignature=toolSignature;record.echo=echo;
-          record.history=[...hashes,historyDigest(semanticMessages([message])[0])];
+          const assistant=historyEntry(semanticMessages([message])[0]);record.history=[...hashes,assistant.key];record.historyEntries=[...entries,assistant];
           for(const c of message.tool_calls??[])this.tools.set(scope+':'+c.id,record.id);
         },release,discard:()=>this.remove(record)};
     }catch(e){if(owns)release();else void prior.then(release);throw e;}

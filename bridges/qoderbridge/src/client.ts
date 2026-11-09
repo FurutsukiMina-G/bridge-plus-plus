@@ -30,6 +30,13 @@ export interface Config extends Selection {
   sessionIdleMs?: number;
   /** Regenerate rejected decisions inside one request; never retry runtime/permission/budget failures. */
   decisionRetries?: number;
+  /** Reuse native history after whole tool-result deletion only below this occupancy; 0 disables. */
+  prunedHistoryReuseRatio?: number;
+  isolationCacheDir?:string;
+  /** Trusted identity override for embedded hosts and synthetic tests; never renderer input. */
+  isolationRuntimeIdentity?:{version:string;fingerprint:string};
+  blankWarmLimit?:number;
+  blankWarmTtlMs?:number;
 }
 export function baseOptions(config: Config, controller: AbortController): Options {
   return {
@@ -49,8 +56,8 @@ export function baseOptions(config: Config, controller: AbortController): Option
   };
 }
 
-export async function isolateSession(q: Query) {
-  const init = await q.initializationResult();
+export async function isolateSession(q: Query,initialized?:Awaited<ReturnType<Query['initializationResult']>>) {
+  const init = initialized??await q.initializationResult();
   const plugins = await q.listPlugins();
   const skills = init.skills ?? [];
   let isolationError: string | null = null;
@@ -64,9 +71,9 @@ export async function isolateSession(q: Query) {
     if (reloaded.error_count) throw new Error(`Plugin isolation reload failed (${reloaded.error_count})`);
     } catch (cause) { isolationError = safeError(cause); }
   }
-  const remaining = await q.listPlugins();
-  const context = await q.getContextUsage();
+  const [remaining,context] = await Promise.all([q.listPlugins(),q.getContextUsage()]);
   return { initial_plugins: plugins.map(p => p.id), remaining_plugins: remaining.map(p => p.id),
+    initial_skills:skills.map(skill=>skill.name),
     context_skills: context.skills, error: isolationError, scope: 'session-only applyFlagSettings' };
 }
 

@@ -18,17 +18,19 @@ test('each runtime selects its own system contract and preserves provider-specif
   for(const [runtimeId,name]of Object.entries(names)){
     const prompts=bridgePromptConfig(runtimeId);
     for(const text of [prompts.qoder.system,...Object.values(prompts.qoder.decisionContract),...Object.values(prompts.workbuddy.hostPrompts)]){
-      assert.doesNotMatch(text,/Honor parallel_tool_calls=false|Return at most one host tool call/);
+      assert.doesNotMatch(text,/Honor parallel_tool_calls=false|Return at most one host tool call|at most one|parallel_tool_calls:false|bounded model turns|one tool call at a time/i);
       assert.match(text,/Request independent operations/);
       assert.ok(text.includes(name));
       for(const other of Object.values(names).filter(n=>n!==name))assert.ok(!text.includes(other),`${runtimeId} leaked ${other}`);
     }
-    assert.match(prompts.qoder.system,/"kind":"tool_call"/);
+    assert.doesNotMatch(prompts.qoder.system,/"kind":"tool_call"/);
+    assert.match(prompts.qoder.decisionContract.full,/"kind":"tool_call"/);
     assert.match(prompts.workbuddy.hostPrompts.decision,/"action":"tool_calls"/);
     assert.match(prompts.workbuddy.hostPrompts.native,/mcp__host__/);
+    assert.match(prompts.workbuddy.hostPrompts.native,/Multiple independent calls in one response cost nothing extra/);
     assert.equal(prompts.qoder.fullToolDetails,true);
     for(const native of [true,false]){
-      const options=sdkOptions({cliPath:process.execPath,...prompts.workbuddy},credential,{model:'fixture',max_tokens:128},'.',new AbortController(),()=>{},()=>{},{native});
+      const options=sdkOptions({cliPath:process.execPath,...prompts.workbuddy},credential,{model:'fixture',max_tokens:128,tools:[{type:'function',function:{name:'read'}}]},'.',new AbortController(),()=>{},()=>{},{native});
       assert.equal(options.systemPrompt,prompts.workbuddy.hostPrompts[native?'native':'decision']);
       assert.deepEqual(options.tools,[]);assert.equal(options.fallbackModel,undefined);
     }
@@ -57,10 +59,10 @@ test('all selected WorkBuddy hosts return complete native and JSON batches and e
       const projection=new ResponseProjection('fixture',()=>{});for(const event of events)projection.accept(event);
       const response=projection.finish();assert.deepEqual(response.output.filter(item=>item.type==='function_call').map(item=>JSON.parse(item.arguments)),calls.map(c=>c.arguments));
     }
-    assert.doesNotMatch(seen[0],/Return at most one host tool call/);
+    assert.doesNotMatch(seen[0],/Return at most one host tool call|at most one|parallel_tool_calls:false|bounded model turns/i);
     const serial=await (await transport.chat({...body,parallel_tool_calls:false},new AbortController().signal)).text();
     assert.match(serial,/invalid_decision/);assert.doesNotMatch(serial,/\[DONE\]/);
-    assert.match(seen.at(-1),/Return at most one host tool call/);
+    assert.match(seen.at(-1),/This request sets parallel_tool_calls:false\. Return at most one host tool call\./);
   }
 });
 
@@ -69,7 +71,7 @@ test('WorkBuddy runtime-specific system survives native and JSON format correcti
     const seen=[],runtime=await directory(),config=bridgePromptConfig(native?'kimi':'codex').workbuddy;
     const transport=new SdkTransport({runtime,cliPath:process.execPath,toolMode:native?'native':'json',decisionRetries:1,...config},{get:async()=>credential},{run:async function*({options,prompt}){
       seen.push({system:options.systemPrompt,prompt});
-      yield {type:'system',subtype:'init',model:'fixture',session_id:'fixture-session',mcp_servers:[]};
+      yield {type:'system',subtype:'init',model:'fixture',session_id:'fixture-session',mcp_servers:native?[{name:'host',status:'connected'}]:[]};
       const text=seen.length===1?'BAD FORMAT':native?'Complete fixture answer.':'{"action":"final","content":"Complete fixture answer."}';
       // Native correction is triggered by protocol markup, not arbitrary plain text.
       const output=native&&seen.length===1?'<tool_call>invalid</tool_call>':text;
@@ -77,7 +79,7 @@ test('WorkBuddy runtime-specific system survives native and JSON format correcti
       yield {type:'result',subtype:'success',is_error:false,result:output};
     }});
     t.after(()=>transport.close());
-    const wire=await (await transport.chat({model:'fixture',max_tokens:128,messages:[{role:'user',content:'Bounded fixture task'}]},new AbortController().signal)).text();
+    const wire=await (await transport.chat({model:'fixture',max_tokens:128,messages:[{role:'user',content:'Bounded fixture task'}],tools:[{type:'function',function:{name:'read',parameters:{type:'object'}}}]},new AbortController().signal)).text();
     assert.match(wire,/Complete fixture answer/);assert.match(wire,/\[DONE\]/);assert.equal(seen.length,2);
     for(const entry of seen)assert.equal(entry.system,config.hostPrompts[native?'native':'decision']);
     assert.doesNotMatch(seen[1].prompt,/DeepSeek Harness|pending Harness/);

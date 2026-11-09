@@ -1,4 +1,5 @@
 import {nativeModels} from './native-models.mjs';
+import {interjectCapability} from './session-input.mjs';
 import {mediaCapabilities,deniedMediaCapabilities} from './media-capabilities.mjs';
 import {readCodexDefaultModel} from './codex-config.mjs';
 
@@ -44,6 +45,6 @@ export class AttachmentCapabilities {
   async snapshotSessions(sessions){return Promise.all(sessions.map(async s=>{
     let attachments=null;
     if(!s.archived)try{attachments=await this.forSelection(s.runtimeId,s.selection);}catch(error){attachments=deniedMediaCapabilities(error.message,s.runtimeId);}
-    return {...s,attachments,mediaAttachments:s.mediaAttachments??[],permissionMode:s.permissionMode??null,permissions:this.sessions().permissionView?.(s)??null,selectionIssue:this.sessions().selectionIssue(s)};
+    return {...s,queue:s.queue??[],interject:interjectCapability(s),attachments,mediaAttachments:s.mediaAttachments??[],permissionMode:s.permissionMode??null,permissions:this.sessions().permissionView?.(s)??null,selectionIssue:this.sessions().selectionIssue(s)};
   }));}
 }

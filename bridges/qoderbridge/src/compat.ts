@@ -5,6 +5,9 @@ import { diagnosticToolName } from './diagnostics.js';
 import {toolValidator} from './tool-contract.js';
 import {isToolProtocolText,isLeakedFinalProtocol} from './protocol-text.js';
 import {imageMarker} from './media-input.js';
+import {hasUsableTools,finalAnswer,answerInstructions} from './final-answer.js';
+import {normalizeDsmlBoundaries,normalizeDsmlClosingMarkers,hasLooseDsmlClosingMarker} from './dsml-boundaries.js';
+import {attributeDsmlDecision} from './dsml-attributes.js';
 
 const Message = z.object({ role: z.enum(['system', 'developer', 'user', 'assistant', 'tool']),
   content: z.unknown().optional(), tool_calls: z.array(z.unknown()).optional(),
@@ -39,7 +42,7 @@ export type DecisionRepair = { kind: 'misclosed_parameter' | 'shorthand_paramete
   'tool_calls_envelope' | 'flat_call_arguments' | 'decorated_calls_envelope' | 'attribute_parameters' |
   'terminal_field_stub' | 'custom_tool_envelope' | 'localized_parameter' | 'generic_arguments_boundary' |
   'attributed_call_envelope' | 'named_generic_wrapper' | 'plain_tool_envelope' | 'redundant_decision_closers' | 'missing_calls_opener' |
-  'missing_calls_parameter_wrapper' | 'generic_shorthand_name' | 'plain_write_parameters' | 'misclosed_invoke_opener' | 'json_tool_name_separator' | 'missing_decision_close'; tool: string; parameter: string };
+  'missing_calls_parameter_wrapper' | 'generic_shorthand_name' | 'plain_write_parameters' | 'misclosed_invoke_opener' | 'json_tool_name_separator' | 'missing_decision_close' | 'missing_calls_key' | 'missing_call_key' | 'dsml_marker_boundary' | 'adjacent_decisions' | 'attribute_parameter' | 'implicit_invoke_close' | 'loose_closing_marker'; tool: string; parameter: string };
 function parseJson(text: string): unknown {
   try { return JSON.parse(text); }
   catch (original) {
@@ -359,18 +362,22 @@ function unwrappedCalls(tail: string, repairs: DecisionRepair[], request: ChatRe
     if (!named) {
       const end = invocationEnd(remainder);
       if (end === null) throw new Error('Unwrapped DSML call must have a complete closing boundary');
-      const fragment = remainder.slice(0, end);
+      const fragment = remainder.slice(0, end).replace(/^<｜｜DSML｜｜\s*invoke\s*>\s*/,'');
       const fields = [...fragment.matchAll(/<\/?｜｜DSML｜｜\s*parameter\s+name="([^"]+)"/g)].map(field => field[1]!);
       // A closed parameter-form call may lose its invoke opener. All explicit
       // fields and every required field must identify exactly one supplied schema.
-      const candidates = (request.tools ?? []).filter(tool => {
-        const schema = tool.function.parameters as { properties?: Record<string, { type?: unknown }>; required?: unknown } | undefined;
-        return fields.length > 0 && schema?.properties && Array.isArray(schema.required) && schema.required.length > 0 &&
-          fields.every(field => schema.properties![field]?.type === 'string') && schema.required.every(field => typeof field === 'string' && fields.includes(field));
-      });
+      const candidates: Array<{name:string;decision:Extract<Decision,{kind:'tool_call'}>;repairs:DecisionRepair[]}> = [];
+      for(const tool of request.tools??[]){
+        const schema=tool.function.parameters as {properties?:Record<string,unknown>;required?:unknown}|undefined;
+        if(!fields.length||!schema?.properties||!fields.every(field=>Object.hasOwn(schema.properties!,field)))continue;
+        const local:DecisionRepair[]=[];
+        try{
+          const candidate=dsmlDecision(`<｜｜DSML｜｜ calls><｜｜DSML｜｜ invoke name="${tool.function.name}">${fragment}</｜｜DSML｜｜ calls>`,request,local);
+          if(candidate?.kind==='tool_call'&&!local.some(r=>r.kind==='loose_closing_marker')&&toolValidator(schema)(candidate.arguments))candidates.push({name:tool.function.name,decision:candidate,repairs:local});
+        }catch{/* A candidate must match the entire argument object without repairs that invent data. */}
+      }
       if (candidates.length !== 1) throw new Error('Unwrapped DSML parameter call has no unique supplied-tool schema');
-      const name = candidates[0]!.function.name;
-      const restored = dsmlDecision(`<｜｜DSML｜｜ calls><｜｜DSML｜｜ invoke name="${name}">${fragment}</｜｜DSML｜｜ calls>`, request, repairs);
+      const {name,decision:restored,repairs:local}=candidates[0]!;repairs.push(...local);
       if (restored?.kind !== 'tool_call') throw new Error('Unwrapped DSML parameter call is incomplete');
       calls.push({ name: restored.name, arguments: restored.arguments });
       repairs.push({ kind: 'schema_matched_call', tool: name, parameter: 'call' });
@@ -417,6 +424,8 @@ function dsmlDecision(text: string, request: ChatRequest, repairs: DecisionRepai
   const marker = /<｜｜DSML｜｜\s*(calls|tool_calls)>/.exec(text);
   const markerAt = marker?.index ?? -1;
   if (markerAt < 0) return null;
+  if (markerAt > 0 && hasLooseDsmlClosingMarker(text) && /｜｜(?:DSML|DS)｜｜|<\/?(?:parameter|invoke|tool_calls?|calls|custom_tool_call)\b/.test(text.slice(0, markerAt)))
+    throw new Error('Unexpected data before DSML calls');
   text = text.slice(markerAt);
   text = repairMisclosedInvokeOpeners(text,request,repairs);
   // A repeated observed wrapper names the generic adapter first, then one
@@ -479,10 +488,11 @@ function dsmlDecision(text: string, request: ChatRequest, repairs: DecisionRepai
     return Decision.parse(calls.length === 1 ? { kind: 'tool_call', ...calls[0] } :
       { kind: 'tool_calls', calls });
   }
+  text = normalizeDsmlClosingMarkers(text, request, repairs);
   const calls = [...text.matchAll(/<｜｜DSML｜｜\s*invoke\s+name="([^"]+)">/g)];
   if (!calls.length) {
     const tail = text.slice(marker![0].length);
-    if (/^\s*<｜｜DSML｜｜\s*parameter\s+name="name"/.test(tail)) {
+    if (/^\s*<｜｜DSML｜｜\s*parameter\s+name="name"/.test(tail)||/^\s*<｜｜DSML｜｜\s*(?:parameter\s+name="|invoke\s*>)/.test(tail)&&invocationEnd(tail)!==null) {
       const restored = unwrappedCalls(tail, repairs, request);
       return Decision.parse(restored.length === 1 ? { kind: 'tool_call', ...restored[0] } : { kind: 'tool_calls', calls: restored });
     }
@@ -512,7 +522,10 @@ function dsmlDecision(text: string, request: ChatRequest, repairs: DecisionRepai
   } else {
     const malformedArguments = /<｜｜DSML｜｜\s*parameter\s+name="arguments"\s*:/.exec(fragment);
     if (malformedArguments) Object.assign(args, objectAt(fragment, fragment.indexOf('{', malformedArguments.index)));
-    else for (const field of fields) {
+    else {
+      if (/<\/(?:parameter|invoke)\b|<\/(?:｜DSML｜{1,2}|｜｜DSML｜)>?\s*(?:parameter|invoke|calls|tool_calls)\b|<\/?｜{1,2}DSML｜{1,2}>\s*(?:parameter|invoke|calls|tool_calls)\b/.test(fragment))
+        throw new Error('Ambiguous or incomplete DSML closing marker');
+      for (const field of fields) {
       const fieldName = field[1]!;
       const raw = field[3] ?? '';
       if (name === 'tool_call' && fieldName === 'name') { name = raw.trim(); continue; }
@@ -529,7 +542,11 @@ function dsmlDecision(text: string, request: ChatRequest, repairs: DecisionRepai
       if (isString) value = raw;
       else {
         try { value = parseJson(raw.trim()); }
-        catch { value = raw.trim(); }
+        catch (error) {
+          // Strict only where loose closing markers were normalized: a misplaced boundary must not become a string value.
+          if (stringFlag === 'false' && repairs.some(repair => repair.kind === 'loose_closing_marker')) throw error;
+          value = raw.trim();
+        }
       }
       if (Object.hasOwn(args, fieldName)) {
         if (!isDeepStrictEqual(args[fieldName], value)) throw new Error(`Duplicate DSML parameter: ${fieldName}`);
@@ -537,6 +554,7 @@ function dsmlDecision(text: string, request: ChatRequest, repairs: DecisionRepai
         continue;
       }
       args[fieldName] = value;
+      }
     }
   }
   if (name === 'tool_call') {
@@ -545,7 +563,11 @@ function dsmlDecision(text: string, request: ChatRequest, repairs: DecisionRepai
     name = toolName;
   }
   parsed.push({ name, arguments: args });
-  if (end !== null) parsed.push(...unwrappedCalls(span.slice(end), repairs, request, call[1]!));
+  if (end !== null) {
+    if (/<｜｜DSML｜｜\s*(?:calls|tool_calls)\s*>/.test(span.slice(end)))
+      throw new Error('Unexpected DSML root opener after invocation');
+    parsed.push(...unwrappedCalls(span.slice(end), repairs, request, call[1]!));
+  }
   }
   return Decision.parse(parsed.length === 1 ? { kind: 'tool_call', ...parsed[0] } :
     { kind: 'tool_calls', calls: parsed });
@@ -633,10 +655,11 @@ function missingCallsOpener(text: string, request: ChatRequest, repairs: Decisio
   if (!outer) throw new Error('DSML invocation without its opener must have complete single-call boundaries');
   const provided = request.tools?.filter(tool => tool.function.name === start[1]) ?? [];
   if (provided.length !== 1) throw new Error(`Unknown or ambiguous DSML tool: ${diagnosticToolName(start[1]!)}`);
-  const decision = dsmlDecision(`<｜｜DSML｜｜ ${outer[1]}>${fragment}`, request, repairs);
-  if (decision?.kind !== 'tool_call' || decision.name !== start[1])
+  const local: DecisionRepair[] = [];
+  const decision = dsmlDecision(`<｜｜DSML｜｜ ${outer[1]}>${fragment}`, request, local);
+  if (decision?.kind !== 'tool_call' || decision.name !== start[1] || local.some(r => r.kind === 'loose_closing_marker'))
     throw new Error('DSML invocation without its opener is ambiguous');
-  repairs.push({ kind: 'missing_calls_opener', tool: start[1]!, parameter: 'calls' });
+  repairs.push(...local, { kind: 'missing_calls_opener', tool: start[1]!, parameter: 'calls' });
   return decision;
 }
 function encodedArguments(source: string, tool: string, request: ChatRequest, repairs: DecisionRepair[],
@@ -834,6 +857,16 @@ function jsonDecision(text: string, request: ChatRequest, repairs: DecisionRepai
   let decoded: unknown;
   try { decoded = parseJson(text); }
   catch (original) {
+    // One complete root plus a single redundant root closer is unambiguous.
+    // Never remove trailing prose, another call, or any incomplete argument.
+    if(text.startsWith('{'))try{
+      const root=objectRange(text,0);
+      if(/^\s*}\s*$/.test(text.slice(root.end))){
+        const recovered=decisionObject(root.value,request,repairs);
+        if(recovered.kind==='final')throw original;
+        repairs.push({kind:'redundant_decision_closers',tool:'wrapper',parameter:'calls'});return recovered;
+      }
+    }catch{/* Continue through the existing strict repair paths. */}
     const closedCalls = missingCallClosures(text);
     if (closedCalls) {
       const decision = decisionObject(closedCalls.value, request, repairs);
@@ -894,26 +927,98 @@ function jsonDecision(text: string, request: ChatRequest, repairs: DecisionRepai
     const callsWrapper = /^\{\s*"kind"\s*:\s*"tool_calls"\s*:\s*\[/.exec(text);
     if (callsWrapper) {
       const corrected = text.replace(callsWrapper[0], '{"kind":"tool_calls","calls":[');
-      return decisionObject(parseJson(corrected), request, repairs);
+      const repair = { kind: 'missing_calls_key', tool: 'wrapper', parameter: 'calls' } as const;
+      let value: unknown;
+      try { value = parseJson(corrected); }
+      catch {
+        const nested: DecisionRepair[] = [];
+        try {
+          if (corrected.startsWith('{')) try {
+            const root = objectRange(corrected, 0);
+            if (/^\s*}\s*$/.test(corrected.slice(root.end))) {
+              const decision = decisionObject(root.value, request, nested);
+              if (decision.kind === 'final') throw original;
+              nested.push({ kind: 'redundant_decision_closers', tool: 'wrapper', parameter: 'calls' });
+              repairs.push(repair, ...nested);
+              return decision;
+            }
+          } catch { /* Continue through the standard batch repairs. */ }
+          const closedCalls = missingCallClosures(corrected);
+          if (closedCalls) {
+            const decision = decisionObject(closedCalls.value, request, nested);
+            nested.push(...closedCalls.repairs);
+            repairs.push(repair, ...nested);
+            return decision;
+          }
+          if (/^\s*\{\s*"kind"\s*:\s*"tool_calls"\s*,\s*"calls"\s*:\s*\[/.test(corrected)) {
+            const decision = jsonCallEnvelope(corrected, request, nested)!;
+            repairs.push(repair, ...nested);
+            return decision;
+          }
+          throw original;
+        } catch { throw original; }
+      }
+      const nested: DecisionRepair[] = [];
+      const decision = decisionObject(value, request, nested);
+      repairs.push(repair, ...nested);
+      return decision;
     }
     const callWrapper = /^\{\s*"kind"\s*:\s*"tool_call"\s*:\s*\{/.exec(text);
     if (callWrapper) {
       const inner = objectAt(text, text.indexOf('{', callWrapper[0].length - 1));
-      return decisionObject({ kind: 'tool_call', ...(inner as object) }, request, repairs);
+      const decision = decisionObject({ kind: 'tool_call', ...(inner as object) }, request, repairs);
+      repairs.push({ kind: 'missing_call_key', tool: decision.kind === 'tool_call' ? decision.name : 'wrapper', parameter: 'call' });
+      return decision;
     }
     // A plain assistant reply is a valid final answer. Never reinterpret a malformed
     // structured tool decision as prose, since that could hide an intended tool call.
+    const withoutInlineCode = text.replace(/(?<!`)(?:``(?!`)(?:(?!``)[^\r\n])+(?<!`)``|`[^`\r\n]+`)(?!`)/g, '');
     if (text && !text.startsWith('{') && !text.startsWith('[') &&
-      !/｜｜(?:DSML|DS)｜｜/.test(text) && !/<\/?custom_tool_call\b/.test(text) && !isToolProtocolText(text) && !/"kind"\s*:/.test(text))
+      !/｜｜(?:DSML|DS)｜｜/.test(withoutInlineCode) && !/<\/?custom_tool_call\b/.test(text) && !isToolProtocolText(text) && !/"kind"\s*:/.test(withoutInlineCode))
       return { kind: 'final', content: text };
     throw original;
   }
   return decisionObject(decoded, request, repairs);
 }
+function closedDsmlRoot(source:string):number|null{
+  const root=/^<｜｜DSML｜｜\s*(calls|tool_calls)>/.exec(source);if(!root)return null;
+  let cursor=root[0].length;
+  while(cursor<source.length){
+    cursor+=/^\s*/.exec(source.slice(cursor))![0].length;
+    const close=new RegExp(`^<\\/｜｜DSML｜｜\\s*${root[1]}>`).exec(source.slice(cursor));if(close)return cursor+close[0].length;
+    if(!/^<｜｜DSML｜｜\s*invoke\s+name="/.test(source.slice(cursor))||/^<｜｜DSML｜｜\s*invoke\s+name="tool_calls?"/.test(source.slice(cursor)))return null;
+    const end=invocationEnd(source.slice(cursor));if(end===null)return null;cursor+=end;
+  }
+  return null;
+}
 export function parseDecision(text: string, request: ChatRequest, onRepair?: (repair: DecisionRepair) => void): Decision {
+  if (!hasUsableTools(request)) return {kind:'final',content:finalAnswer(text,request)};
   const trimmed = text.trim();
   const fenced = /^```(?:json)?\s*\n([\s\S]*?)\n```$/.exec(trimmed);
-  const source = fenced?.[1] ?? trimmed;
+  const originalSource = fenced?.[1] ?? trimmed;
+  const source = normalizeDsmlBoundaries(originalSource);
+  if(/^<｜DSML｜｜/.test(source))throw new Error('Malformed DSML marker boundary');
+  if (!/^[{[]/.test(source) && /(?:^|\n)[\t ]*<\/?｟DSML｠+[\t ]*(?:calls|tool_calls|invoke|parameter)\b/.test(source))throw new Error('Malformed DSML tool envelope: unsupported marker');
+  // Only complete adjacent documents have clear boundaries. Keep every call in order;
+  // never extract markup from JSON strings or from an incomplete JSON envelope.
+  let split:number|null=null;
+  if(source.startsWith('{')){
+    let end:number|undefined;try{end=objectRange(source,0).end;}catch{}
+    if(end!==undefined&&source.slice(end).trim()){
+      if(/^\s*<｜{1,2}DSML｜｜\s*(?:calls|tool_calls)>/.test(source.slice(end)))split=end;
+      else if(!/^\s*}\s*$/.test(source.slice(end)))throw new Error('Unexpected data after a complete JSON decision');
+    }
+  }
+  else {const end=closedDsmlRoot(source);if(end!==null&&source.slice(end).trim()){
+    if(/^\s*\{/.test(source.slice(end)))split=end;else throw new Error('Unexpected data after a complete DSML document');
+  }}
+  if(split!==null){
+    const local:DecisionRepair[]=[],first=parseDecision(source.slice(0,split),request,r=>local.push(r)),second=parseDecision(source.slice(split),request,r=>local.push(r));
+    if(first.kind==='final'||second.kind==='final')throw new Error('Adjacent decision documents cannot mix a final answer and invocations');
+    const calls=[...(first.kind==='tool_call'?[{name:first.name,arguments:first.arguments}]:first.calls),...(second.kind==='tool_call'?[{name:second.name,arguments:second.arguments}]:second.calls)];
+    const decision=parseDecision(JSON.stringify({kind:'tool_calls',calls}),request);
+    local.push({kind:'adjacent_decisions',tool:'wrapper',parameter:'calls'});for(const repair of local)onRepair?.(repair);return decision;
+  }
   // An unsupported call block owns its embedded JSON. Never salvage a nested final/call
   // from inside a rejected batch, even if one argument contains a valid-looking decision.
   if (!/^[{[]/.test(source) && /(?:^|\n)[\t ]*<\/?system_call\b/i.test(source))
@@ -925,6 +1030,7 @@ export function parseDecision(text: string, request: ChatRequest, onRepair?: (re
       /(?:^|\n)[\t ]*<\/?｟DSML｠+[\t ]*(?:calls|tool_calls|invoke|parameter)\b/.test(source))
     throw new Error('Malformed DSML tool envelope: unsupported marker');
   const repairs: DecisionRepair[] = [];
+  if(source!==originalSource)repairs.push({kind:'dsml_marker_boundary',tool:'wrapper',parameter:'marker'});
   const jsonAt = source.search(/\{\s*"kind"\s*:\s*"(?:tool_calls|tool_call|final)"/);
   const dsmlAt = source.search(/<｜｜DSML｜｜\s*(?:calls|tool_calls)>|<｜｜DSML｜｜\s*(?:invoke\s+name="|parameter\s+name="calls")|<｜｜(?:DS|DSML)｜｜\s*tool_calls\s*｜｜(?:DS|DSML)｜｜/);
   // Protocol markers inside a JSON string are data. Select the outer
@@ -932,7 +1038,7 @@ export function parseDecision(text: string, request: ChatRequest, onRepair?: (re
   const jsonOuter = /^[{[]/.test(source) || (jsonAt >= 0 && (dsmlAt < 0 || jsonAt < dsmlAt));
   let decision: Decision;
   try { decision = jsonOuter ? jsonDecision(source, request, repairs)
-    : plainWriteParametersDecision(source, request, repairs) ?? callsParameterDecision(source, request, repairs) ?? genericShorthandNameDecision(source, request, repairs) ??
+    : attributeDsmlDecision(source,request,repairs) ?? plainWriteParametersDecision(source, request, repairs) ?? callsParameterDecision(source, request, repairs) ?? genericShorthandNameDecision(source, request, repairs) ??
       alternateDsDecision(source, request, repairs) ?? dsmlDecision(source, request, repairs) ??
       missingCallsOpener(source, request, repairs) ?? jsonDecision(source, request, repairs); }
   catch (error) {
@@ -947,6 +1053,7 @@ export function parseDecision(text: string, request: ChatRequest, onRepair?: (re
   const selected = typeof request.tool_choice === 'object' && request.tool_choice !== null &&
     'function' in request.tool_choice ? (request.tool_choice.function as { name?: unknown })?.name : undefined;
   if (decision.kind === 'final') {
+    if(request.response_format)decision.content = finalAnswer(decision.content,{...request,tool_choice:'none'});
     if (isLeakedFinalProtocol(decision.content)) throw new Error('Tool protocol was returned as final text; regenerate a valid tool decision or a readable natural-language reply');
     if (request.tool_choice === 'required' || typeof selected === 'string') throw new Error('tool_choice requires a tool call');
     return decision;
@@ -1049,6 +1156,10 @@ export function conversationPrompt(request: ChatRequest, options: {
       transcript[0]=echo;
     }
   }
+  if (!hasUsableTools(request)) {
+    options.onOptimization?.({contract_reused:options.historyMode==='delta',echo_characters_avoided:echoCharactersAvoided});
+    return answerInstructions(request) + `Conversation: ${JSON.stringify(transcript)}\nAssistant answer:`;
+  }
   const toolBlock = options.omitUnchangedTools
     ? `Tool definitions are unchanged from the previous turn in this Qoder session. Use those exact names and schemas.\n`
     : `Tools (JSON schemas): ${JSON.stringify(toolDefinitions(request,options.fullToolDetails))}\n`;
@@ -1060,12 +1171,12 @@ export function conversationPrompt(request: ChatRequest, options: {
     : `You are the model decision layer for DeepSeek Harness. The Harness itself owns and executes all tools.\n` +
     `Return exactly one JSON object, with no markdown:\n` +
     `{"kind":"final","content":"your response"}\n` +
-    `or {"kind":"tool_call","name":"one provided tool name","arguments":{...}}\n` +
+    `or {"kind":"tool_call","name":"provided tool name","arguments":{...}}\n` +
     `Request independent operations needed next (such as reading several files or running several searches) together in the same reply. Keep operations that depend on earlier results in separate replies. Use {"kind":"tool_calls","calls":[{"name":"provided tool name","arguments":{...}}]}.\n` +
     `Choose a tool when the user task needs a file, command, search, or other host action.\n` +
     `Do not return a progress-only final answer while host actions remain necessary.\n` +
     `When asking the user, use a declared question tool with its real schema, or a readable natural-language final reply. Never expose tool protocol as an answer.\n` +
-    `For long write/edit content, issue one tool call at a time instead of batching large file edits. ` +
+    `Keep large edits bounded instead of batching huge file writes. ` +
     `For edit, use the smallest unambiguous matching old_string instead of copying a whole file.\n` +
     `Protocol check before sending: use JSON only, never DSML/XML or positional argument arrays. ` +
     `Every required field must be present; use the schema's actual types (numbers are not quoted). ` +

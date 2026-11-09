@@ -11,6 +11,7 @@ import {limitNotice,sameUpstream,stopLabel,stopNote,turnExtras,upstreamHtml} fro
 import {mathExtension,replaceMath} from './math.js';
 import {fileLinks,toolFilePath,webLink} from './file-links.js';
 import {usable,unusableReason,permissionWarning,environmentCardHtml,servicesPageHtml,serviceCardsHtml,serviceModelsHtml,onboardingHtml,sourceCardHtml} from './setup.js';
+import {budgetCheck,compactTokens,formatTokens,parseTokens} from './tokens.js';
 
 const $=selector=>document.querySelector(selector);
 const esc=value=>String(value??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'})[c]);
@@ -23,7 +24,7 @@ const busyStates=['running','starting','waiting'];
 const state={snapshot:null,projectId:null,sessionId:null,events:[],draft:'',historyLoading:null,
   runtimeId:'dsh',modelKey:null,reasoning:'',contextTokens:null,contextBudget:null,nativeModel:'',
   tree:new Map(),expanded:new Set(),file:null,dirty:false,git:null,diffPath:null,diff:'',terminalText:'',terminalBusy:false,
-  settings:null,catalogSearch:'',catalogSource:'all',sessionSearch:'',menuSearch:'',params:null};
+  settings:null,catalogSearch:'',catalogSource:'all',sessionSearch:'',menuSearch:'',params:null,delivery:'steer'};
 const ui=loadUi(),views=new WorkspaceViews(),metrics=new SessionMetrics(),activity=new ActivityTracker(),stopping=new Set(),nativeCatalog=new Map(),showAll=new Set();
 const markdownCache=new Map(),blockSource=new WeakMap();
 const pending=new PendingAttachments(),capCache=new Map(),capLoading=new Set(),mediaLookup=new Map(),mediaResolving=new Set();
@@ -104,7 +105,7 @@ const modelOf=selection=>selection?.modelKey&&selection.modelKey!=='native'?mode
 const busy=s=>!!s&&busyStates.includes(s.status);
 /** What a busy session is doing right now (thinking, writing, which tool, waiting on you…). */
 const activityOf=s=>activity.describe(s.id,s.status,{runtime:runtime(s.runtimeId)?.name,stopping:stopping.has(s.id)});
-const compact=n=>n==null?'—':n>=1e6?`${+(n/1e6).toFixed(2)}M`:n>=1e3?`${+(n/1e3).toFixed(1)}K`:String(Math.round(n));
+const compact=compactTokens;
 const pct=n=>n==null?'—':`${Math.round(n*100)}%`;
 const clock=date=>new Intl.DateTimeFormat('zh-CN',{hour:'2-digit',minute:'2-digit'}).format(new Date(date));
 const pretty=data=>{try{return typeof data==='string'?data:JSON.stringify(data,null,2);}catch{return String(data);}};
@@ -155,6 +156,8 @@ const defaultContext=model=>model?.contexts.length?(model.contexts.some(c=>c.tok
 function validBudget(model,budget,context){
   return Number.isSafeInteger(budget)&&budget>=4096&&!!model?.contextMaximum&&budget<=model.contextMaximum&&!(model.source==='qoder'&&context&&budget>context);
 }
+/** The largest budget a selection allows: Qoder compacts inside the window it was given, others inside the model's maximum. */
+const budgetMax=(model,context)=>model?.source==='qoder'&&context?context:model?.contextMaximum??null;
 function selectModel(key){
   state.modelKey=key;
   if(key){ui.models={...ui.models,[state.runtimeId]:key};saveUi();}
@@ -192,7 +195,16 @@ function modelLabel(selection,model){
     if(ctx)parts.push(compact(ctx));
     if(selection.contextBudget)parts.push(`预算 ${compact(selection.contextBudget)}`);
   }else parts.push('原生执行');
-  return`<span class="ml-name">${esc(model.name)}</span><span class="ml-meta">${esc(parts.join(' · '))}</span>`;
+  return`<span class="ml-name">${esc(sourceName(model))}</span><span class="ml-meta">${esc(parts.join(' · '))}</span>`;
+}
+/** The chip may be narrow; its tooltip spells everything out. */
+function modelTitle(selection,model,locked){
+  const lead=locked?'查看或调整此会话的参数':'选择模型、思考强度与上下文窗口';
+  if(!model||selection?.modelKey==='native')return lead;
+  const rows=[`${sourceNames[model.source]} · ${model.name}（${model.id}）`,`思考强度：${selection.reasoning?effortName(selection.reasoning):'默认'}`];
+  if(selection.contextTokens)rows.push(`上下文窗口：${compact(selection.contextTokens)}（${selection.contextTokens.toLocaleString()} tokens）`);
+  rows.push(`本地压缩预算：${selection.contextBudget?`${compact(selection.contextBudget)}（${selection.contextBudget.toLocaleString()} tokens）`:'不设置'}`);
+  return`${rows.join('\n')}\n${lead}`;
 }
 // The backend checks a catalog model by its identity, so a new conversation has to send it too.
 const composerSelection=()=>({modelKey:state.modelKey,identity:state.modelKey==='native'?undefined:currentModel()?.identity,reasoning:state.reasoning,contextTokens:state.contextTokens,contextBudget:state.contextBudget,nativeModel:state.nativeModel});
@@ -302,10 +314,10 @@ function autosize(el){el.style.height='auto';el.style.height=`${Math.min(el.scro
 function mountComposer(){
   const slot=$('.composer-slot');
   if(!slot)return;
-  slot.innerHTML=`<div class="composer${session()?'':' centered'}"><div id="composer-banner"></div><div class="composer-box"><div class="attach-tray" id="attach-tray" hidden></div><textarea id="prompt" rows="1" aria-label="任务" spellcheck="false"></textarea><div class="composer-row" id="composer-controls"></div><div class="drop-hint" id="drop-hint" hidden></div></div><div class="composer-footer" id="composer-footer"></div></div>`;
+  slot.innerHTML=`<div class="composer${session()?'':' centered'}"><div id="composer-banner"></div><div class="queue-strip" id="queue-strip" hidden></div><div class="composer-box"><div class="attach-tray" id="attach-tray" hidden></div><textarea id="prompt" rows="1" aria-label="任务" spellcheck="false"></textarea><div class="composer-row" id="composer-controls"></div><div class="drop-hint" id="drop-hint" hidden></div></div><div class="composer-footer" id="composer-footer"></div></div>`;
   const prompt=$('#prompt');
   prompt.value=state.draft;
-  prompt.addEventListener('input',e=>{state.draft=e.target.value;stashDraft();autosize(e.target);});
+  prompt.addEventListener('input',e=>{state.draft=e.target.value;stashDraft();autosize(e.target);syncDraftMark();});
   prompt.addEventListener('compositionstart',e=>{e.target.dataset.composing='true';});
   prompt.addEventListener('compositionend',e=>{e.target.dataset.composing='false';state.draft=e.target.value;stashDraft();});
   prompt.addEventListener('keydown',e=>{if(e.key==='Enter'&&!e.shiftKey&&!e.isComposing){e.preventDefault();void submit();}});
@@ -320,6 +332,71 @@ function mountComposer(){
   });
   renderComposerControls();renderBanner();renderFooter();renderTray();
   requestAnimationFrame(()=>autosize(prompt));
+}
+/** While a turn runs, the send button and the 插话/排队 choice show only once there is something to send. */
+function syncDraftMark(){
+  const box=$('.composer-box');
+  if(box)box.classList.toggle('has-draft',!!state.draft.trim()||pending.list(attachKey()).some(x=>x.status!=='error'));
+}
+/** How a message typed during a run goes out: into the running turn when the runtime can take it, otherwise after it. */
+function deliveryFor(s){return s?.interject?.steer===true&&state.delivery!=='queue'?'steer':'queue';}
+function sendTitle(s){
+  if(!busy(s))return'发送 (Enter)';
+  return deliveryFor(s)==='steer'?'插话 (Enter)：模型下一步就能看到':`排队 (Enter)：本轮结束后自动发送${s?.interject?.steer===false&&s.interject.reason?`。${s.interject.reason}`:''}`;
+}
+/* ---------- messages waiting for the running turn to end ---------- */
+function renderQueue(){
+  const el=$('#queue-strip'),s=session();
+  if(!el)return;
+  const items=s?.queue??[];
+  el.hidden=!items.length;
+  if(!items.length){el.innerHTML='';return;}
+  const running=busy(s);
+  // A dispatch whose native receipt was never confirmed stays put until someone checks the native session.
+  const held=new Set(s.queueDispatch?.ids??[]),onHold=items.some(q=>held.has(q.id));
+  const head=running?`排队 ${items.length} 条 · 本轮结束后自动发送`:onHold?'上次发送后没收到原生确认，消息先保留，不会自动重发':`有 ${items.length} 条排队消息没有发出（上一轮没有正常结束）`;
+  const actions=q=>held.has(q.id)?`<span class="queue-held" title="请在原生界面确认这条消息是否已经发出，再决定是否重发">待核对</span>`:`<button class="icon-btn xs" data-queue-edit="${esc(q.id)}" title="取回到输入框修改">${icon('edit')}</button><button class="icon-btn xs" data-queue-remove="${esc(q.id)}" title="删除这条">${icon('close')}</button>`;
+  patchHtml(el,`<div class="queue-head">${icon(onHold&&!running?'alert':'clock')}<span>${esc(head)}</span>${running||onHold?'':`<button class="btn sm primary" data-queue-send="all">${icon('arrowUp')}现在发送</button>`}</div>${items.map(q=>`<div class="queue-item"><span class="queue-text" title="${esc(q.text)}">${esc(q.text||`${q.attachments?.length??0} 个附件`)}</span>${q.attachments?.length?`<span class="queue-att" title="${esc(q.attachments.map(a=>a.name).join('、'))}">${icon('paperclip')}${q.attachments.length}</span>`:''}${actions(q)}</div>`).join('')}`);
+}
+/** Takes a queued message back; its attachments are still staged, so they return to the tray as they were. */
+async function dequeue(s,queueId){
+  const item=await call('session:dequeue',{sessionId:s.id,queueId});
+  await snapshot();renderQueue();
+  return item??{text:'',attachments:[]};
+}
+async function editQueued(queueId){
+  const s=session();if(!s)return;
+  const item=await dequeue(s,queueId),key=attachKey();
+  if(item.text)state.draft=state.draft.trim()?`${state.draft.replace(/\s+$/,'')}\n${item.text}`:item.text;
+  for(const a of item.attachments??[])pending.add(key,{status:'ready',name:a.name,kind:a.kind,size:a.size,attachment:a});
+  stashDraft();
+  const prompt=$('#prompt');
+  if(prompt){prompt.value=state.draft;autosize(prompt);prompt.focus();}
+  renderTray();syncDraftMark();
+}
+async function removeQueued(queueId){
+  const s=session();if(!s)return;
+  const item=await dequeue(s,queueId);
+  for(const a of item.attachments??[])void call('attachment:discard',{id:a.id}).catch(()=>{});
+  toast('已删除这条排队消息');
+}
+/** After a failed or stopped turn, nothing in the queue goes out on its own: this sends it as one message. */
+async function sendQueuedNow(){
+  const s=session();if(!s?.queue?.length)return;
+  const items=[];
+  for(const q of [...s.queue])items.push(await dequeue(s,q.id));
+  const text=items.map(x=>x.text).filter(Boolean).join('\n\n'),attachments=items.flatMap(x=>x.attachments??[]);
+  const now=session(),delivery=busy(now)?'queue':undefined;
+  try{await call('session:prompt',{sessionId:s.id,text,...(attachments.length?{attachments:attachments.map(a=>a.id)}:{}),...(delivery?{delivery}:{})});}
+  catch(error){
+    // Nothing is lost: what could not go out comes back to the draft.
+    const key=attachKey();
+    state.draft=[state.draft.trim(),text].filter(Boolean).join('\n');
+    for(const a of attachments)pending.add(key,{status:'ready',name:a.name,kind:a.kind,size:a.size,attachment:a});
+    const prompt=$('#prompt');if(prompt){prompt.value=state.draft;autosize(prompt);}
+    renderTray();syncDraftMark();throw error;
+  }
+  await snapshot();renderComposerControls();renderFooter();
 }
 /* ---------- attachments (images, video, audio) ---------- */
 const attachKey=()=>views.draftKey(state);
@@ -350,6 +427,7 @@ function renderTray(){
   const items=pending.list(attachKey());
   el.hidden=!items.length;
   patchHtml(el,trayHtml(items));
+  syncDraftMark();
 }
 /** Stage dropped or pasted files: the backend checks the bytes and keeps them under a random id. */
 async function addFiles(files){
@@ -432,15 +510,23 @@ function renderComposerControls(){
   const el=$('#composer-controls'),prompt=$('#prompt');
   if(!el)return;
   const s=session(),p=project(),running=busy(s),env=runtime(s?s.runtimeId:state.runtimeId);
-  prompt.placeholder=!p?'先打开一个工作文件夹，再开始…':s?(running?'可以先写下一条，本轮结束后再发送…':'继续这个任务…'):'描述要完成的任务，Agent 会在所选文件夹中工作…';
+  const steer=running&&deliveryFor(s)==='steer';
+  prompt.placeholder=!p?'先打开一个工作文件夹，再开始…':s?(running?(steer?'补充或纠正要求，Enter 插话，模型下一步就能看到…':'Enter 排队，本轮结束后自动发送…'):'继续这个任务…'):'描述要完成的任务，Agent 会在所选文件夹中工作…';
   const selection=s?s.selection:composerSelection(),model=s?modelOf(s.selection):currentModel();
   const folder=s?'':`<button class="chip-btn" id="folder-chip" data-value="${esc(p?.id??'')}" title="${esc(p?.path??'选择工作文件夹')}">${icon('folder')}<span class="chip-text">${esc(p?.name??'选择文件夹')}</span>${icon('chevronDown','caret')}</button>`;
   const envOk=!!s||usable(env);
   const envChip=`<button class="chip-btn${s?' locked':''}${envOk?'':' unavailable'}" id="env-chip" data-value="${esc(env?.id??'')}" title="${s?'会话创建后不能更换运行环境':envOk?'先选择运行环境':esc(unusableReason(env))}">${tile(env)}<span class="chip-text">${esc(env?.name??'选择环境')}</span>${icon(s?'lock':'chevronDown','caret')}</button>`;
-  const modelChip=`<button class="chip-btn model-chip" id="model-chip" data-value="${esc(selection.modelKey??'')}" title="${s?'查看或调整此会话的参数':'选择模型、思考强度与上下文窗口'}">${icon('layers')}<span class="chip-text">${modelLabel(selection,model)}</span>${icon('chevronDown','caret')}</button>`;
+  const modelChip=`<button class="chip-btn model-chip" id="model-chip" data-value="${esc(selection.modelKey??'')}" title="${esc(modelTitle(selection,model,!!s))}">${icon('layers')}<span class="chip-text">${modelLabel(selection,model)}</span>${icon('chevronDown','caret')}</button>`;
   const permChip=permissionChipHtml(s,env);
   const waiting=!running&&!!env?.checking;
-  el.innerHTML=`<div class="composer-left">${attachButtonHtml()}${folder}${envChip}<span class="chip-sep">${icon('chevronRight')}</span>${modelChip}${permChip}</div><button class="send${running?' stop':''}" id="send" title="${running?'停止本轮':waiting?'正在检测运行环境，稍等几秒':'发送 (Enter)'}" aria-label="${running?'停止本轮':'发送'}" ${p&&envOk&&!waiting?'':'disabled'}>${icon(running?'stop':'arrowUp')}</button>`;
+  // While a turn runs: stop is always there; send (with 插话/排队 when the runtime can take messages mid-turn) appears once something is typed.
+  const choice=running&&s.interject?.steer===true?`<div class="delivery-seg" role="radiogroup" aria-label="运行中发送方式"><button role="radio" aria-checked="${steer}" class="${steer?'on':''}" data-delivery="steer" title="插进正在运行的这一轮，模型下一步就能看到">插话</button><button role="radio" aria-checked="${!steer}" class="${steer?'':'on'}" data-delivery="queue" title="等这一轮结束后再发送">排队</button></div>`:'';
+  const actions=running
+    ?`<div class="run-actions">${choice}<button class="send stop" id="stop-run" title="停止本轮" aria-label="停止本轮">${icon('stop')}</button><button class="send run-send" id="send" title="${esc(sendTitle(s))}" aria-label="${steer?'插话':'排队'}">${icon('arrowUp')}</button></div>`
+    :`<button class="send" id="send" title="${waiting?'正在检测运行环境，稍等几秒':'发送 (Enter)'}" aria-label="发送" ${p&&envOk&&!waiting?'':'disabled'}>${icon('arrowUp')}</button>`;
+  el.innerHTML=`<div class="composer-left">${attachButtonHtml()}${folder}${envChip}<span class="chip-sep">${icon('chevronRight')}</span>${modelChip}${permChip}</div>${actions}`;
+  $('.composer-box')?.classList.toggle('running',running);
+  syncDraftMark();renderQueue();
   if(menu&&!$('#popover').classList.contains('hidden'))placeMenu();
 }
 /* ---------- permission modes (native approval policy per runtime and session) ---------- */
@@ -498,7 +584,9 @@ function permissionMenuHtml(){
   const issue=p.issue?`<div class="menu-note warn">${icon('alert')}<span>${esc(p.issue)}</span></div>`:'';
   const migrated=p.migration?.reason?`<div class="menu-note">${icon('info')}<span>${esc(p.migration.reason)}</span></div>`:'';
   const exec=p.protocol==='exec-json'?`<div class="menu-note">${icon('info')}<span>原生 Codex 按官方 CLI 的 exec 方式运行，不能逐条询问；需要更高权限的操作由原生沙箱拒绝，或交给自动审查。</span></div>`:'';
-  return`<div class="menu-label">授权方式 · ${head}</div>${items}${issue}${migrated}${exec}<div class="menu-note">${icon('info')}<span>由原生运行环境执行：Bridge++ 只传原生参数或代你回答授权请求，不会越过原生沙箱。</span></div>`;
+  // Measured on DSH: every tool call is reviewed by its own model request, so the request count roughly doubles.
+  const review=env?.id==='dsh'&&p.modes?.some(m=>m.id==='auto-review')?`<div class="menu-note">${icon('zap')}<span>自动审查会在每次工具调用前另发一次模型请求，请求数大约翻倍，也更慢。</span></div>`:'';
+  return`<div class="menu-label">授权方式 · ${head}</div>${items}${issue}${migrated}${exec}${review}<div class="menu-note">${icon('info')}<span>由原生运行环境执行：Bridge++ 只传原生参数或代你回答授权请求，不会越过原生沙箱。</span></div>`;
 }
 /** Applies a permission change; a mode that drops the sandbox asks first, unless it is already in effect. */
 function changePermission(runtimeId,mode,current,apply){
@@ -551,7 +639,7 @@ function ringSvg(ratio){
   return`<svg class="ring ${level}" viewBox="0 0 22 22" aria-hidden="true"><circle class="ring-track" cx="11" cy="11" r="${r}"/>${ratio==null?'':`<circle class="ring-value" cx="11" cy="11" r="${r}" stroke-dasharray="${c.toFixed(2)}" stroke-dashoffset="${(c*(1-ratio)).toFixed(2)}" transform="rotate(-90 11 11)"/>`}</svg>`;
 }
 function selectionWindow(s){const m=modelOf(s.selection);return s.selection.contextBudget??s.selection.contextTokens??m?.contextMaximum??null;}
-function turnStartedAt(){for(let i=state.events.length-1;i>=0;i--)if(state.events[i].type==='user')return state.events[i].at;return session()?.updatedAt;}
+function turnStartedAt(){for(let i=state.events.length-1;i>=0;i--)if(state.events[i].type==='user'&&state.events[i].delivery!=='steer')return state.events[i].at;return session()?.updatedAt;}
 function renderFooter(){
   const el=$('#composer-footer');
   if(!el)return;
@@ -675,10 +763,29 @@ function approvalBlock(e,resolved){
   else buttons=choices.filter(c=>choiceLabels[c]).map(c=>`<button class="btn sm${c==='approve'?' primary':c.startsWith('reject')?' danger':''}" data-approval="${esc(e.approvalId)}" data-choice="${esc(c)}">${choiceLabels[c]}</button>`).join('');
   return`<div class="approval-card"><div class="approval-head">${icon(e.type==='question'?'info':'key')}<b>${e.type==='question'?'Agent 需要你补充信息':'Agent 请求授权'}</b>${e.name?`<span class="muted">${esc(e.name)}</span>`:''}</div>${summary?`<div class="approval-summary">${esc(summary)}</div>`:''}<details class="approval-details" data-expand="approval-${esc(e.approvalId)}"><summary>详细参数</summary><pre>${esc(clip(pretty(e.data)))}</pre></details><div class="approval-actions">${buttons}</div></div>`;
 }
-function planBlock(e){
+/** `live` is true only for the newest plan of the turn that is running now: an item stays "in
+ * progress" in the record after a turn stops, but nothing is working on it any more. */
+function planBlock(e,live){
   const d=e.data??{},items=(d.entries??d.plan??[]).map(x=>({text:x.content??x.step??'',status:String(x.status??'')}));
   if(!items.length)return miscBlock(e,'list','计划');
-  return`<div class="plan-card"><div class="plan-head">${icon('list')}<span>计划</span><span class="muted">${items.filter(x=>x.status==='completed').length}/${items.length}</span></div><ul>${items.map(x=>`<li class="${/progress/i.test(x.status)?'doing':x.status==='completed'?'done':''}">${x.status==='completed'?icon('check'):/progress/i.test(x.status)?'<span class="spinner"></span>':'<span class="plan-dot"></span>'}<span>${esc(x.text)}</span></li>`).join('')}</ul></div>`;
+  const doing=x=>/progress/i.test(x.status),stalled=!live&&items.some(doing);
+  const mark=x=>x.status==='completed'?icon('check'):doing(x)?(live?'<span class="spinner"></span>':'<span class="plan-stalled" title="这一轮已经结束，这一项没有完成"></span>'):'<span class="plan-dot"></span>';
+  return`<div class="plan-card"><div class="plan-head">${icon('list')}<span>计划</span><span class="muted">${items.filter(x=>x.status==='completed').length}/${items.length}</span>${stalled?'<span class="plan-state">未完成</span>':''}</div><ul>${items.map(x=>`<li class="${doing(x)?(live?'doing':'stalled'):x.status==='completed'?'done':''}">${mark(x)}<span>${esc(x.text)}</span></li>`).join('')}</ul></div>`;
+}
+const steerNotes={
+  pending:['clock','插话 · 等待插入下一步'],
+  delivered:['check','插话 · 已送达，模型下一步会看到'],
+  carried:['chevronRight','插话 · 这一轮先结束了，已作为下一轮的输入'],
+  failed:['alert','插话没有送达，已放回排队'],
+};
+/** A message sent mid-turn says where it went; one that waited in the queue says so too. */
+function userBlock(e,discarded,steers){
+  let note='';
+  if(e.delivery==='steer'){
+    const s=steers.get(e.steerId),key=steerNotes[s?.state]?s.state:'pending',[ico,text]=steerNotes[key];
+    note=`<div class="user-note ${key}"${s?.reason?` title="${esc(s.reason)}"`:''}>${icon(ico)}<span>${esc(text)}${key==='failed'&&s?.reason?`：${esc(s.reason)}`:''}</span></div>`;
+  }else if(e.fromQueue?.length)note=`<div class="user-note queued">${icon('clock')}<span>${e.fromQueue.length>1?`排队的 ${e.fromQueue.length} 条消息，合并发出`:'排队消息，上一轮结束后发出'}</span></div>`;
+  return`<article class="message user-message${e.delivery==='steer'?' steer':''}">${userMediaHtml(e.attachments,discarded)}${e.text?`<div class="user-bubble">${esc(e.text)}</div>`:''}${note}<div class="user-meta">${clock(e.at)}</div></article>`;
 }
 function miscBlock(e,ico,label){
   return`<details class="tool" data-expand="${esc(e.id)}"><summary>${icon(ico,'tool-status')}<span class="tool-name">${label}</span><span class="tool-summary">${esc(toolSummary(e))}</span>${icon('chevronRight','tool-caret')}</summary><div class="tool-body"><pre>${esc(clip(e.text??pretty(e.data??{})))}</pre></div></details>`;
@@ -705,6 +812,10 @@ function renderChat(quiet=false){
   const resolved=new Map(events.filter(e=>e.type==='approval-resolved').map(e=>[e.approvalId,e.choice]));
   const discarded=new Set(events.filter(e=>e.type==='attachments-discarded').flatMap(e=>e.attachmentIds??[]));
   const names=new Map(events.filter(e=>e.type==='user').flatMap(e=>(e.attachments??[]).map(a=>[a.id,a.name])));
+  const steers=new Map(events.filter(e=>e.type==='steer-state').map(e=>[e.steerId,e]));
+  // Only the newest plan of the running turn can still be in progress.
+  const liveTurn=running?events.findLast(e=>e.type==='user'&&e.delivery!=='steer')?.turnId:null;
+  const livePlan=liveTurn?events.findLast(e=>e.type==='plan'&&e.turnId===liveTurn)?.id:null;
   const tools=new Map(),lastDiff=new Map(),toolKey=e=>e.toolId??e.data?.callId??null;
   // The gateway and the completion check repeat the upstream's words as an error; its card already shows them.
   const upstreamSaid=new Set(events.filter(e=>e.type==='upstream-error').map(e=>`${e.turnId}\u0000${e.message}`));
@@ -716,7 +827,7 @@ function renderChat(quiet=false){
     }else if(e.type==='diff')lastDiff.set(e.turnId??'none',e);
   }
   for(const e of events){
-    if(e.type==='user')add(`user:${e.id}`,`<article class="message user-message">${userMediaHtml(e.attachments,discarded)}${e.text?`<div class="user-bubble">${esc(e.text)}</div>`:''}<div class="user-meta">${clock(e.at)}</div></article>`);
+    if(e.type==='user')add(`user:${e.id}`,userBlock(e,discarded,steers));
     else if(e.type==='media')add(`media:${e.id}`,`<article class="message media-message">${mediaCardHtml(e)}</article>`);
     // Codex can close a turn with an empty final answer (e.g. after a generated image); nothing to show.
     else if(e.type==='text'){if(!e.text?.trim())continue;add(`text:${e.id}`,`<article class="message"><div class="message-content markdown">${cachedMarkdown(e)}</div><div class="message-tools"><button class="icon-btn xs copy-answer" title="复制">${icon('copy')}</button></div></article>`);}
@@ -728,7 +839,7 @@ function renderChat(quiet=false){
       if(t.rendered)continue;
       t.rendered=true;add(`tool:${key}`,()=>toolBlock(key,t,running,names),{tool:t});
     }else if(e.type==='subagent')add(`subagent:${e.id}`,miscBlock(e,'bot','子代理'));
-    else if(e.type==='plan')add(`plan:${e.id}`,planBlock(e));
+    else if(e.type==='plan')add(`plan:${e.id}`,planBlock(e,e.id===livePlan));
     else if(e.type==='diff'){if(lastDiff.get(e.turnId??'none')===e)add(`diff:${e.turnId??e.id}`,diffBlock(e));}
     else if(e.type==='approval'||e.type==='question')add(`approval:${e.approvalId??e.id}`,approvalBlock(e,resolved));
     else if(e.type==='error'||e.type==='notice'){
@@ -789,7 +900,7 @@ function openMenu(anchor,kind){
   closeMenu();
   menu={kind,anchorId:anchor.id};
   if(kind==='model'){
-    state.menuSearch='';
+    state.menuSearch='';openGroups.clear();
     const s=session();
     if(s)state.params={reasoning:s.selection.reasoning??'',contextTokens:s.selection.contextTokens??null,contextBudget:s.selection.contextBudget??null};
   }
@@ -869,12 +980,23 @@ function sessionMenuHtml(){
   const s=session();
   return`<button class="menu-item" id="menu-rename">${icon('edit','mi-icon')}<span class="mi-main"><span class="mi-name">重命名</span></span></button><button class="menu-item" id="menu-reveal">${icon('folder','mi-icon')}<span class="mi-main"><span class="mi-name">在资源管理器中打开文件夹</span></span></button><div class="menu-sep"></div><button class="menu-item danger" data-archive="${s?.id??''}" ${busy(s)?'disabled':''}>${icon('archive','mi-icon')}<span class="mi-main"><span class="mi-name">归档会话</span></span></button>`;
 }
+/* Two sources carry models with near-identical names (DeepSeek Flash on both), so a model is
+ * always shown with its source's letter, and each source is a group that opens on demand. */
+const sourcePrefix={qoder:'Q-',workbuddy:'W-'};
+const sourceName=m=>`${sourcePrefix[m?.source]??''}${m?.name??''}`;
+const openGroups=new Set();
+function modelItemHtml(m){
+  return`<button class="menu-item model-item${m.key===state.modelKey?' selected':''}" data-model-key="${esc(m.key)}"><span class="mi-main"><span class="mi-name">${esc(sourceName(m))}</span><span class="mi-sub mono">${esc(m.id)}</span></span><span class="mi-tags">${m.reasoning.some(e=>e!=='none')?'<span class="mi-tag">思考</span>':''}${m.contextMaximum?`<span class="mi-tag">${compact(m.contextMaximum)}</span>`:''}</span>${m.key===state.modelKey?icon('check','mi-check'):''}</button>`;
+}
 function modelListHtml(){
   const env=state.runtimeId,q=state.menuSearch.trim().toLowerCase();
   const groups=['qoder','workbuddy','antigravity'].map(source=>{
-    const list=models().filter(m=>m.source===source&&compatible(env,m)&&(!q||`${m.name} ${m.id}`.toLowerCase().includes(q)));
+    const all=models().filter(m=>m.source===source&&compatible(env,m));
+    const list=all.filter(m=>!q||`${sourceName(m)} ${m.name} ${m.id}`.toLowerCase().includes(q));
     if(!list.length)return'';
-    return`<div class="menu-label">${sourceNames[source]}</div>${list.map(m=>`<button class="menu-item model-item${m.key===state.modelKey?' selected':''}" data-model-key="${esc(m.key)}"><span class="mi-main"><span class="mi-name">${esc(m.name)}</span><span class="mi-sub mono">${esc(m.id)}</span></span><span class="mi-tags">${m.reasoning.some(e=>e!=='none')?'<span class="mi-tag">思考</span>':''}${m.contextMaximum?`<span class="mi-tag">${compact(m.contextMaximum)}</span>`:''}</span>${m.key===state.modelKey?icon('check','mi-check'):''}</button>`).join('')}`;
+    // A search shows every match; otherwise a group stays closed until it is opened.
+    const open=!!q||openGroups.has(source),chosen=all.find(m=>m.key===state.modelKey);
+    return`<div class="model-group${open?' open':''}"><button class="model-group-head" data-model-group="${source}" aria-expanded="${open}">${icon('chevronRight','mg-caret')}<span class="mg-name">${esc(sourceNames[source])}</span><span class="mg-count">${q?`${list.length}/${all.length}`:all.length} 个</span>${chosen&&!open?`<span class="mg-chosen" title="当前选择">${icon('check')}${esc(sourceName(chosen))}</span>`:''}</button>${open?`<div class="model-group-body">${list.map(modelItemHtml).join('')}</div>`:''}</div>`;
   }).join('');
   const native=env!=='dsh'&&(!q||'原生 native'.includes(q))?`<div class="menu-label">原生</div><button class="menu-item model-item${state.modelKey==='native'?' selected':''}" data-model-key="native"><span class="mi-main"><span class="mi-name">原生模型设置</span><span class="mi-sub">使用 ${esc(runtime(env)?.name??'')} 自己的模型与登录</span></span>${state.modelKey==='native'?icon('check','mi-check'):''}</button>`:'';
   return groups+native||`<div class="menu-empty">${models().length?'没有匹配的模型':'还没有模型目录。请到设置 → 模型源下载组件并登录。'}</div>`;
@@ -887,16 +1009,26 @@ function contextRow(model,value){
   if(!model.contexts.length)return'';
   return`<div class="param"><span class="param-label">${icon('window')}上下文窗口</span><div class="seg">${[...model.contexts].sort((a,b)=>a.tokens-b.tokens).map(c=>`<button class="${value===c.tokens?'on':''}" data-context="${c.tokens}">${compact(c.tokens)}${c.tokens===model.defaultContextTokens?'<small>默认</small>':''}</button>`).join('')}</div></div>`;
 }
-function budgetRow(model,value){
+/** Typed as 900K, 1M or 0.75M; the note beside it says the exact count or what is wrong while typing. */
+function budgetRow(model,value,context){
   if(!model.contextMaximum)return'';
-  return`<div class="param"><span class="param-label">${icon('database')}本地压缩预算</span><div class="budget"><input id="budget-input" type="number" min="4096" max="${model.contextMaximum}" step="1024" placeholder="不设置" value="${value??''}"><span class="muted">tokens</span></div></div>`;
+  const max=budgetMax(model,context),text=value?formatTokens(value):'';
+  return`<div class="param"><span class="param-label">${icon('database')}本地压缩预算</span><div class="budget"><input id="budget-input" type="text" inputmode="decimal" autocomplete="off" spellcheck="false" placeholder="不设置" value="${esc(text)}" data-max="${max??''}" aria-describedby="budget-help" title="可以写 900K、1M、0.75M、90万 或具体数字；K、M 按 1000 进位，和模型源标的窗口一致"><span class="budget-help" id="budget-help">${esc(value?budgetCheck(text,{max}).text:`例如 200K、0.5M，最大 ${compact(max)}`)}</span></div></div>`;
 }
+function paintBudgetHelp(input){
+  const help=$('#budget-help');
+  if(!input||!help)return;
+  const check=budgetCheck(input.value,{max:Number(input.dataset.max)||null});
+  help.textContent=input.value.trim()?check.text:`例如 200K、0.5M，最大 ${compact(Number(input.dataset.max)||null)}`;
+  help.classList.toggle('bad',!check.ok);input.classList.toggle('bad',!check.ok);
+}
+const budgetNote='预算只决定运行环境何时压缩上下文，不改变上游窗口。预算越大，每一步重发给模型的历史越多，用量也越大。';
 function paramsHtml(){
   if(state.modelKey==='native')return nativeParamsHtml();
   const m=currentModel();
   if(!m)return'';
   if(m.source==='antigravity')return`<div class="param-note">${icon('info')}<span>Gemini 由 Antigravity 原生执行。思考档位已包含在模型 ID 中，上下文由原生后端管理。</span></div>`;
-  return`${effortRow(m,state.reasoning)}${contextRow(m,state.contextTokens)}${budgetRow(m,state.contextBudget)}<div class="param-hint">预算只决定运行环境何时压缩上下文，不改变上游窗口。</div><div class="param-actions"><button class="btn sm" id="save-model-default">${icon('check')}记住此搭配</button></div>`;
+  return`${effortRow(m,state.reasoning)}${contextRow(m,state.contextTokens)}${budgetRow(m,state.contextBudget,state.contextTokens)}<div class="param-hint">${budgetNote}</div><div class="param-actions"><button class="btn sm" id="save-model-default">${icon('check')}记住此搭配</button></div>`;
 }
 function nativeEfforts(){
   const rows=nativeCatalog.get(state.runtimeId)??[],row=rows.find(r=>r.id===state.nativeModel);
@@ -934,7 +1066,7 @@ function sessionParamsHtml(s){
   const m=modelOf(s.selection),p=state.params;
   const native=s.selection.modelKey==='native';
   if(!m||m.source==='antigravity')return`<div class="menu-session-head">${icon('lock')}<div><b>${esc(m?.name??(native?'原生模型':s.selection.modelKey))}</b><small>${esc(native?s.selection.nativeModel||'原生当前模型':m?m.id:'不在当前模型目录中')}</small></div></div><div class="param-note">${icon('info')}<span>${m?'Gemini 由 Antigravity 原生执行，参数在原生界面中调整。':native?'原生模型会话的参数请在原生界面中调整。':'这个模型不在当前目录中。请刷新模型源，再用编辑框上方的“重新确认模型”。'}</span></div>`;
-  return`<div class="menu-session-head">${icon('lock')}<div><b>${esc(m.name)}</b><small>${esc(sourceNames[m.source])} · ${esc(m.id)}</small></div></div><div class="menu-params">${effortRow(m,p.reasoning)}${contextRow(m,p.contextTokens)}${budgetRow(m,p.contextBudget)}<div class="param-hint">会话创建后不能更换模型或运行环境。应用新参数会重启这个会话的运行环境，下一轮会重新发送完整上下文。</div><div class="param-actions"><button class="btn primary sm" id="apply-session-params" ${busy(s)?'disabled':''}>应用到此会话</button></div></div>`;
+  return`<div class="menu-session-head">${icon('lock')}<div><b>${esc(m.name)}</b><small>${esc(sourceNames[m.source])} · ${esc(m.id)}</small></div></div><div class="menu-params">${effortRow(m,p.reasoning)}${contextRow(m,p.contextTokens)}${budgetRow(m,p.contextBudget,p.contextTokens)}<div class="param-hint">${budgetNote}会话创建后不能更换模型或运行环境；应用新参数会重启这个会话的运行环境，下一轮会重新发送完整上下文。</div><div class="param-actions"><button class="btn primary sm" id="apply-session-params" ${busy(s)?'disabled':''}>应用到此会话</button></div></div>`;
 }
 function modelMenuHtml(){
   const s=session();
@@ -943,9 +1075,12 @@ function modelMenuHtml(){
 }
 const paramTarget=()=>session()?state.params:state;
 function setBudget(raw){
-  const s=session(),target=paramTarget(),m=s?modelOf(s.selection):currentModel(),value=raw===''?null:Number(raw);
-  if(value!==null&&!validBudget(m,value,target.contextTokens))throw new Error(`预算需为 4096–${compact(m?.source==='qoder'&&target.contextTokens?target.contextTokens:m?.contextMaximum)} 之间的整数`);
-  target.contextBudget=value;
+  const s=session(),target=paramTarget(),m=s?modelOf(s.selection):currentModel(),check=budgetCheck(raw,{max:budgetMax(m,target.contextTokens)});
+  if(!check.ok||check.value!==null&&!validBudget(m,check.value,target.contextTokens))throw new Error(`本地压缩预算：${check.ok?'超出这个模型允许的范围':check.text}`);
+  target.contextBudget=check.value;
+  // Show the canonical form (0.9M → 900K) once the value is taken.
+  const input=$('#budget-input');
+  if(input){input.value=check.value?formatTokens(check.value):'';paintBudgetHelp(input);}
   if(!s)renderComposerControls();
 }
 async function loadNativeModels(){
@@ -971,7 +1106,9 @@ function bindNativeInputs(){
   bind('#native-id','input',e=>{state.nativeModel=e.target.value.trim();syncNativeChoice();});
   bind('#native-model-choice','change',e=>{state.nativeModel=e.target.value;const input=$('#native-id');if(input)input.value=e.target.value;repaintNativeEffort();renderComposerControls();});
   bind('#native-effort','change',e=>{state.reasoning=e.target.value;renderComposerControls();});
+  bind('#budget-input','input',e=>paintBudgetHelp(e.target));
   bind('#budget-input','change',e=>void action(()=>setBudget(e.target.value)));
+  bind('#budget-input','keydown',e=>{if(e.key==='Enter'&&!e.isComposing){e.preventDefault();e.target.blur();}});
 }
 function repaintParams(){
   const s=session();
@@ -1267,8 +1404,9 @@ async function submit(){
   await action(async()=>{
     if(!project())throw new Error('请先打开一个工作文件夹');
     let s=session();
-    if(s&&busy(s)){toast('Agent 仍在执行。可以等待本轮结束，或点击停止按钮。');return;}
-    if(s?.selectionIssue)throw new Error(s.selectionIssue+'；请先刷新来源并重新确认模型');
+    // A running session takes the message mid-turn (插话) or keeps it for after the turn (排队).
+    const delivery=s&&busy(s)?deliveryFor(s):undefined;
+    if(s?.selectionIssue&&!delivery)throw new Error(s.selectionIssue+'；请先刷新来源并重新确认模型');
     if(submitting)return;
     if(runtime(s?s.runtimeId:state.runtimeId)?.checking){toast('正在检测运行环境，稍等几秒再发送');return;}
     const text=state.draft.trim(),queued=pending.list(views.draftKey(state));
@@ -1303,9 +1441,13 @@ async function submit(){
         if(prompt){prompt.value='';autosize(prompt);}
         renderTray();
       }
-      const sent=call('session:prompt',{sessionId:s.id,text,...(attachments.length?{attachments}:{})});
+      const sent=call('session:prompt',{sessionId:s.id,text,...(attachments.length?{attachments}:{}),...(delivery?{delivery}:{})});
       submitting=false;
-      try{await sent;}catch(error){for(const item of taken)pending.add(projectId+':'+s.id,item);markDiscarded([]);if(state.sessionId===s.id)renderTray();throw error;}
+      let result;
+      try{result=await sent;}catch(error){for(const item of taken)pending.add(projectId+':'+s.id,item);markDiscarded([]);if(state.sessionId===s.id)renderTray();throw error;}
+      // The backend may keep a mid-turn message for later (e.g. the turn is still connecting); say where it went.
+      if(delivery==='steer'&&result?.delivery==='queue')toast(result.note||'这一刻还不能插话，已改为排队，本轮结束后发送');
+      else if(delivery==='queue'&&result?.delivery==='queue')toast('已排队，本轮结束后自动发送');
       await snapshot();
       if(state.sessionId===s.id){renderComposerControls();renderFooter();}
     }catch(error){
@@ -1405,9 +1547,10 @@ function openRecovery(s){
   modal('重新确认模型与参数',`<p>继续使用 ${esc(sourceNames[model.source])} · ${esc(model.name)}<br><span class="mono">模型 ID：${esc(model.id)}</span><br>确认后保留当前运行环境、原生会话和历史记录。</p>
     <label for="rebind-reasoning">思考强度</label><select id="rebind-reasoning"><option value="">来源默认</option>${model.reasoning.map(e=>`<option value="${esc(e)}" ${selected.reasoning===e?'selected':''}>${esc(effortName(e))}</option>`).join('')}</select>
     <label for="rebind-context">上下文窗口</label><select id="rebind-context">${model.contexts.length?'':'<option value="">原生默认</option>'}${model.contexts.map(c=>`<option value="${c.tokens}" ${(hasContext?selected.contextTokens:defaultContext(model))===c.tokens?'selected':''}>${compact(c.tokens)}${c.tokens===model.defaultContextTokens?'（默认）':''}</option>`).join('')}</select>
-    <label for="rebind-budget">本地压缩预算（可留空）</label><input id="rebind-budget" type="number" min="4096" max="${model.contextMaximum??''}" value="${selected.contextBudget??''}">`,async()=>{
-    const context=$('#rebind-context').value,budget=$('#rebind-budget').value;
-    await call('session:rebind',{sessionId:s.id,selection:{...selected,identity:model.identity,reasoning:$('#rebind-reasoning').value||undefined,contextTokens:context?Number(context):null,contextBudget:budget?Number(budget):null}});
+    <label for="rebind-budget">本地压缩预算（可留空，例如 200K、0.5M）</label><input id="rebind-budget" type="text" inputmode="decimal" autocomplete="off" spellcheck="false" placeholder="不设置" value="${esc(selected.contextBudget?formatTokens(selected.contextBudget):'')}">`,async()=>{
+    const context=$('#rebind-context').value,contextTokens=context?Number(context):null,check=budgetCheck($('#rebind-budget').value,{max:budgetMax(model,contextTokens)});
+    if(!check.ok)throw new Error(`本地压缩预算：${check.text}`);
+    await call('session:rebind',{sessionId:s.id,selection:{...selected,identity:model.identity,reasoning:$('#rebind-reasoning').value||undefined,contextTokens,contextBudget:check.value}});
     await snapshot();
     if(state.sessionId===s.id){renderComposerControls();renderBanner();renderFooter();}
     toast('已确认模型更新，可以继续当前会话');
@@ -1495,6 +1638,12 @@ document.addEventListener('click',e=>{
     const [runtimeId,choice,scope]=el.dataset.runtimePermission.split('|');
     const mode=choice==='__default'?null:choice,saved=runtime(runtimeId)?.permissions,current=(scope==='native'?saved?.bySelection?.native:saved)?.current??null;
     changePermission(runtimeId,mode,current,async()=>{await call('runtime:permission',{runtimeId,mode,...(scope==='native'?{selection:{modelKey:'native'}}:{})});await snapshot();renderSettings();renderComposerControls();});return;
+  }
+  if((el=hit('[data-model-group]'))){
+    const source=el.dataset.modelGroup;
+    if(openGroups.has(source))openGroups.delete(source);else openGroups.add(source);
+    const list=$('#menu-list');if(list){list.innerHTML=modelListHtml();placeMenu();}
+    return;
   }
   if((el=hit('[data-model-key]'))){selectModel(el.dataset.modelKey);repaintParams();return;}
   if((el=hit('[data-effort]'))){paramTarget().reasoning=el.dataset.effort;repaintParams();return;}
@@ -1593,6 +1742,10 @@ document.addEventListener('click',e=>{
     return;
   }
   if((el=hit('[data-attach-remove]'))){removeAttachment(el.dataset.attachRemove);return;}
+  if((el=hit('[data-delivery]'))){state.delivery=el.dataset.delivery==='queue'?'queue':'steer';renderComposerControls();$('#prompt')?.focus();return;}
+  if((el=hit('[data-queue-edit]'))){void action(()=>editQueued(el.dataset.queueEdit));return;}
+  if((el=hit('[data-queue-remove]'))){void action(()=>removeQueued(el.dataset.queueRemove));return;}
+  if((el=hit('[data-queue-send]'))){el.disabled=true;void action(sendQueuedNow).finally(()=>{el.disabled=false;});return;}
   if((el=hit('[data-media-open]'))){openLightbox(el.dataset.mediaOpen,el.dataset.mediaName);return;}
   if((el=hit('[data-media-reveal]'))){void action(()=>call('media:reveal',{url:el.dataset.mediaReveal}));return;}
   if((el=hit('[data-media-save]'))){void action(async()=>{if(await call('media:save',{url:el.dataset.mediaSave}))toast('已另存');});return;}
@@ -1618,7 +1771,8 @@ document.addEventListener('click',e=>{
     case'menu-reveal':closeMenu();void action(()=>call('project:reveal',{projectId:state.projectId}));break;
     case'rename-session':renameSession();break;
     case'native-session':void openNative();break;
-    case'send':{const s=session();if(s&&busy(s))stopSession(s.id);else void submit();break;}
+    case'send':void submit();break;
+    case'stop-run':{const s=session();if(s&&busy(s))stopSession(s.id);break;}
     case'attach-btn':void action(pickFiles);break;
     case'lightbox-close':$('#lightbox').close();break;
     case'save-model-default':void action(saveModelDefault);break;

@@ -81,7 +81,7 @@ test('concurrent duplicate requests single-flight; cancelling the waiter preserv
 });
 test('bounded format correction resumes the same model and sums every attempt once',async t=>{
   let calls=0;const transport=await fixture(t,async function*(input){calls++;if(calls===2)assert.equal(input.options.resume,'fixture-session');yield* events(calls===1?'bad decision':'{"action":"final","content":"recovered"}');});
-  const result=await collect(transport);assert.equal(calls,2);assert.equal(result.result.choices[0].message.content,'recovered');assert.equal(result.result.usage.prompt_tokens,10000);
+  const result=await collect(transport,{...body,tools});assert.equal(calls,2);assert.equal(result.result.choices[0].message.content,'recovered');assert.equal(result.result.usage.prompt_tokens,10000);
   assert.equal(result.metrics.attempts.length,2);assert.equal(transport.metrics.recoveredRequests,1);
 });
 test('repeated invalid output stops correction early without publishing an executable call',async t=>{
@@ -163,7 +163,7 @@ test('official usage remains inspectable while a correction is pending and the s
     yield {type:'system',subtype:'init',model,session_id:'fixture-session'};second();
     await new Promise(r=>input.options.abortController.signal.addEventListener('abort',r,{once:true}));
   });
-  const response=await transport.chat(body,controller.signal);const draining=response.text();await entered;
+  const response=await transport.chat({...body,tools},controller.signal);const draining=response.text();await entered;
   assert.equal(response.bridgeMetrics.knownUsage.prompt_tokens,5000);assert.equal(response.bridgeMetrics.knownUsage.bridge_usage_complete,false);
   controller.abort(new DOMException('deadline','TimeoutError'));await draining;
   assert.equal(response.bridgeMetrics.knownUsage.prompt_tokens,5000);assert.equal(response.bridgeMetrics.knownUsage.bridge_usage_complete,false);

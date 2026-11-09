@@ -39,13 +39,29 @@ export class DshAdapter extends RuntimeLifecycle {
     const list=await this.host.rpc('session/list',{_request:{}});const item=list.items?.find(s=>s.sessionId===this.nativeId);this.lastSeq=item?.projections?.asOfSeq??-1;
     try{this.stopStream=await this.host.follow(this.nativeId,frame=>this.enqueue(()=>this.closed?undefined:this.frame(frame)),async error=>{this.stopStream?.();this.stopStream=null;if(!this.running||this.closed)return;await this.emit({type:'notice',text:'原生实时连接中断，正在从已保存事件继续同步。'});this.poll();});}catch{this.checkOpen();await this.emit({type:'notice',text:'当前 DSH 实时接口不可用，已使用原生事件同步；完整界面可实时查看。'});}if(this.closed){this.stopStream?.();this.stopStream=null;}this.checkOpen();this.ready=true;
   }
+  async content(text,attachments=[]){return [...(text?[{type:'text',text}]:[]),...await Promise.all(attachments.map(async a=>{if(a.kind!=='image')throw new Error('DSH 未核实支持此附件');return {type:'image',mediaType:a.mime,data:(await readFile(a.path)).toString('base64'),name:a.name};}))];}
+  async steer(text,attachments=[],requestId=randomUUID()){
+    this.checkOpen();if(!this.running)throw new Error('DSH 原生轮次已经结束');
+    const content=await this.content(text,attachments);this.steers??=new Map();this.steers.set(requestId,{requestId,itemId:null});
+    try{await this.host.rpc('session/prompt',{request:{sessionId:this.nativeId,requestId,mode:'steer',clientTimeZone:Intl.DateTimeFormat().resolvedOptions().timeZone,content}});}
+    catch(error){if(!this.steers.has(requestId)||this.steers.get(requestId)?.itemId)return {};if(error.rpcRejected){this.steers.delete(requestId);throw error;}error.nativeAdmissionUnknown=true;throw error;}
+    return {};
+  }
   async prompt(text,attachments=[]){await this.ensureStarted();this.checkOpen();
+    this.steers??=new Map((this.session.pendingSteers??[]).map(row=>[row.id,{requestId:row.id,itemId:null}]));
     if(!this.approvalStream&&this.host.followApprovals){try{this.approvalStream=await this.host.followApprovals(this.nativeId,event=>this.enqueue(()=>this.emit(event)),id=>this.enqueue(()=>this.emit({type:'approval-resolved',approvalId:id})),error=>this.enqueue(async()=>{this.approvalStream?.stop();this.approvalStream=null;await this.emit({type:'notice',text:'DSH 审批连接中断，请在完整工具界面处理：'+error.message});}));}catch(error){await this.emit({type:'notice',text:'DSH 审批接口不可用，请在完整工具界面处理：'+error.message});}this.checkOpen();}
-    const content=[...(text?[{type:'text',text}]:[]),...await Promise.all(attachments.map(async a=>{if(a.kind!=='image')throw new Error('DSH 未核实支持此附件');return {type:'image',mediaType:a.mime,data:(await readFile(a.path)).toString('base64'),name:a.name};}))];
+    const content=await this.content(text,attachments);
     this.running=true;await this.host.rpc('session/prompt',{request:{sessionId:this.nativeId,requestId:randomUUID(),mode:'queue',clientTimeZone:Intl.DateTimeFormat().resolvedOptions().timeZone,content}});if(!this.stopStream)this.poll();}
   async frame(value){if(value.type==='snapshot')return;if(value.type==='event'){await this.handleEvent(value.event);return;}if(value.type==='assistant-stream'){const frame=value.frame;if(frame.type==='start'){this.currentAttemptId=frame.attemptId??randomUUID();this.streamedText='';this.streamedThinking='';return;}if(frame.type==='chunk'){const chunk=frame.chunk??{};let text=chunk.delta??chunk.text??'';if(typeof text!=='string')text=text.text??'';if(['text-delta','text_delta','text'].includes(chunk.type)&&text){this.streamedText=(this.streamedText??'')+text;await this.emit({type:'text',text,attemptId:this.currentAttemptId});}else if(['thinking-delta','reasoning-delta','thinking_delta','thinking','reasoning'].includes(chunk.type)&&text){this.streamedThinking=(this.streamedThinking??'')+text;await this.emit({type:'thinking',text,attemptId:this.currentAttemptId});}else await this.emit({type:'native-event',name:'assistant-stream',data:frame});}}}
   async handleEvent(event){
     if(event.seq<=this.lastSeq)return;this.lastSeq=event.seq;if(!this.running)return;
+    if(event.type==='agent/inbox/spliced')for(const item of event.data?.inserted??[]){
+      const id=item.source?.rpcId,row=this.steers?.get(id);if(!row)continue;row.itemId=item.id;
+      await this.emit({type:'steer-state',steerId:id,state:event.data.target==='next-turn'?'carried':'delivered',...(event.data.target==='next-turn'?{reason:'由 DSH 原生 inbox 携带到下一轮，Bridge++ 不重复发送。'}:{})});
+    }
+    if(event.type==='user/message'){
+      const id=event.data?.source?.rpcId;if(this.steers?.has(id)){this.steers.delete(id);await this.emit({type:'steer-consumed',steerId:id});}
+    }
     const projected=dshEvent(event);
     if(projected.type==='approval'&&this.approvalStream)return;
     if(projected.type==='assistant-message'){
@@ -64,7 +80,15 @@ export class DshAdapter extends RuntimeLifecycle {
         if(update)await this.emit(update);
       }
       this.streamedText='';this.streamedThinking='';if(projected.data.usage)await this.emit({type:'usage',data:projected.data.usage});
-    }else{if(projected.type==='turn-end')this.running=false;await this.emit(projected);}
+    }else{
+      if(projected.type==='turn-end'){
+        if(projected.status==='completed'&&this.steers?.size){
+          projected.nativeCarry=[...this.steers.keys()];
+          for(const id of this.steers.keys())await this.emit({type:'steer-state',steerId:id,state:'carried',reason:'本轮结束前尚未使用，由 DSH 原生 inbox 在下一轮接续；Bridge++ 不重复发送。'});
+        }else this.running=false;
+      }
+      await this.emit(projected);
+    }
   }
   poll(){clearTimeout(this.timer);if(!this.running)return;this.timer=setTimeout(()=>{void this.read().catch(async e=>{this.running=false;await this.emit({type:'error',text:e.message});await this.emit({type:'turn-end',status:'failed'});});},900);}
   async read(){if(!this.running)return;const list=await this.host.rpc('session/list',{_request:{}});const row=list.items?.find(s=>s.sessionId===this.nativeId);if(!row)throw new Error('Native DSH session disappeared');const seq=row.projections?.asOfSeq??-1;if(seq>this.lastSeq){
@@ -73,5 +97,16 @@ export class DshAdapter extends RuntimeLifecycle {
     }this.poll();}
   async approve(id,choice){if(!this.approvalStream)throw new Error('DSH 审批实时连接不可用，请在完整工具界面处理');await this.approvalStream.approve(id,choice);await this.emit({type:'approval-resolved',approvalId:id,choice});}
   async cancel(){await this.host.rpc('session/cancel',{request:{sessionId:this.nativeId}});}
+  async retractSteers(){
+    if(!this.steers?.size)return [];
+    await this.cancel();const removed=[];
+    const list=await this.host.rpc('session/list',{_request:{}}),inbox=list.items?.find(s=>s.sessionId===this.nativeId)?.projections?.values?.inbox;
+    for(const [id,row]of this.steers){
+      const pending=[...(inbox?.['next-step']??[]),...(inbox?.['next-turn']??[])].find(m=>m.source?.rpcId===id);
+      const itemId=pending?.id??row.itemId;if(!itemId)continue;
+      try{await this.host.rpc('session/updateQueue',{request:{sessionId:this.nativeId,itemId,action:{kind:'remove'}}});this.steers.delete(id);removed.push(id);}catch{/* Already consumed or not confirmed: never resend an ambiguous admission. */}
+    }
+    return removed;
+  }
   async close(){this.closed=true;clearTimeout(this.timer);this.stopStream?.();this.stopStream=null;this.approvalStream?.stop();this.approvalStream=null;this.host.off?.('closed',this.onHostClosed);const running=this.running;this.running=false;this.ready=false;if(running&&this.nativeId&&this.host.origin)await this.cancel().catch(()=>{});}
 }

@@ -41,10 +41,10 @@ test('missing cross-source links and conflicting IDs remain unknown without merg
   assert.equal(conflict.snapshot().model_requests,null);assert.equal(conflict.snapshot().model_requests_known,2);
 });
 test('recovery accounting preserves known calls when one attempt has an incomplete response count',async()=>{
-  let calls=0;const request=ChatRequest.parse({model:'qoder-deepseek-flash',messages:[{role:'user',content:'fixture'}]});
+  let calls=0;const request=ChatRequest.parse({model:'qoder-deepseek-flash',messages:[{role:'user',content:'fixture'}],response_format:{type:'json_object'}});
   const r=await recoverDecision({request,prompt:'fixture',invoke:async():Promise<RecoveryTurn>=>++calls===1?
     {response:'{',error:null,stage:'inference',model_requests:1,model_requests_known:1,unidentified_response_events:0}:
-    {response:'{"kind":"final","content":"ok"}',error:null,stage:'inference',model_requests:null,model_requests_known:1,unidentified_response_events:1}});
+    {response:'{"ok":true}',error:null,stage:'inference',model_requests:null,model_requests_known:1,unidentified_response_events:1}});
   assert.equal(calls,2);assert.equal(r.turn.model_requests,null);assert.equal(r.turn.model_requests_known,2);assert.equal(r.turn.unidentified_response_events,1);
   assert.equal(r.recovery.knownModelRequestsSubtotal,2);assert.equal(r.recovery.unknownModelRequestAttempts,1);
   assert.equal(requestAccounting([{telemetry:r.turn}]).upstreamModelRequestsKnown,2);

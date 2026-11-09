@@ -12,7 +12,7 @@ export async function withIdleResponse(fetchImpl,url,{signal,idleTimeoutMs=60000
   let response;try{response=await wait(Promise.resolve().then(()=>fetchImpl(httpsUrl(url).href,{...init,credentials:'omit',signal:combined})));}catch(error){if(combined.aborted)throw error;throw new Error('网络请求失败，请检查网络或系统代理');}
   if(!response.ok)throw new Error('网络请求失败（HTTP '+response.status+'）');touch();iterator=response.body?.[Symbol.asyncIterator]();
   async function* chunks(){while(iterator){const part=await wait(iterator.next());if(part.done)break;if(part.value.byteLength){touch();yield part.value;}}}
-  const value=await consume(response,chunks());combined.throwIfAborted();return value;
+  const value=await consume(response,chunks(),combined);combined.throwIfAborted();return value;
  }catch(error){if(signal?.aborted)throw new DOMException('已取消','AbortError');if(controller.signal.aborted)throw idleError;throw error;}
  finally{clearTimeout(timer);controller.abort();if(iterator?.return)void Promise.resolve(iterator.return()).catch(()=>{});}
 }

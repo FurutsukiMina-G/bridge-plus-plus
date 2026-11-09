@@ -1,4 +1,5 @@
-const visible=new Set(['user','text','thinking','tool-start','tool-end','tool-output','subagent','plan','diff','approval','approval-resolved','question','error','notice','usage','turn-end','media','attachments-discarded','upstream-error']);
+// steer-state is not drawn on its own: it updates the mid-turn message it refers to.
+const visible=new Set(['user','text','thinking','tool-start','tool-end','tool-output','subagent','plan','diff','approval','approval-resolved','question','error','notice','usage','turn-end','media','attachments-discarded','upstream-error','steer-state']);
 export function appendDisplayEvent(events,event){
   if(event.type==='content-replace'){
     const indices=[];events.forEach((item,index)=>{if(item.type===event.channel&&item.attemptId===event.attemptId&&event.attemptId)indices.push(index);});

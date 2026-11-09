@@ -13,9 +13,10 @@ function workspaceState(text){
   return value;
 }
 export class Store extends EventEmitter {
-  constructor(root){
+  constructor(root,{streamFlushMs=1000,streamFlushBytes=4096}={}){
     super();this.root=root;this.file=join(root,'workspace.json');this.backupFile=join(root,'workspace.backup.json');this.persisted=null;this.recovery=null;this.queue=Promise.resolve();this.handles=new Map();this.closed=false;
     this.contexts=new Map();this.state={version:1,projects:[],sessions:[],catalog:{},preferences:{modelDefaults:{},runtimes:{},theme:'dark'}};
+    this.streamBuffers=new Map();this.streamFlushMs=streamFlushMs;this.streamFlushBytes=streamFlushBytes;
   }
   async open(){
     await mkdir(join(this.root,'sessions'),{recursive:true});
@@ -92,16 +93,37 @@ export class Store extends EventEmitter {
   }
   async event(sessionId,event){
     this.session(sessionId);const value={...event,id:event.type==='media'&&validId(event.id)?event.id:randomUUID(),at:new Date().toISOString(),sessionId};
-    await this.enqueue(async()=>{const handle=await this.journal(sessionId);await handle.write(JSON.stringify(value)+'\n');const context=this.contexts.get(sessionId);if(context){if(value.type==='user')context.users.push(value.text);if(value.type==='plan')context.plan=value.data;}});
+    await this.enqueue(async()=>{
+      const stream=['thinking','text'].includes(value.type)&&typeof value.text==='string',prior=this.streamBuffers.get(sessionId);
+      const same=stream&&prior&&['type','attemptId','turnId','itemId'].every(key=>prior.value[key]===value[key]);
+      if(prior&&!same)await this.flushStream(sessionId);
+      if(!stream){await this.writeEvent(sessionId,value);return;}
+      const current=this.streamBuffers.get(sessionId);
+      if(current){current.parts.push(value.text);current.bytes+=Buffer.byteLength(value.text);}
+      else{
+        const timer=setTimeout(()=>{void this.enqueue(()=>this.flushStream(sessionId)).catch(error=>this.emit('event',{type:'error',source:'journal',sessionId,id:randomUUID(),at:new Date().toISOString(),text:'会话记录无法保存：'+error.message}));},this.streamFlushMs);timer.unref();
+        this.streamBuffers.set(sessionId,{value,parts:[value.text],bytes:Buffer.byteLength(value.text),timer});
+      }
+      if(this.streamBuffers.get(sessionId).bytes>=this.streamFlushBytes)await this.flushStream(sessionId);
+    });
     this.emit('event',value);return value;
   }
+  async writeEvent(sessionId,value){
+    const handle=await this.journal(sessionId);await handle.write(JSON.stringify(value)+'\n');const context=this.contexts.get(sessionId);if(context){if(value.type==='user')context.users.push(value.text);if(value.type==='plan')context.plan=value.data;}
+  }
+  async flushStream(sessionId){
+    const buffer=this.streamBuffers.get(sessionId);if(!buffer)return;
+    clearTimeout(buffer.timer);await this.writeEvent(sessionId,{...buffer.value,text:buffer.parts.join('')});this.streamBuffers.delete(sessionId);
+  }
+  flush(){return this.enqueue(async()=>{for(const id of this.streamBuffers.keys())await this.flushStream(id);});}
   events(id){
     this.session(id);
-    return this.enqueue(async()=>{await this.journal(id);return (await readFile(join(this.root,'sessions',id+'.jsonl'),'utf8')).split('\n').filter(Boolean).map(line=>JSON.parse(line));});
+    return this.enqueue(async()=>{await this.flushStream(id);await this.journal(id);return (await readFile(join(this.root,'sessions',id+'.jsonl'),'utf8')).split('\n').filter(Boolean).map(line=>JSON.parse(line));});
   }
   taskContext(id){
     this.session(id);
     return this.enqueue(async()=>{
+      await this.flushStream(id);
       if(!this.contexts.has(id)){
         await this.journal(id);const context={users:[],plan:null};
         const lines=createInterface({input:createReadStream(join(this.root,'sessions',id+'.jsonl'),{encoding:'utf8'}),crlfDelay:Infinity});
@@ -111,5 +133,5 @@ export class Store extends EventEmitter {
       return structuredClone(this.contexts.get(id));
     });
   }
-  async close(){if(this.closed)return;await this.queue;this.closed=true;await Promise.all([...this.handles.values()].map(async handle=>{try{await handle.sync();}finally{await handle.close();}}));this.handles.clear();}
+  async close(){if(this.closed)return;await this.flush();await this.queue;this.closed=true;await Promise.all([...this.handles.values()].map(async handle=>{try{await handle.sync();}finally{await handle.close();}}));this.handles.clear();}
 }

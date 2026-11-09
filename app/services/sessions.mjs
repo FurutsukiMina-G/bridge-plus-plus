@@ -14,11 +14,13 @@ import {validatePermissionMode,migratePermissionMode,sessionPermissionView} from
 import {redactMedia,MediaClaimError} from './media.mjs';
 import {assertRuntimeReady} from './runtime-availability.mjs';
 import {failureText,failureValue,runtimeReason} from './failure-details.mjs';
+import {interjectCapability,queuedBatch} from './session-input.mjs';
 
 const defaults={dsh:DshAdapter,kimi:KimiAcpAdapter,codex:CodexAdapter,antigravity:AntigravityAdapter};
 export class Sessions {
   constructor(store,providers,gateway,runtimes,{constructors=defaults,identifyProcess=processIdentity,media,capabilities,runtimeReady,now=Date.now,adapterIdleMs=600000,adapterMaxIdle=4,adapterSweepMs=60000}={}){
     this.media=media;this.capabilities=capabilities;this.runtimeReady=runtimeReady;this.now=now;this.adapterIdleMs=adapterIdleMs;this.adapterMaxIdle=adapterMaxIdle;
+    this.inputLocks=new Map();this.sendingQueue=new Set();this.draining=new Set();
     Object.assign(this,{store,providers,gateway,runtimes,constructors,identifyProcess});this.adapters=new Map();this.adapterUsed=new Map();this.runs=new Map();this.rebinding=new Set();this.permissionChanging=new Set();this.external=new Map();this.closed=false;this.adapterTimer=setInterval(()=>{void this.recycleAdapters().catch(()=>{});},adapterSweepMs);this.adapterTimer.unref();
     for(const session of store.state?.sessions??[])if(Number.isSafeInteger(session.nativeClientPid)&&session.nativeClientPid>0){try{process.kill(session.nativeClientPid,0);this.external.set(session.id,{restoredPid:session.nativeClientPid});}catch(error){if(error.code!=='ESRCH')this.external.set(session.id,{restoredPid:session.nativeClientPid});}}
     if(gateway){gateway.requestContext=id=>this.runs.get(id)?.id;gateway.onUsage=(id,event,turnId)=>{const run=this.runs.get(id);if(!run||run.id!==turnId)return Promise.resolve();return this.receive(this.store.session(id),run.adapter,event);};gateway.onSuccess=(id,turnId)=>gateway.onUsage(id,{type:'native-event',source:'gateway',name:'gateway/request-completed'},turnId);}
@@ -81,6 +83,17 @@ export class Sessions {
     if(!run||run.terminal||run.adapter!==adapter||this.adapters.get(session.id)!==adapter)return Promise.resolve();
     const task=run.events.then(async()=>{
       if(run.terminal||run.cancelled)return;
+      if(run.fromQueue&&!run.queueDispatched&&['thinking','text','tool-start','usage','plan','approval','question','turn-end'].includes(event.type)){
+        run.queueDispatched=true;await this.store.mutate(()=>{session.queue=(session.queue??[]).filter(row=>!run.fromQueue.includes(row.id));delete session.queueDispatch;});
+      }
+      if(event.type==='steer-consumed'){
+        await this.store.mutate(()=>{session.pendingSteers=(session.pendingSteers??[]).filter(row=>row.id!==event.steerId);});return;
+      }
+      if(event.type==='steer-state'){
+        const row=session.pendingSteers?.find(row=>row.id===event.steerId);
+        if(row&&event.state==='failed')await this.returnSteer(session,row,event.reason);
+        else if(row)await this.store.mutate(()=>{row.state=event.state;});
+      }
       if(event.type==='media-output'){
         if(!this.media)return;
         try{const attachment=await this.media.importOutput(session,event);await this.store.mutate(()=>{session.mediaAttachments??=[];session.mediaAttachments.push(attachment);});await this.store.event(session.id,{...attachment,type:'media',turnId:run.id});run.hasMedia=true;}
@@ -123,6 +136,10 @@ export class Sessions {
     const limited=run.outputLimited&&!run.hasError&&['completed','failed'].includes(event.status);
     const status=limited?'interrupted':event.status??'failed';
     if(limited)event={...event,retainAdapter:true};
+    if(status==='completed'&&event.nativeCarry?.length){
+      run.tailText='';run.plan=[];
+      await this.store.event(session.id,{type:'notice',source:'queue',turnId:run.id,text:'DSH 已接管尚未使用的插话，将在原生下一轮继续；仍归入当前任务，Bridge++ 不会重复发送。'});return;
+    }
     // Every native runtime must deliver a result. Only bridged runtimes may use
     // semantic continuation; a denied native operation must never be retried.
     if(status==='completed'){
@@ -130,6 +147,9 @@ export class Sessions {
       if(run.hasError){await this.finish(session,run,'failed',event);return;}
       const issue=unfinishedTask({intent:run.intent,text:run.tailText|| (run.hasMedia?'Generated media artifact returned.':''),plan:run.plan});
       if(issue){
+        if(session.queue?.length){
+          await this.finish(session,run,'paused',{...event,reason:{kind:'unfinished',code:'unfinished_task',message:'模型停下了，还有未完成的工作；先发送用户排队的消息。',pending:issue.pending}});return;
+        }
         if(issue.canContinue&&run.adapter.endpoint&&session.runtimeId!=='antigravity'&&run.continuations<TASK_CONTINUATION_LIMIT&&!run.approvals.size){
           const attempt=++run.continuations;run.tailText='';
           await this.store.event(session.id,{type:'notice',source:'task-completion',turnId:run.id,text:`原生回复仍是阶段性进展${issue.pending?`，还有 ${issue.pending} 项计划未完成`:''}，继续原任务（${attempt}/${TASK_CONTINUATION_LIMIT}）。`,data:{reason:issue.reason,attempt,limit:TASK_CONTINUATION_LIMIT}});
@@ -159,6 +179,10 @@ export class Sessions {
     if(run.finishing)return run.finishing;run.terminal=true;
     run.finishing=(async()=>{
     try{
+    if(!['completed','paused'].includes(status)&&run.adapter?.retractSteers){
+      const removed=await run.adapter.retractSteers().catch(()=>[]);
+      for(const id of removed){const row=session.pendingSteers?.find(row=>row.id===id);if(row){await this.returnSteer(session,row);await this.store.event(session.id,{type:'steer-state',steerId:id,state:'failed',reason:'本轮未完成，已从 DSH 原生 inbox 撤回到 Bridge++ 队列。',turnId:run.id});}}
+    }
     let reason;
     if(status!=='completed'){
       reason=run.cancelled?{kind:'cancelled',message:'用户已停止本轮任务。'}:run.upstreamFailure??event.reason??run.runtimeFailure??(run.outputLimited?{kind:'unfinished',code:'output_limit',message:'模型到达单次输出上限，本轮未完成。'}:runtimeReason(null));
@@ -173,24 +197,85 @@ export class Sessions {
     }finally{
     if(this.runs.get(session.id)===run)this.runs.delete(session.id);
     if(['completed','paused'].includes(status))this.touchAdapter(session.id);if(!['completed','paused'].includes(status)&&!(status==='interrupted'&&event.retainAdapter===true)&&this.adapters.get(session.id)===run.adapter){this.adapters.delete(session.id);this.adapterUsed.delete(session.id);void run.adapter?.close().catch(()=>{});}
+    if(session.queue?.length){
+      if(['completed','paused'].includes(status)&&!this.closed)this.scheduleQueue(session.id);
+      else await this.store.event(session.id,{type:'notice',source:'queue',text:`本轮未完成，排队的 ${session.queue.length} 条消息没有发送。`});
+    }
     }
     })();return run.finishing;
   }
-  async prompt(id,text,attachmentIds=[]){
+  inputLock(id,task){const next=(this.inputLocks.get(id)??Promise.resolve()).catch(()=>{}).then(task);this.inputLocks.set(id,next);void next.finally(()=>{if(this.inputLocks.get(id)===next)this.inputLocks.delete(id);}).catch(()=>{});return next;}
+  async queueInput(session,text,attachmentIds,{note,attachments}={}){
+    if(!attachments&&attachmentIds.length){if(!this.media||!this.capabilities)throw new Error('媒体服务不可用');attachments=this.media.validateClaim(session,attachmentIds,await this.capabilities(session.runtimeId,session.selection)).map(a=>this.media.public(a));}
+    const row={id:randomUUID(),text,attachments:attachments??[],at:new Date().toISOString()};
+    await this.store.mutate(()=>{session.queue??=[];session.queue.push(row);});
+    if(!this.runs.has(session.id)&&['completed','paused'].includes(session.status))this.scheduleQueue(session.id);
+    return {delivery:'queue',id:row.id,...note?{note}:{}};
+  }
+  async dequeue(id,queueId){return this.inputLock(id,async()=>{
+    const session=this.store.session(id),row=session.queue?.find(row=>row.id===queueId);
+    if(!row)throw new Error('排队消息不存在或已经发送');if(this.sendingQueue.has(queueId))throw new Error('此消息正在发送，无法取回');
+    if(session.queueDispatch?.ids?.includes(queueId))throw new Error('上次发送的原生接收状态尚未确认，消息已保留；请先核对原生会话，不能重复发送。');
+    await this.store.mutate(()=>{session.queue=session.queue.filter(row=>row.id!==queueId);});return {text:row.text,attachments:row.attachments};
+  });}
+  scheduleQueue(id){
+    if(this.draining.has(id))return;this.draining.add(id);
+    void Promise.resolve().then(()=>this.inputLocks.get(id)).then(async()=>{
+      const session=this.store.session(id);if(this.closed||this.runs.has(id)||session.queueDispatch||!['completed','paused'].includes(session.status)||!session.queue?.length)return;
+      const capabilities=await this.capabilities?.(session.runtimeId,session.selection),rows=queuedBatch(session,capabilities);
+      // Reserve before the first asynchronous dispatch so dequeue cannot race a claim.
+      for(const row of rows)this.sendingQueue.add(row.id);
+      try{await this.prompt(id,rows.map(row=>row.text).join('\n\n'),rows.flatMap(row=>row.attachments.map(a=>a.id)),{fromQueue:rows.map(row=>row.id)});}
+      catch(error){if(!this.runs.has(id))await this.store.mutate(()=>{session.status='failed';});await this.store.event(id,{type:'notice',source:'queue',text:'排队消息发送失败，已保留尚未送出的消息：'+failureText(error)});}
+      finally{for(const row of rows)this.sendingQueue.delete(row.id);}
+    }).catch(error=>{this.store.emit('event',{type:'notice',source:'queue',sessionId:id,text:'排队消息未发送：'+failureText(error)});}).finally(()=>{this.draining.delete(id);const s=this.store.session(id);if(!this.runs.has(id)&&!s.queueDispatch&&s.queue?.length&&['completed','paused'].includes(s.status)&&!this.closed)this.scheduleQueue(id);});
+  }
+  async returnSteer(session,row,reason){
+    const attachments=(row.attachments??[]).map(a=>this.media?.entries.get(a.id)).filter(Boolean);
+    if(attachments.length)await this.media.restage(attachments);
+    await this.store.mutate(()=>{session.pendingSteers=(session.pendingSteers??[]).filter(r=>r.id!==row.id);session.mediaAttachments=(session.mediaAttachments??[]).filter(a=>!attachments.some(e=>e.id===a.id));session.queue??=[];if(!session.queue.some(r=>r.id===row.id))session.queue.push({id:row.id,text:row.text,attachments:row.attachments,at:row.at});});
+  }
+  async interject(session,text,ids,delivery){return this.inputLock(session.id,async()=>{
+    if(this.closed)throw new Error('工作区正在关闭');
+    if(session.archived||this.nativeBusy(session.id)||this.rebinding.has(session.id)||this.permissionChanging.has(session.id))throw new Error('会话已归档、正在更新设置或被原生窗口占用，请稍后发送');
+    const run=this.runs.get(session.id),capability=interjectCapability(session);
+    if(delivery==='steer'&&!capability.steer)throw new Error(capability.reason);
+    if(delivery==='queue'||!run||run.terminal||!run.adapter?.running||!run.adapter?.steer||session.status==='starting')return this.queueInput(session,text,ids,{note:delivery==='steer'?'原生轮次尚未开始或已经结束，消息已改为排队。':undefined});
+    let attachments=[];if(ids.length){if(!this.media||!this.capabilities)throw new Error('媒体服务不可用');attachments=await this.media.claim(session,ids,await this.capabilities(session.runtimeId,session.selection));}
+    const row={id:randomUUID(),text,attachments:attachments.map(a=>this.media.public(a)),at:new Date().toISOString(),turnId:run.id,state:'pending'};
+    try{
+      await this.store.mutate(()=>{session.pendingSteers??=[];session.pendingSteers.push(row);session.mediaAttachments??=[];session.mediaAttachments.push(...row.attachments);});
+      await this.store.event(session.id,{type:'user',text,attachments:row.attachments,delivery:'steer',steerId:row.id,turnId:run.id});
+      if(run.terminal||run.cancelled||!run.adapter.running)throw new Error('原生轮次已经结束，插话未发送');
+      const result=await run.adapter.steer(text,attachments,row.id);
+      if(result?.delivered){await this.store.event(session.id,{type:'steer-state',steerId:row.id,state:'delivered',turnId:run.id});await this.store.mutate(()=>{session.pendingSteers=session.pendingSteers.filter(r=>r.id!==row.id);});}
+      return {delivery:'steer',id:row.id};
+    }catch(error){
+      // A transport failure after admission is ambiguous; DSH retains the RPC identity for reconciliation.
+      if(error.nativeAdmissionUnknown){await this.store.event(session.id,{type:'notice',source:'queue',turnId:run.id,text:'插话送达状态暂未确认，已保留原生请求标识，未重复发送：'+failureText(error)});return {delivery:'steer',id:row.id,note:'原生接收状态待确认，消息已保留。'};}
+      await this.returnSteer(session,row,error.message);await this.store.event(session.id,{type:'steer-state',steerId:row.id,state:'failed',reason:failureText(error),turnId:run.id});return {delivery:'queue',id:row.id,note:'插话未送达，消息已转回队列。'};
+    }
+  });}
+  async prompt(id,text,attachmentIds=[],{delivery,fromQueue}={}){
     if(!Array.isArray(attachmentIds)||attachmentIds.some(id=>typeof id!=='string'))throw new Error('无效附件 id 列表');
     if(this.closed)throw new Error('工作区正在关闭');const session=this.store.session(id);this.ensureReady(session.runtimeId);
     if(typeof text!=='string'||!text.trim()&&!attachmentIds?.length||text.length>500000)throw new Error('请输入有效开发任务或添加附件');
     if(this.external.get(id)?.restoredPid)await this.refreshNative(id);
-    if(this.runs.has(id))throw new Error('当前会话仍在运行，请等待或停止');
+    if(delivery!==undefined&&!['steer','queue'].includes(delivery))throw new Error('无效的消息送达方式');
     if(this.nativeBusy(id))throw new Error('此会话正在原生窗口中使用，请先退出原生客户端再继续');
     if(this.rebinding.has(id))throw new Error('正在确认模型更新，请稍候');
     if(this.permissionChanging.has(id))throw new Error('正在更新授权模式，请稍候');
+    if(session.archived)throw new Error('已归档会话不能发送消息，请先恢复会话');
     this.validate(session.runtimeId,session.selection);
+    if(this.runs.has(id)){
+      if(!delivery)throw new Error('当前会话仍在运行，请选择插话或排队');
+      return this.interject(session,text,attachmentIds,delivery);
+    }
     let prepared;const run={id:randomUUID(),cancelled:false,terminal:false,adapter:null,events:Promise.resolve(),approvals:new Set(),prepared:new Promise(resolve=>{prepared=resolve;}),intent:null,plan:[],tailText:'',hasError:false,continuations:0,stats:{requests:0,failedRequests:0,corrections:0},endedNativeTurns:new Set()};
-    this.runs.set(id,run);
+    run.fromQueue=fromQueue;this.runs.set(id,run);
     let attachments=[];
     try{
-      if(attachmentIds.length){if(!this.media||!this.capabilities)throw new Error('媒体服务不可用');attachments=await this.media.claim(session,attachmentIds,await this.capabilities(session.runtimeId,session.selection));}
+      if(attachmentIds.length){if(!this.media||!this.capabilities)throw new Error('媒体服务不可用');attachments=await this.media.claim(session,attachmentIds,await this.capabilities(session.runtimeId,session.selection),{queueIds:fromQueue??[]});}
       if(Object.hasOwn(session,'permissionModeNext')){
         const resolved=migratePermissionMode(this.runtimes.find(r=>r.id===session.runtimeId),session.selection,session.permissionModeNext),mode=resolved.mode;
         validatePermissionMode(this.runtimes.find(r=>r.id===session.runtimeId),mode,session.selection);
@@ -202,17 +287,23 @@ export class Sessions {
       run.intent=taskIntent([...history.users,text]);
       if(run.intent.continuation)run.plan=planEntries(history.plan);
       await this.store.mutate(()=>{session.status='starting';session.updatedAt=new Date().toISOString();if(session.title==='新会话')session.title=text.trim().slice(0,45)||attachments[0]?.name||'新会话';session.mediaAttachments??=[];session.mediaAttachments.push(...attachments.map(a=>this.media.public(a)));});
-      await this.store.event(id,{type:'user',text,attachments:attachments.map(a=>this.media.public(a)),turnId:run.id});
+      await this.store.event(id,{type:'user',text,attachments:attachments.map(a=>this.media.public(a)),...(fromQueue?{fromQueue}:{}),turnId:run.id});
       prepared();
       if(run.cancelled)throw new CancelledError();
       run.adapter=await this.adapter(session,run);
       if(run.cancelled)throw new CancelledError();
       await this.store.mutate(()=>{session.status='running';});
       if(run.cancelled)throw new CancelledError();
+      if(fromQueue){await this.store.mutate(()=>{session.queueDispatch={ids:fromQueue,turnId:run.id,at:new Date().toISOString()};});run.submitted=true;}
       await run.adapter.prompt(text,attachments);
+      if(fromQueue&&!run.queueDispatched){run.queueDispatched=true;await this.store.mutate(()=>{session.queue=(session.queue??[]).filter(row=>!fromQueue.includes(row.id));delete session.queueDispatch;});}
+      return {delivery:'turn'};
     }catch(error){
-      const discardedIds=attachments.length?attachments.map(a=>a.id):error instanceof MediaClaimError?error.discardedAttachmentIds:[];
-      if(discardedIds.length){if(attachments.length)await this.media.rollback(attachments);await this.store.mutate(()=>{session.mediaAttachments=(session.mediaAttachments??[]).filter(a=>!discardedIds.includes(a.id));});await this.store.event(id,{type:'attachments-discarded',attachmentIds:discardedIds,turnId:run.id});}
+      const uncertain=fromQueue&&run.submitted&&!run.queueDispatched&&!error.rpcRejected;
+      if(fromQueue&&!uncertain)await this.store.mutate(()=>{delete session.queueDispatch;});
+      if(uncertain)await this.store.event(id,{type:'notice',source:'queue',turnId:run.id,text:'原生发送结果尚未确认，排队消息及附件已保留，未自动重复发送；请先核对原生会话。'});
+      const discardedIds=run.queueDispatched||uncertain?[]:attachments.length?attachments.map(a=>a.id):error instanceof MediaClaimError?error.discardedAttachmentIds:[];
+      if(discardedIds.length){if(attachments.length){if(fromQueue)await this.media.restage(attachments);else await this.media.rollback(attachments);}await this.store.mutate(()=>{session.mediaAttachments=(session.mediaAttachments??[]).filter(a=>!discardedIds.includes(a.id));});if(!fromQueue)await this.store.event(id,{type:'attachments-discarded',attachmentIds:discardedIds,turnId:run.id});}
       if(!run.terminal){try{if(!run.cancelled)await this.store.event(id,{type:'error',text:failureText(error),turnId:run.id});}finally{await this.finish(session,run,run.cancelled?'interrupted':'failed',{reason:runtimeReason(error)});}}
       if(!run.cancelled)throw error;
     }finally{prepared();
@@ -230,7 +321,11 @@ export class Sessions {
   async cancel(id){
     const session=this.store.session(id),run=this.runs.get(id);if(!run||run.terminal)return;
     run.cancelled=true;
-    if(run.adapter){this.adapters.delete(id);await run.adapter.close().catch(()=>{});}
+    if(run.adapter){
+      const removed=await run.adapter.retractSteers?.().catch(()=>[])??[];
+      for(const steerId of removed){const row=session.pendingSteers?.find(row=>row.id===steerId);if(row){await this.returnSteer(session,row);await this.store.event(id,{type:'steer-state',steerId,state:'failed',reason:'任务已停止，已从原生 inbox 撤回队列。',turnId:run.id});}}
+      this.adapters.delete(id);await run.adapter.close().catch(()=>{});
+    }
     await run.prepared;await run.events;await this.finish(session,run,'interrupted');
   }
   async rename(id,title){if(typeof title!=='string'||!title.trim()||title.length>100)throw new Error('请输入 1–100 字标题');await this.store.mutate(()=>{this.store.session(id).title=title.trim();});}
@@ -299,6 +394,7 @@ export class Sessions {
   }
   async close(){
     this.closed=true;clearInterval(this.adapterTimer);this.adapterTimer=null;await Promise.all([...this.runs.keys()].map(id=>this.cancel(id).catch(()=>{})));
+    await Promise.allSettled([...this.inputLocks.values()]);
     await Promise.all([...this.adapters.values()].map(a=>a.close().catch(()=>{})));this.adapters.clear();this.adapterUsed.clear();await this.dsh?.close();
   }
 }

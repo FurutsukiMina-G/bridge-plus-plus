@@ -62,7 +62,7 @@ export function permissionCatalog(runtime,evidence={}){
     modes.push(mode(id,descriptions[id],{modeId:native}));
   }
   if(runtime.id==='antigravity'&&evidence.sandbox){
-    if(evidence.auto)modes.push(mode('auto-review','原生 --mode auto --sandbox；由原生 auto 模式决定操作，拒绝后停止，不伪造授权卡片。',{args:antigravityPermissionArgs('auto-review')}));
+    if(evidence.auto)modes.push(mode('auto-review','原生 --mode auto --sandbox；由原生 auto 模式决定操作。它要确认的操作（实测包括新建文件）在 Bridge++ 里弹不出确认，这一轮会直接停止；要改文件请选“一键授权”或默认。',{args:antigravityPermissionArgs('auto-review')}));
     if(evidence.skip&&evidence.edits)modes.push(mode('auto','原生 --mode accept-edits --dangerously-skip-permissions --sandbox；自动回答原生权限，保留原生终端沙箱限制。',{args:antigravityPermissionArgs('auto')}));
     if(evidence.plan)modes.push(mode('readonly','原生 --mode plan --sandbox；只读规划，保留原生终端沙箱限制。',{args:antigravityPermissionArgs('readonly')}));
   }

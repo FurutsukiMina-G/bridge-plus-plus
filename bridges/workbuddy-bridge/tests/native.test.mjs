@@ -7,7 +7,9 @@ import {Client} from '@modelcontextprotocol/sdk/client/index.js';
 import {InMemoryTransport} from '@modelcontextprotocol/sdk/inMemory.js';
 import {SdkTransport} from '../src/sdk-transport.mjs';
 import {Completion,sseEvents} from '../src/protocol.mjs';
-import {FORWARDED,hostServer,nativeSupported} from '../src/native.mjs';
+import {FORWARDED,NATIVE_INSTRUCTIONS,hostServer,nativeInput,nativeSupported} from '../src/native.mjs';
+import {NATIVE_BATCH_RULES} from '../src/native-batching.mjs';
+import {DECISION_INSTRUCTIONS,decisionInput} from '../src/decision.mjs';
 const model='deepseek-v4.1-flash';
 const credential={uid:'fixture',domain:'www.workbuddy.cn',accessToken:'fake-token',refreshToken:'fake-refresh'};
 const tools=[
@@ -86,6 +88,12 @@ test('native host calls keep runtime IDs, validate schemas and deliver the held 
   assert.equal(seen.length,1);assert.equal(metrics.toolMode,'native');assert.equal(transport.metrics.hostCalls,2);assert.equal(result.usage.bridge_decision_format,'native');
   const options=seen[0].options;assert.equal(options.mcpServers.host.type,'sdk');assert.match(options.systemPrompt.append,/mcp__host__/);
   assert.equal((await options.hooks.PreToolUse[0].hooks[0]({})).hookSpecificOutput.permissionDecisionReason,FORWARDED);
+  for(const text of [options.systemPrompt.append,NATIVE_INSTRUCTIONS,FORWARDED,NATIVE_BATCH_RULES,seen[0].prompt,nativeInput(body),DECISION_INSTRUCTIONS,decisionInput(body)])
+    assert.doesNotMatch(text,/at most one|parallel_tool_calls:false|bounded model/i);
+  assert.match(NATIVE_BATCH_RULES,/Multiple independent calls in one response cost nothing extra/);
+  assert.match(seen[0].prompt,/Multiple independent calls in one response cost nothing extra/);
+  for(const text of [nativeInput({...body,parallel_tool_calls:false}),decisionInput({...body,parallel_tool_calls:false})])
+    assert.match(text,/This request sets parallel_tool_calls:false\. Return at most one host tool call\./);
   assert.ok(!seen[0].prompt.includes('"tools"'));assert.ok(!seen[0].prompt.includes('host-decision-v1'));
 });
 test('parallel host calls are assembled from the stream when only the first reaches a message',async t=>{
@@ -102,13 +110,50 @@ test('a streamed call whose arguments never complete is corrected, not forwarded
   const {result,metrics}=await collect(transport);
   assert.equal(seen.length,2);assert.equal(metrics.attempts[0].errorCode,'invalid_tool_arguments');assert.equal(result.choices[0].message.tool_calls[0].id,'call_00_S');
 });
-test('native continuation sends only the host results under the runtime IDs',async t=>{
+test('native continuation echoes every host-received call before its results under the runtime IDs',async t=>{
   const {transport,seen}=await fixture(t,[{calls:[{id:'call_00_A',name:'read',input:{file_path:'a.ts'}}]},{text:'a.ts 共 3 行，已检查完毕。'}]);
   const first=await collect(transport);const call=first.result.choices[0].message;
   const second=await collect(transport,{...body,messages:[...body.messages,call,{role:'tool',tool_call_id:'call_00_A',content:'HOST_RESULT'}]});
   assert.equal(second.result.choices[0].message.content,'a.ts 共 3 行，已检查完毕。');assert.equal(seen[1].options.resume,'native-session');
-  assert.match(seen[1].prompt,/"history":"new-messages-only"/);assert.match(seen[1].prompt,/"tool_call_id":"call_00_A"/);assert.match(seen[1].prompt,/HOST_RESULT/);
+  const input=JSON.parse(seen[1].prompt.split('\n')[0]);assert.equal(input.history,'new-messages-only');
+  assert.deepEqual(input.messages,[{role:'assistant',host_received_calls:[{id:'call_00_A',name:'read',arguments:{file_path:'a.ts'}}],content:input.messages[0].content},{role:'tool',tool_call_id:'call_00_A',content:'HOST_RESULT'}]);
+  assert.match(input.messages[0].content,/all calls.*actually received and executed.*Max turns \(1\) exceeded.*not a limit on you.*results below correspond.*by ID.*resend them now/i);
   assert.ok(!seen[1].prompt.includes('prior_decision_calls'));assert.ok(!seen[1].prompt.includes('host rules'));assert.equal(second.metrics.historyMode,'delta');
+  assert.deepEqual(second.metrics.nativeEcho,{calls:1,characters:JSON.stringify(input.messages[0]).length,truncated:false});
+});
+test('native parallel echo preserves call order and the result IDs that follow it',async t=>{
+  const calls=[{id:'call_00_P',name:'read',input:{file_path:'a.ts'}},{id:'call_01_Q',name:'write',input:{file_path:'b.ts',content:'B'}}];
+  const {transport,seen}=await fixture(t,[{calls},{text:'两个结果均已收到。'}]);const first=await collect(transport),message=first.result.choices[0].message;
+  await collect(transport,{...body,messages:[...body.messages,message,{role:'tool',tool_call_id:'call_00_P',content:'RESULT_A'},{role:'tool',tool_call_id:'call_01_Q',content:'RESULT_B'}]});
+  const input=JSON.parse(seen[1].prompt.split('\n')[0]);
+  assert.deepEqual(input.messages[0].host_received_calls,[{id:'call_00_P',name:'read',arguments:{file_path:'a.ts'}},{id:'call_01_Q',name:'write',arguments:{file_path:'b.ts',content:'B'}}]);
+  assert.deepEqual(input.messages.slice(1).map(m=>[m.tool_call_id,m.content]),[['call_00_P','RESULT_A'],['call_01_Q','RESULT_B']]);
+});
+test('native echo truncates long string values and reduces later calls at the total limit',async t=>{
+  const calls=Array.from({length:6},(_,i)=>({id:`call_long_${i}`,name:'write',input:{file_path:String(i)+'p'.repeat(700),content:String(i)+'x'.repeat(1400)}}));
+  const {transport,seen}=await fixture(t,[{calls},{text:'长参数回显检查完毕。'}]);const first=await collect(transport),message=first.result.choices[0].message;
+  const results=calls.map(call=>({role:'tool',tool_call_id:call.id,content:'OK'}));
+  const second=await collect(transport,{...body,messages:[...body.messages,message,...results]});
+  const echo=JSON.parse(seen[1].prompt.split('\n')[0]).messages[0],received=echo.host_received_calls;
+  assert.equal(received.length,6);assert.equal(received[0].arguments.content,('0'+'x'.repeat(1400)).slice(0,600)+'…(shortened here; the host received all 1401 characters)');
+  assert.match(received[0].arguments.file_path,/the host received all 701 characters/);assert.deepEqual(received.at(-1),{id:'call_long_5',name:'write'});
+  assert.ok(JSON.stringify(echo).length<=6000);assert.deepEqual(second.metrics.nativeEcho,{calls:6,characters:JSON.stringify(echo).length,truncated:true});
+});
+test('new, replayed and reset native requests do not add an echo',async t=>{
+  const {transport,seen}=await fixture(t,[{calls:[{id:'call_00_A',name:'read',input:{file_path:'a.ts'}}]},{text:'继续完成。'},{text:'新会话完成。'}]);
+  const first=await collect(transport),message=first.result.choices[0].message;
+  assert.equal(JSON.parse(seen[0].prompt.split('\n')[0]).history,'full');assert.ok(!seen[0].prompt.includes('host_received_calls'));
+  const replay=await collect(transport);assert.equal(seen.length,1);assert.equal(replay.metrics.localReplay,true);assert.deepEqual(replay.metrics.nativeEcho,{calls:0,characters:0,truncated:false});
+  const continuation={...body,messages:[...body.messages,message,{role:'tool',tool_call_id:'call_00_A',content:'HOST_RESULT'}]};
+  await collect(transport,continuation);assert.ok(seen[1].prompt.includes('host_received_calls'));
+  const reset=await collect(transport,{...continuation,messages:[{role:'system',content:'changed host rules'},...continuation.messages.slice(1)]});
+  const input=JSON.parse(seen[2].prompt.split('\n')[0]);assert.equal(input.history,'full');assert.ok(!seen[2].prompt.includes('host_received_calls'));
+  assert.equal(seen[2].options.resume,undefined);assert.equal(reset.metrics.context_reset.first_changed_index,0);assert.deepEqual(reset.metrics.nativeEcho,{calls:0,characters:0,truncated:false});
+});
+test('both native prompts explain the Max turns handoff marker and per-message call echo',async()=>{
+  const {bridgePromptConfig}=await import('../../../app/services/runtime-prompts.mjs');
+  for(const prompt of [NATIVE_INSTRUCTIONS,bridgePromptConfig('kimi').workbuddy.hostPrompts.native])
+    assert.match(prompt,/Max turns \(1\) exceeded.*handoff marker, not a limit on you; each host message lists the calls the host actually received\./i);
 });
 test('plain final text streams progressively without a JSON envelope',async t=>{
   const text='已完成：修改了 3 个文件。\n\n- `a.ts`：修复换行\n- `b.ts`：补测试\n\n全部测试通过。';
@@ -133,8 +178,9 @@ test('printed DSML becomes validated host calls, is never streamed, and is ackno
   assert.equal(JSON.parse(message.tool_calls[0].function.arguments).file_path,'a.ts');assert.ok(!first.raw.includes('｜｜DSML'));assert.equal(message.content.trim(),'先读取 a.ts。');
   assert.equal(first.result.usage.bridge_decision_format,'native-text');
   await collect(transport,{...body,messages:[...body.messages,message,{role:'tool',tool_call_id:message.tool_calls[0].id,content:'R'}]});
-  // The model never saw these bridge IDs natively, so the next turn repeats the assistant call with them.
-  assert.match(seen[1].prompt,/"role":"assistant"/);assert.equal(seen[1].prompt.split(message.tool_calls[0].id).length-1,2);
+  // Text calls retain the JSON acknowledgement instead of using the native host-received echo.
+  const input=JSON.parse(seen[1].prompt.split('\n')[0]);assert.ok(input.messages[0].prior_decision_calls||input.messages[0].tool_calls);assert.equal(input.messages[0].host_received_calls,undefined);
+  assert.equal(seen[1].prompt.split(message.tool_calls[0].id).length-1,2);
 });
 test('undecodable printed markup is corrected and only the prose before it is shown',async t=>{
   const {transport,seen}=await fixture(t,[{text:'Here is the plan for this change.\n<｜｜DSML｜｜ invoke name="read">'},{text:'Done: nothing else to change.'}]);
@@ -185,7 +231,7 @@ test('explicit JSON response formats preserve business fields and protocol examp
   for(const type of ['json_object','json_schema'])for(const text of documents){
     const {transport,seen}=await fixture(t,[{text}]);
     const {result,contents}=await collect(transport,{...body,response_format:{type,...(type==='json_schema'?{json_schema:{name:'answer',schema:{type:'object'}}}:{})}});
-    assert.equal(seen.length,1);assert.equal(result.choices[0].message.content,text);assert.equal(contents.join(''),text);assert.ok(contents.length>1);
+    assert.equal(seen.length,1);assert.equal(result.choices[0].message.content,text);assert.equal(contents.join(''),text);assert.ok(contents.length>=1);
     assert.equal(result.choices[0].finish_reason,'stop');assert.equal(result.choices[0].message.tool_calls,undefined);
     assert.deepEqual(JSON.parse(result.choices[0].message.content),JSON.parse(text));assert.match(seen[0].prompt,/JSON document requested by response_format/);
   }

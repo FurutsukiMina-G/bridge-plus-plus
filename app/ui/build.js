@@ -3394,7 +3394,7 @@ function createDOMPurify() {
 var purify_default = createDOMPurify();
 
 // app/ui/view-state.js
-var visible = /* @__PURE__ */ new Set(["user", "text", "thinking", "tool-start", "tool-end", "tool-output", "subagent", "plan", "diff", "approval", "approval-resolved", "question", "error", "notice", "usage", "turn-end", "media", "attachments-discarded", "upstream-error"]);
+var visible = /* @__PURE__ */ new Set(["user", "text", "thinking", "tool-start", "tool-end", "tool-output", "subagent", "plan", "diff", "approval", "approval-resolved", "question", "error", "notice", "usage", "turn-end", "media", "attachments-discarded", "upstream-error", "steer-state"]);
 function appendDisplayEvent(events, event) {
   if (event.type === "content-replace") {
     const indices = [];
@@ -3802,6 +3802,7 @@ var ActivityTracker = class {
   }
   feed(event, id = event.sessionId) {
     if (!id || !event) return;
+    if (event.type === "user" && event.delivery === "steer") return;
     if (event.type === "user") {
       this.sessions.set(id, fresh(event.at));
       return;
@@ -18735,6 +18736,37 @@ function onboardingHtml(snap) {
     <div class="modal-actions"><button id="guide-later" class="btn">\u7A0D\u540E</button><button id="guide-done" class="btn primary" ${ready ? "" : "disabled"} title="${ready ? "" : scanning ? "\u6B63\u5728\u68C0\u6D4B\u5F00\u53D1\u73AF\u5883" : "\u81F3\u5C11\u9700\u8981\u4E00\u4E2A\u53EF\u7528\u7684\u5F00\u53D1\u73AF\u5883"}">\u5F00\u59CB\u4F7F\u7528</button></div></div>`;
 }
 
+// app/ui/tokens.js
+var UNITS = { k: 1e3, m: 1e6, "\u4E07": 1e4 };
+function parseTokens(raw) {
+  const text3 = String(raw ?? "").trim().replace(/\s*tokens?$/i, "").replace(/[\s,，_]/g, "");
+  if (!text3) return null;
+  const match = /^(\d+(?:\.\d+)?|\.\d+)([kKmM万])?$/.exec(text3);
+  if (!match) return NaN;
+  const value = Number(match[1]) * (match[2] ? UNITS[match[2].toLowerCase()] : 1);
+  return Number.isFinite(value) ? Math.round(value) : NaN;
+}
+function formatTokens(n) {
+  if (!Number.isSafeInteger(n) || n < 0) return "";
+  if (n >= 1e6 && n % 1e3 === 0) return `${n / 1e6}M`;
+  if (n >= 1e3 && n % 1e3 === 0) return `${n / 1e3}K`;
+  return String(n);
+}
+function compactTokens2(n) {
+  if (n == null || !Number.isFinite(n)) return "\u2014";
+  if (n >= 1e6) return `${+(n / 1e6).toFixed(2)}M`;
+  if (n >= 1e3) return `${+(n / 1e3).toFixed(1)}K`;
+  return String(Math.round(n));
+}
+function budgetCheck(raw, { min = 4096, max } = {}) {
+  const value = parseTokens(raw);
+  if (value === null) return { ok: true, value: null, text: `\u7559\u7A7A\u5219\u4E0D\u8BBE\u7F6E\uFF1B\u53EF\u4EE5\u5199 200K\u30010.5M \u8FD9\u6837\u7684\u6570\uFF0C\u8303\u56F4 ${min.toLocaleString()}\u2013${compactTokens2(max)}` };
+  if (Number.isNaN(value)) return { ok: false, value, text: "\u6CA1\u770B\u61C2\u8FD9\u4E2A\u6570\uFF0C\u53EF\u4EE5\u5199 900K\u30011M\u30010.75M \u6216 786432" };
+  if (value < min) return { ok: false, value, text: `\u81F3\u5C11 ${min.toLocaleString()} tokens` };
+  if (max && value > max) return { ok: false, value, text: `\u4E0D\u80FD\u8D85\u8FC7\u4E0A\u4E0B\u6587\u7A97\u53E3 ${compactTokens2(max)}\uFF08${max.toLocaleString()} tokens\uFF09` };
+  return { ok: true, value, text: `= ${value.toLocaleString()} tokens` };
+}
+
 // app/ui/app.js
 var $2 = (selector) => document.querySelector(selector);
 var esc4 = (value) => String(value ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
@@ -18771,7 +18803,8 @@ var state = {
   catalogSource: "all",
   sessionSearch: "",
   menuSearch: "",
-  params: null
+  params: null,
+  delivery: "steer"
 };
 var ui = loadUi();
 var views = new WorkspaceViews();
@@ -18927,7 +18960,7 @@ var currentModel = () => models().find((m) => m.key === state.modelKey);
 var modelOf = (selection) => selection?.modelKey && selection.modelKey !== "native" ? models().find((m) => m.key === selection.modelKey) : null;
 var busy = (s) => !!s && busyStates.includes(s.status);
 var activityOf = (s) => activity.describe(s.id, s.status, { runtime: runtime(s.runtimeId)?.name, stopping: stopping.has(s.id) });
-var compact = (n) => n == null ? "\u2014" : n >= 1e6 ? `${+(n / 1e6).toFixed(2)}M` : n >= 1e3 ? `${+(n / 1e3).toFixed(1)}K` : String(Math.round(n));
+var compact = compactTokens2;
 var pct = (n) => n == null ? "\u2014" : `${Math.round(n * 100)}%`;
 var clock = (date) => new Intl.DateTimeFormat("zh-CN", { hour: "2-digit", minute: "2-digit" }).format(new Date(date));
 var pretty = (data) => {
@@ -18988,6 +19021,7 @@ var defaultContext = (model) => model?.contexts.length ? model.contexts.some((c)
 function validBudget(model, budget, context) {
   return Number.isSafeInteger(budget) && budget >= 4096 && !!model?.contextMaximum && budget <= model.contextMaximum && !(model.source === "qoder" && context && budget > context);
 }
+var budgetMax = (model, context) => model?.source === "qoder" && context ? context : model?.contextMaximum ?? null;
 function selectModel(key) {
   state.modelKey = key;
   if (key) {
@@ -19040,7 +19074,16 @@ function modelLabel(selection, model) {
     if (ctx) parts.push(compact(ctx));
     if (selection.contextBudget) parts.push(`\u9884\u7B97 ${compact(selection.contextBudget)}`);
   } else parts.push("\u539F\u751F\u6267\u884C");
-  return `<span class="ml-name">${esc4(model.name)}</span><span class="ml-meta">${esc4(parts.join(" \xB7 "))}</span>`;
+  return `<span class="ml-name">${esc4(sourceName(model))}</span><span class="ml-meta">${esc4(parts.join(" \xB7 "))}</span>`;
+}
+function modelTitle(selection, model, locked) {
+  const lead = locked ? "\u67E5\u770B\u6216\u8C03\u6574\u6B64\u4F1A\u8BDD\u7684\u53C2\u6570" : "\u9009\u62E9\u6A21\u578B\u3001\u601D\u8003\u5F3A\u5EA6\u4E0E\u4E0A\u4E0B\u6587\u7A97\u53E3";
+  if (!model || selection?.modelKey === "native") return lead;
+  const rows = [`${sourceNames[model.source]} \xB7 ${model.name}\uFF08${model.id}\uFF09`, `\u601D\u8003\u5F3A\u5EA6\uFF1A${selection.reasoning ? effortName(selection.reasoning) : "\u9ED8\u8BA4"}`];
+  if (selection.contextTokens) rows.push(`\u4E0A\u4E0B\u6587\u7A97\u53E3\uFF1A${compact(selection.contextTokens)}\uFF08${selection.contextTokens.toLocaleString()} tokens\uFF09`);
+  rows.push(`\u672C\u5730\u538B\u7F29\u9884\u7B97\uFF1A${selection.contextBudget ? `${compact(selection.contextBudget)}\uFF08${selection.contextBudget.toLocaleString()} tokens\uFF09` : "\u4E0D\u8BBE\u7F6E"}`);
+  return `${rows.join("\n")}
+${lead}`;
 }
 var composerSelection = () => ({ modelKey: state.modelKey, identity: state.modelKey === "native" ? void 0 : currentModel()?.identity, reasoning: state.reasoning, contextTokens: state.contextTokens, contextBudget: state.contextBudget, nativeModel: state.nativeModel });
 function reportDirty() {
@@ -19159,13 +19202,14 @@ function autosize(el) {
 function mountComposer() {
   const slot = $2(".composer-slot");
   if (!slot) return;
-  slot.innerHTML = `<div class="composer${session() ? "" : " centered"}"><div id="composer-banner"></div><div class="composer-box"><div class="attach-tray" id="attach-tray" hidden></div><textarea id="prompt" rows="1" aria-label="\u4EFB\u52A1" spellcheck="false"></textarea><div class="composer-row" id="composer-controls"></div><div class="drop-hint" id="drop-hint" hidden></div></div><div class="composer-footer" id="composer-footer"></div></div>`;
+  slot.innerHTML = `<div class="composer${session() ? "" : " centered"}"><div id="composer-banner"></div><div class="queue-strip" id="queue-strip" hidden></div><div class="composer-box"><div class="attach-tray" id="attach-tray" hidden></div><textarea id="prompt" rows="1" aria-label="\u4EFB\u52A1" spellcheck="false"></textarea><div class="composer-row" id="composer-controls"></div><div class="drop-hint" id="drop-hint" hidden></div></div><div class="composer-footer" id="composer-footer"></div></div>`;
   const prompt = $2("#prompt");
   prompt.value = state.draft;
   prompt.addEventListener("input", (e) => {
     state.draft = e.target.value;
     stashDraft();
     autosize(e.target);
+    syncDraftMark();
   });
   prompt.addEventListener("compositionstart", (e) => {
     e.target.dataset.composing = "true";
@@ -19198,6 +19242,89 @@ function mountComposer() {
   renderTray();
   requestAnimationFrame(() => autosize(prompt));
 }
+function syncDraftMark() {
+  const box = $2(".composer-box");
+  if (box) box.classList.toggle("has-draft", !!state.draft.trim() || pending.list(attachKey()).some((x2) => x2.status !== "error"));
+}
+function deliveryFor(s) {
+  return s?.interject?.steer === true && state.delivery !== "queue" ? "steer" : "queue";
+}
+function sendTitle(s) {
+  if (!busy(s)) return "\u53D1\u9001 (Enter)";
+  return deliveryFor(s) === "steer" ? "\u63D2\u8BDD (Enter)\uFF1A\u6A21\u578B\u4E0B\u4E00\u6B65\u5C31\u80FD\u770B\u5230" : `\u6392\u961F (Enter)\uFF1A\u672C\u8F6E\u7ED3\u675F\u540E\u81EA\u52A8\u53D1\u9001${s?.interject?.steer === false && s.interject.reason ? `\u3002${s.interject.reason}` : ""}`;
+}
+function renderQueue() {
+  const el = $2("#queue-strip"), s = session();
+  if (!el) return;
+  const items = s?.queue ?? [];
+  el.hidden = !items.length;
+  if (!items.length) {
+    el.innerHTML = "";
+    return;
+  }
+  const running2 = busy(s);
+  const held = new Set(s.queueDispatch?.ids ?? []), onHold = items.some((q2) => held.has(q2.id));
+  const head = running2 ? `\u6392\u961F ${items.length} \u6761 \xB7 \u672C\u8F6E\u7ED3\u675F\u540E\u81EA\u52A8\u53D1\u9001` : onHold ? "\u4E0A\u6B21\u53D1\u9001\u540E\u6CA1\u6536\u5230\u539F\u751F\u786E\u8BA4\uFF0C\u6D88\u606F\u5148\u4FDD\u7559\uFF0C\u4E0D\u4F1A\u81EA\u52A8\u91CD\u53D1" : `\u6709 ${items.length} \u6761\u6392\u961F\u6D88\u606F\u6CA1\u6709\u53D1\u51FA\uFF08\u4E0A\u4E00\u8F6E\u6CA1\u6709\u6B63\u5E38\u7ED3\u675F\uFF09`;
+  const actions = (q2) => held.has(q2.id) ? `<span class="queue-held" title="\u8BF7\u5728\u539F\u751F\u754C\u9762\u786E\u8BA4\u8FD9\u6761\u6D88\u606F\u662F\u5426\u5DF2\u7ECF\u53D1\u51FA\uFF0C\u518D\u51B3\u5B9A\u662F\u5426\u91CD\u53D1">\u5F85\u6838\u5BF9</span>` : `<button class="icon-btn xs" data-queue-edit="${esc4(q2.id)}" title="\u53D6\u56DE\u5230\u8F93\u5165\u6846\u4FEE\u6539">${icon("edit")}</button><button class="icon-btn xs" data-queue-remove="${esc4(q2.id)}" title="\u5220\u9664\u8FD9\u6761">${icon("close")}</button>`;
+  patchHtml(el, `<div class="queue-head">${icon(onHold && !running2 ? "alert" : "clock")}<span>${esc4(head)}</span>${running2 || onHold ? "" : `<button class="btn sm primary" data-queue-send="all">${icon("arrowUp")}\u73B0\u5728\u53D1\u9001</button>`}</div>${items.map((q2) => `<div class="queue-item"><span class="queue-text" title="${esc4(q2.text)}">${esc4(q2.text || `${q2.attachments?.length ?? 0} \u4E2A\u9644\u4EF6`)}</span>${q2.attachments?.length ? `<span class="queue-att" title="${esc4(q2.attachments.map((a3) => a3.name).join("\u3001"))}">${icon("paperclip")}${q2.attachments.length}</span>` : ""}${actions(q2)}</div>`).join("")}`);
+}
+async function dequeue(s, queueId) {
+  const item = await call("session:dequeue", { sessionId: s.id, queueId });
+  await snapshot();
+  renderQueue();
+  return item ?? { text: "", attachments: [] };
+}
+async function editQueued(queueId) {
+  const s = session();
+  if (!s) return;
+  const item = await dequeue(s, queueId), key = attachKey();
+  if (item.text) state.draft = state.draft.trim() ? `${state.draft.replace(/\s+$/, "")}
+${item.text}` : item.text;
+  for (const a3 of item.attachments ?? []) pending.add(key, { status: "ready", name: a3.name, kind: a3.kind, size: a3.size, attachment: a3 });
+  stashDraft();
+  const prompt = $2("#prompt");
+  if (prompt) {
+    prompt.value = state.draft;
+    autosize(prompt);
+    prompt.focus();
+  }
+  renderTray();
+  syncDraftMark();
+}
+async function removeQueued(queueId) {
+  const s = session();
+  if (!s) return;
+  const item = await dequeue(s, queueId);
+  for (const a3 of item.attachments ?? []) void call("attachment:discard", { id: a3.id }).catch(() => {
+  });
+  toast("\u5DF2\u5220\u9664\u8FD9\u6761\u6392\u961F\u6D88\u606F");
+}
+async function sendQueuedNow() {
+  const s = session();
+  if (!s?.queue?.length) return;
+  const items = [];
+  for (const q2 of [...s.queue]) items.push(await dequeue(s, q2.id));
+  const text3 = items.map((x2) => x2.text).filter(Boolean).join("\n\n"), attachments = items.flatMap((x2) => x2.attachments ?? []);
+  const now = session(), delivery = busy(now) ? "queue" : void 0;
+  try {
+    await call("session:prompt", { sessionId: s.id, text: text3, ...attachments.length ? { attachments: attachments.map((a3) => a3.id) } : {}, ...delivery ? { delivery } : {} });
+  } catch (error) {
+    const key = attachKey();
+    state.draft = [state.draft.trim(), text3].filter(Boolean).join("\n");
+    for (const a3 of attachments) pending.add(key, { status: "ready", name: a3.name, kind: a3.kind, size: a3.size, attachment: a3 });
+    const prompt = $2("#prompt");
+    if (prompt) {
+      prompt.value = state.draft;
+      autosize(prompt);
+    }
+    renderTray();
+    syncDraftMark();
+    throw error;
+  }
+  await snapshot();
+  renderComposerControls();
+  renderFooter();
+}
 var attachKey = () => views.draftKey(state);
 function attachCaps() {
   const s = session();
@@ -19229,6 +19356,7 @@ function renderTray() {
   const items = pending.list(attachKey());
   el.hidden = !items.length;
   patchHtml(el, trayHtml(items));
+  syncDraftMark();
 }
 async function addFiles(files) {
   if (!project()) {
@@ -19336,15 +19464,21 @@ function renderComposerControls() {
   const el = $2("#composer-controls"), prompt = $2("#prompt");
   if (!el) return;
   const s = session(), p = project(), running2 = busy(s), env = runtime(s ? s.runtimeId : state.runtimeId);
-  prompt.placeholder = !p ? "\u5148\u6253\u5F00\u4E00\u4E2A\u5DE5\u4F5C\u6587\u4EF6\u5939\uFF0C\u518D\u5F00\u59CB\u2026" : s ? running2 ? "\u53EF\u4EE5\u5148\u5199\u4E0B\u4E00\u6761\uFF0C\u672C\u8F6E\u7ED3\u675F\u540E\u518D\u53D1\u9001\u2026" : "\u7EE7\u7EED\u8FD9\u4E2A\u4EFB\u52A1\u2026" : "\u63CF\u8FF0\u8981\u5B8C\u6210\u7684\u4EFB\u52A1\uFF0CAgent \u4F1A\u5728\u6240\u9009\u6587\u4EF6\u5939\u4E2D\u5DE5\u4F5C\u2026";
+  const steer = running2 && deliveryFor(s) === "steer";
+  prompt.placeholder = !p ? "\u5148\u6253\u5F00\u4E00\u4E2A\u5DE5\u4F5C\u6587\u4EF6\u5939\uFF0C\u518D\u5F00\u59CB\u2026" : s ? running2 ? steer ? "\u8865\u5145\u6216\u7EA0\u6B63\u8981\u6C42\uFF0CEnter \u63D2\u8BDD\uFF0C\u6A21\u578B\u4E0B\u4E00\u6B65\u5C31\u80FD\u770B\u5230\u2026" : "Enter \u6392\u961F\uFF0C\u672C\u8F6E\u7ED3\u675F\u540E\u81EA\u52A8\u53D1\u9001\u2026" : "\u7EE7\u7EED\u8FD9\u4E2A\u4EFB\u52A1\u2026" : "\u63CF\u8FF0\u8981\u5B8C\u6210\u7684\u4EFB\u52A1\uFF0CAgent \u4F1A\u5728\u6240\u9009\u6587\u4EF6\u5939\u4E2D\u5DE5\u4F5C\u2026";
   const selection = s ? s.selection : composerSelection(), model = s ? modelOf(s.selection) : currentModel();
   const folder = s ? "" : `<button class="chip-btn" id="folder-chip" data-value="${esc4(p?.id ?? "")}" title="${esc4(p?.path ?? "\u9009\u62E9\u5DE5\u4F5C\u6587\u4EF6\u5939")}">${icon("folder")}<span class="chip-text">${esc4(p?.name ?? "\u9009\u62E9\u6587\u4EF6\u5939")}</span>${icon("chevronDown", "caret")}</button>`;
   const envOk = !!s || usable(env);
   const envChip = `<button class="chip-btn${s ? " locked" : ""}${envOk ? "" : " unavailable"}" id="env-chip" data-value="${esc4(env?.id ?? "")}" title="${s ? "\u4F1A\u8BDD\u521B\u5EFA\u540E\u4E0D\u80FD\u66F4\u6362\u8FD0\u884C\u73AF\u5883" : envOk ? "\u5148\u9009\u62E9\u8FD0\u884C\u73AF\u5883" : esc4(unusableReason(env))}">${tile2(env)}<span class="chip-text">${esc4(env?.name ?? "\u9009\u62E9\u73AF\u5883")}</span>${icon(s ? "lock" : "chevronDown", "caret")}</button>`;
-  const modelChip = `<button class="chip-btn model-chip" id="model-chip" data-value="${esc4(selection.modelKey ?? "")}" title="${s ? "\u67E5\u770B\u6216\u8C03\u6574\u6B64\u4F1A\u8BDD\u7684\u53C2\u6570" : "\u9009\u62E9\u6A21\u578B\u3001\u601D\u8003\u5F3A\u5EA6\u4E0E\u4E0A\u4E0B\u6587\u7A97\u53E3"}">${icon("layers")}<span class="chip-text">${modelLabel(selection, model)}</span>${icon("chevronDown", "caret")}</button>`;
+  const modelChip = `<button class="chip-btn model-chip" id="model-chip" data-value="${esc4(selection.modelKey ?? "")}" title="${esc4(modelTitle(selection, model, !!s))}">${icon("layers")}<span class="chip-text">${modelLabel(selection, model)}</span>${icon("chevronDown", "caret")}</button>`;
   const permChip = permissionChipHtml(s, env);
   const waiting = !running2 && !!env?.checking;
-  el.innerHTML = `<div class="composer-left">${attachButtonHtml()}${folder}${envChip}<span class="chip-sep">${icon("chevronRight")}</span>${modelChip}${permChip}</div><button class="send${running2 ? " stop" : ""}" id="send" title="${running2 ? "\u505C\u6B62\u672C\u8F6E" : waiting ? "\u6B63\u5728\u68C0\u6D4B\u8FD0\u884C\u73AF\u5883\uFF0C\u7A0D\u7B49\u51E0\u79D2" : "\u53D1\u9001 (Enter)"}" aria-label="${running2 ? "\u505C\u6B62\u672C\u8F6E" : "\u53D1\u9001"}" ${p && envOk && !waiting ? "" : "disabled"}>${icon(running2 ? "stop" : "arrowUp")}</button>`;
+  const choice = running2 && s.interject?.steer === true ? `<div class="delivery-seg" role="radiogroup" aria-label="\u8FD0\u884C\u4E2D\u53D1\u9001\u65B9\u5F0F"><button role="radio" aria-checked="${steer}" class="${steer ? "on" : ""}" data-delivery="steer" title="\u63D2\u8FDB\u6B63\u5728\u8FD0\u884C\u7684\u8FD9\u4E00\u8F6E\uFF0C\u6A21\u578B\u4E0B\u4E00\u6B65\u5C31\u80FD\u770B\u5230">\u63D2\u8BDD</button><button role="radio" aria-checked="${!steer}" class="${steer ? "" : "on"}" data-delivery="queue" title="\u7B49\u8FD9\u4E00\u8F6E\u7ED3\u675F\u540E\u518D\u53D1\u9001">\u6392\u961F</button></div>` : "";
+  const actions = running2 ? `<div class="run-actions">${choice}<button class="send stop" id="stop-run" title="\u505C\u6B62\u672C\u8F6E" aria-label="\u505C\u6B62\u672C\u8F6E">${icon("stop")}</button><button class="send run-send" id="send" title="${esc4(sendTitle(s))}" aria-label="${steer ? "\u63D2\u8BDD" : "\u6392\u961F"}">${icon("arrowUp")}</button></div>` : `<button class="send" id="send" title="${waiting ? "\u6B63\u5728\u68C0\u6D4B\u8FD0\u884C\u73AF\u5883\uFF0C\u7A0D\u7B49\u51E0\u79D2" : "\u53D1\u9001 (Enter)"}" aria-label="\u53D1\u9001" ${p && envOk && !waiting ? "" : "disabled"}>${icon("arrowUp")}</button>`;
+  el.innerHTML = `<div class="composer-left">${attachButtonHtml()}${folder}${envChip}<span class="chip-sep">${icon("chevronRight")}</span>${modelChip}${permChip}</div>${actions}`;
+  $2(".composer-box")?.classList.toggle("running", running2);
+  syncDraftMark();
+  renderQueue();
   if (menu && !$2("#popover").classList.contains("hidden")) placeMenu();
 }
 var permissionIcons = { ask: "shield", "auto-review": "shieldCheck", auto: "zap", readonly: "lock" };
@@ -19396,7 +19530,8 @@ function permissionMenuHtml() {
   const issue = p.issue ? `<div class="menu-note warn">${icon("alert")}<span>${esc4(p.issue)}</span></div>` : "";
   const migrated = p.migration?.reason ? `<div class="menu-note">${icon("info")}<span>${esc4(p.migration.reason)}</span></div>` : "";
   const exec = p.protocol === "exec-json" ? `<div class="menu-note">${icon("info")}<span>\u539F\u751F Codex \u6309\u5B98\u65B9 CLI \u7684 exec \u65B9\u5F0F\u8FD0\u884C\uFF0C\u4E0D\u80FD\u9010\u6761\u8BE2\u95EE\uFF1B\u9700\u8981\u66F4\u9AD8\u6743\u9650\u7684\u64CD\u4F5C\u7531\u539F\u751F\u6C99\u7BB1\u62D2\u7EDD\uFF0C\u6216\u4EA4\u7ED9\u81EA\u52A8\u5BA1\u67E5\u3002</span></div>` : "";
-  return `<div class="menu-label">\u6388\u6743\u65B9\u5F0F \xB7 ${head}</div>${items}${issue}${migrated}${exec}<div class="menu-note">${icon("info")}<span>\u7531\u539F\u751F\u8FD0\u884C\u73AF\u5883\u6267\u884C\uFF1ABridge++ \u53EA\u4F20\u539F\u751F\u53C2\u6570\u6216\u4EE3\u4F60\u56DE\u7B54\u6388\u6743\u8BF7\u6C42\uFF0C\u4E0D\u4F1A\u8D8A\u8FC7\u539F\u751F\u6C99\u7BB1\u3002</span></div>`;
+  const review = env?.id === "dsh" && p.modes?.some((m) => m.id === "auto-review") ? `<div class="menu-note">${icon("zap")}<span>\u81EA\u52A8\u5BA1\u67E5\u4F1A\u5728\u6BCF\u6B21\u5DE5\u5177\u8C03\u7528\u524D\u53E6\u53D1\u4E00\u6B21\u6A21\u578B\u8BF7\u6C42\uFF0C\u8BF7\u6C42\u6570\u5927\u7EA6\u7FFB\u500D\uFF0C\u4E5F\u66F4\u6162\u3002</span></div>` : "";
+  return `<div class="menu-label">\u6388\u6743\u65B9\u5F0F \xB7 ${head}</div>${items}${issue}${migrated}${exec}${review}<div class="menu-note">${icon("info")}<span>\u7531\u539F\u751F\u8FD0\u884C\u73AF\u5883\u6267\u884C\uFF1ABridge++ \u53EA\u4F20\u539F\u751F\u53C2\u6570\u6216\u4EE3\u4F60\u56DE\u7B54\u6388\u6743\u8BF7\u6C42\uFF0C\u4E0D\u4F1A\u8D8A\u8FC7\u539F\u751F\u6C99\u7BB1\u3002</span></div>`;
 }
 function changePermission(runtimeId, mode, current, apply3) {
   const warning = mode === current ? null : permissionWarning(runtimeId, mode);
@@ -19458,7 +19593,7 @@ function selectionWindow(s) {
   return s.selection.contextBudget ?? s.selection.contextTokens ?? m?.contextMaximum ?? null;
 }
 function turnStartedAt() {
-  for (let i2 = state.events.length - 1; i2 >= 0; i2--) if (state.events[i2].type === "user") return state.events[i2].at;
+  for (let i2 = state.events.length - 1; i2 >= 0; i2--) if (state.events[i2].type === "user" && state.events[i2].delivery !== "steer") return state.events[i2].at;
   return session()?.updatedAt;
 }
 function renderFooter() {
@@ -19612,10 +19747,26 @@ function approvalBlock(e, resolved) {
   else buttons = choices.filter((c) => choiceLabels[c]).map((c) => `<button class="btn sm${c === "approve" ? " primary" : c.startsWith("reject") ? " danger" : ""}" data-approval="${esc4(e.approvalId)}" data-choice="${esc4(c)}">${choiceLabels[c]}</button>`).join("");
   return `<div class="approval-card"><div class="approval-head">${icon(e.type === "question" ? "info" : "key")}<b>${e.type === "question" ? "Agent \u9700\u8981\u4F60\u8865\u5145\u4FE1\u606F" : "Agent \u8BF7\u6C42\u6388\u6743"}</b>${e.name ? `<span class="muted">${esc4(e.name)}</span>` : ""}</div>${summary ? `<div class="approval-summary">${esc4(summary)}</div>` : ""}<details class="approval-details" data-expand="approval-${esc4(e.approvalId)}"><summary>\u8BE6\u7EC6\u53C2\u6570</summary><pre>${esc4(clip2(pretty(e.data)))}</pre></details><div class="approval-actions">${buttons}</div></div>`;
 }
-function planBlock(e) {
+function planBlock(e, live) {
   const d = e.data ?? {}, items = (d.entries ?? d.plan ?? []).map((x2) => ({ text: x2.content ?? x2.step ?? "", status: String(x2.status ?? "") }));
   if (!items.length) return miscBlock(e, "list", "\u8BA1\u5212");
-  return `<div class="plan-card"><div class="plan-head">${icon("list")}<span>\u8BA1\u5212</span><span class="muted">${items.filter((x2) => x2.status === "completed").length}/${items.length}</span></div><ul>${items.map((x2) => `<li class="${/progress/i.test(x2.status) ? "doing" : x2.status === "completed" ? "done" : ""}">${x2.status === "completed" ? icon("check") : /progress/i.test(x2.status) ? '<span class="spinner"></span>' : '<span class="plan-dot"></span>'}<span>${esc4(x2.text)}</span></li>`).join("")}</ul></div>`;
+  const doing = (x2) => /progress/i.test(x2.status), stalled = !live && items.some(doing);
+  const mark = (x2) => x2.status === "completed" ? icon("check") : doing(x2) ? live ? '<span class="spinner"></span>' : '<span class="plan-stalled" title="\u8FD9\u4E00\u8F6E\u5DF2\u7ECF\u7ED3\u675F\uFF0C\u8FD9\u4E00\u9879\u6CA1\u6709\u5B8C\u6210"></span>' : '<span class="plan-dot"></span>';
+  return `<div class="plan-card"><div class="plan-head">${icon("list")}<span>\u8BA1\u5212</span><span class="muted">${items.filter((x2) => x2.status === "completed").length}/${items.length}</span>${stalled ? '<span class="plan-state">\u672A\u5B8C\u6210</span>' : ""}</div><ul>${items.map((x2) => `<li class="${doing(x2) ? live ? "doing" : "stalled" : x2.status === "completed" ? "done" : ""}">${mark(x2)}<span>${esc4(x2.text)}</span></li>`).join("")}</ul></div>`;
+}
+var steerNotes = {
+  pending: ["clock", "\u63D2\u8BDD \xB7 \u7B49\u5F85\u63D2\u5165\u4E0B\u4E00\u6B65"],
+  delivered: ["check", "\u63D2\u8BDD \xB7 \u5DF2\u9001\u8FBE\uFF0C\u6A21\u578B\u4E0B\u4E00\u6B65\u4F1A\u770B\u5230"],
+  carried: ["chevronRight", "\u63D2\u8BDD \xB7 \u8FD9\u4E00\u8F6E\u5148\u7ED3\u675F\u4E86\uFF0C\u5DF2\u4F5C\u4E3A\u4E0B\u4E00\u8F6E\u7684\u8F93\u5165"],
+  failed: ["alert", "\u63D2\u8BDD\u6CA1\u6709\u9001\u8FBE\uFF0C\u5DF2\u653E\u56DE\u6392\u961F"]
+};
+function userBlock(e, discarded, steers) {
+  let note = "";
+  if (e.delivery === "steer") {
+    const s = steers.get(e.steerId), key = steerNotes[s?.state] ? s.state : "pending", [ico, text3] = steerNotes[key];
+    note = `<div class="user-note ${key}"${s?.reason ? ` title="${esc4(s.reason)}"` : ""}>${icon(ico)}<span>${esc4(text3)}${key === "failed" && s?.reason ? `\uFF1A${esc4(s.reason)}` : ""}</span></div>`;
+  } else if (e.fromQueue?.length) note = `<div class="user-note queued">${icon("clock")}<span>${e.fromQueue.length > 1 ? `\u6392\u961F\u7684 ${e.fromQueue.length} \u6761\u6D88\u606F\uFF0C\u5408\u5E76\u53D1\u51FA` : "\u6392\u961F\u6D88\u606F\uFF0C\u4E0A\u4E00\u8F6E\u7ED3\u675F\u540E\u53D1\u51FA"}</span></div>`;
+  return `<article class="message user-message${e.delivery === "steer" ? " steer" : ""}">${userMediaHtml(e.attachments, discarded)}${e.text ? `<div class="user-bubble">${esc4(e.text)}</div>` : ""}${note}<div class="user-meta">${clock(e.at)}</div></article>`;
 }
 function miscBlock(e, ico, label) {
   return `<details class="tool" data-expand="${esc4(e.id)}"><summary>${icon(ico, "tool-status")}<span class="tool-name">${label}</span><span class="tool-summary">${esc4(toolSummary(e))}</span>${icon("chevronRight", "tool-caret")}</summary><div class="tool-body"><pre>${esc4(clip2(e.text ?? pretty(e.data ?? {})))}</pre></div></details>`;
@@ -19645,6 +19796,9 @@ function renderChat(quiet = false) {
   const resolved = new Map(events.filter((e) => e.type === "approval-resolved").map((e) => [e.approvalId, e.choice]));
   const discarded = new Set(events.filter((e) => e.type === "attachments-discarded").flatMap((e) => e.attachmentIds ?? []));
   const names = new Map(events.filter((e) => e.type === "user").flatMap((e) => (e.attachments ?? []).map((a3) => [a3.id, a3.name])));
+  const steers = new Map(events.filter((e) => e.type === "steer-state").map((e) => [e.steerId, e]));
+  const liveTurn = running2 ? events.findLast((e) => e.type === "user" && e.delivery !== "steer")?.turnId : null;
+  const livePlan = liveTurn ? events.findLast((e) => e.type === "plan" && e.turnId === liveTurn)?.id : null;
   const tools = /* @__PURE__ */ new Map(), lastDiff = /* @__PURE__ */ new Map(), toolKey = (e) => e.toolId ?? e.data?.callId ?? null;
   const upstreamSaid = new Set(events.filter((e) => e.type === "upstream-error").map((e) => `${e.turnId}\0${e.message}`));
   for (const e of events) {
@@ -19657,7 +19811,7 @@ function renderChat(quiet = false) {
     } else if (e.type === "diff") lastDiff.set(e.turnId ?? "none", e);
   }
   for (const e of events) {
-    if (e.type === "user") add(`user:${e.id}`, `<article class="message user-message">${userMediaHtml(e.attachments, discarded)}${e.text ? `<div class="user-bubble">${esc4(e.text)}</div>` : ""}<div class="user-meta">${clock(e.at)}</div></article>`);
+    if (e.type === "user") add(`user:${e.id}`, userBlock(e, discarded, steers));
     else if (e.type === "media") add(`media:${e.id}`, `<article class="message media-message">${mediaCardHtml(e)}</article>`);
     else if (e.type === "text") {
       if (!e.text?.trim()) continue;
@@ -19675,7 +19829,7 @@ function renderChat(quiet = false) {
       t.rendered = true;
       add(`tool:${key}`, () => toolBlock(key, t, running2, names), { tool: t });
     } else if (e.type === "subagent") add(`subagent:${e.id}`, miscBlock(e, "bot", "\u5B50\u4EE3\u7406"));
-    else if (e.type === "plan") add(`plan:${e.id}`, planBlock(e));
+    else if (e.type === "plan") add(`plan:${e.id}`, planBlock(e, e.id === livePlan));
     else if (e.type === "diff") {
       if (lastDiff.get(e.turnId ?? "none") === e) add(`diff:${e.turnId ?? e.id}`, diffBlock(e));
     } else if (e.type === "approval" || e.type === "question") add(`approval:${e.approvalId ?? e.id}`, approvalBlock(e, resolved));
@@ -19746,6 +19900,7 @@ function openMenu(anchor, kind) {
   menu = { kind, anchorId: anchor.id };
   if (kind === "model") {
     state.menuSearch = "";
+    openGroups.clear();
     const s = session();
     if (s) state.params = { reasoning: s.selection.reasoning ?? "", contextTokens: s.selection.contextTokens ?? null, contextBudget: s.selection.contextBudget ?? null };
   }
@@ -19847,12 +20002,20 @@ function sessionMenuHtml() {
   const s = session();
   return `<button class="menu-item" id="menu-rename">${icon("edit", "mi-icon")}<span class="mi-main"><span class="mi-name">\u91CD\u547D\u540D</span></span></button><button class="menu-item" id="menu-reveal">${icon("folder", "mi-icon")}<span class="mi-main"><span class="mi-name">\u5728\u8D44\u6E90\u7BA1\u7406\u5668\u4E2D\u6253\u5F00\u6587\u4EF6\u5939</span></span></button><div class="menu-sep"></div><button class="menu-item danger" data-archive="${s?.id ?? ""}" ${busy(s) ? "disabled" : ""}>${icon("archive", "mi-icon")}<span class="mi-main"><span class="mi-name">\u5F52\u6863\u4F1A\u8BDD</span></span></button>`;
 }
+var sourcePrefix = { qoder: "Q-", workbuddy: "W-" };
+var sourceName = (m) => `${sourcePrefix[m?.source] ?? ""}${m?.name ?? ""}`;
+var openGroups = /* @__PURE__ */ new Set();
+function modelItemHtml(m) {
+  return `<button class="menu-item model-item${m.key === state.modelKey ? " selected" : ""}" data-model-key="${esc4(m.key)}"><span class="mi-main"><span class="mi-name">${esc4(sourceName(m))}</span><span class="mi-sub mono">${esc4(m.id)}</span></span><span class="mi-tags">${m.reasoning.some((e) => e !== "none") ? '<span class="mi-tag">\u601D\u8003</span>' : ""}${m.contextMaximum ? `<span class="mi-tag">${compact(m.contextMaximum)}</span>` : ""}</span>${m.key === state.modelKey ? icon("check", "mi-check") : ""}</button>`;
+}
 function modelListHtml() {
   const env = state.runtimeId, q2 = state.menuSearch.trim().toLowerCase();
   const groups = ["qoder", "workbuddy", "antigravity"].map((source) => {
-    const list = models().filter((m) => m.source === source && compatible(env, m) && (!q2 || `${m.name} ${m.id}`.toLowerCase().includes(q2)));
+    const all = models().filter((m) => m.source === source && compatible(env, m));
+    const list = all.filter((m) => !q2 || `${sourceName(m)} ${m.name} ${m.id}`.toLowerCase().includes(q2));
     if (!list.length) return "";
-    return `<div class="menu-label">${sourceNames[source]}</div>${list.map((m) => `<button class="menu-item model-item${m.key === state.modelKey ? " selected" : ""}" data-model-key="${esc4(m.key)}"><span class="mi-main"><span class="mi-name">${esc4(m.name)}</span><span class="mi-sub mono">${esc4(m.id)}</span></span><span class="mi-tags">${m.reasoning.some((e) => e !== "none") ? '<span class="mi-tag">\u601D\u8003</span>' : ""}${m.contextMaximum ? `<span class="mi-tag">${compact(m.contextMaximum)}</span>` : ""}</span>${m.key === state.modelKey ? icon("check", "mi-check") : ""}</button>`).join("")}`;
+    const open2 = !!q2 || openGroups.has(source), chosen = all.find((m) => m.key === state.modelKey);
+    return `<div class="model-group${open2 ? " open" : ""}"><button class="model-group-head" data-model-group="${source}" aria-expanded="${open2}">${icon("chevronRight", "mg-caret")}<span class="mg-name">${esc4(sourceNames[source])}</span><span class="mg-count">${q2 ? `${list.length}/${all.length}` : all.length} \u4E2A</span>${chosen && !open2 ? `<span class="mg-chosen" title="\u5F53\u524D\u9009\u62E9">${icon("check")}${esc4(sourceName(chosen))}</span>` : ""}</button>${open2 ? `<div class="model-group-body">${list.map(modelItemHtml).join("")}</div>` : ""}</div>`;
   }).join("");
   const native = env !== "dsh" && (!q2 || "\u539F\u751F native".includes(q2)) ? `<div class="menu-label">\u539F\u751F</div><button class="menu-item model-item${state.modelKey === "native" ? " selected" : ""}" data-model-key="native"><span class="mi-main"><span class="mi-name">\u539F\u751F\u6A21\u578B\u8BBE\u7F6E</span><span class="mi-sub">\u4F7F\u7528 ${esc4(runtime(env)?.name ?? "")} \u81EA\u5DF1\u7684\u6A21\u578B\u4E0E\u767B\u5F55</span></span>${state.modelKey === "native" ? icon("check", "mi-check") : ""}</button>` : "";
   return groups + native || `<div class="menu-empty">${models().length ? "\u6CA1\u6709\u5339\u914D\u7684\u6A21\u578B" : "\u8FD8\u6CA1\u6709\u6A21\u578B\u76EE\u5F55\u3002\u8BF7\u5230\u8BBE\u7F6E \u2192 \u6A21\u578B\u6E90\u4E0B\u8F7D\u7EC4\u4EF6\u5E76\u767B\u5F55\u3002"}</div>`;
@@ -19865,16 +20028,26 @@ function contextRow(model, value) {
   if (!model.contexts.length) return "";
   return `<div class="param"><span class="param-label">${icon("window")}\u4E0A\u4E0B\u6587\u7A97\u53E3</span><div class="seg">${[...model.contexts].sort((a3, b) => a3.tokens - b.tokens).map((c) => `<button class="${value === c.tokens ? "on" : ""}" data-context="${c.tokens}">${compact(c.tokens)}${c.tokens === model.defaultContextTokens ? "<small>\u9ED8\u8BA4</small>" : ""}</button>`).join("")}</div></div>`;
 }
-function budgetRow(model, value) {
+function budgetRow(model, value, context) {
   if (!model.contextMaximum) return "";
-  return `<div class="param"><span class="param-label">${icon("database")}\u672C\u5730\u538B\u7F29\u9884\u7B97</span><div class="budget"><input id="budget-input" type="number" min="4096" max="${model.contextMaximum}" step="1024" placeholder="\u4E0D\u8BBE\u7F6E" value="${value ?? ""}"><span class="muted">tokens</span></div></div>`;
+  const max = budgetMax(model, context), text3 = value ? formatTokens(value) : "";
+  return `<div class="param"><span class="param-label">${icon("database")}\u672C\u5730\u538B\u7F29\u9884\u7B97</span><div class="budget"><input id="budget-input" type="text" inputmode="decimal" autocomplete="off" spellcheck="false" placeholder="\u4E0D\u8BBE\u7F6E" value="${esc4(text3)}" data-max="${max ?? ""}" aria-describedby="budget-help" title="\u53EF\u4EE5\u5199 900K\u30011M\u30010.75M\u300190\u4E07 \u6216\u5177\u4F53\u6570\u5B57\uFF1BK\u3001M \u6309 1000 \u8FDB\u4F4D\uFF0C\u548C\u6A21\u578B\u6E90\u6807\u7684\u7A97\u53E3\u4E00\u81F4"><span class="budget-help" id="budget-help">${esc4(value ? budgetCheck(text3, { max }).text : `\u4F8B\u5982 200K\u30010.5M\uFF0C\u6700\u5927 ${compact(max)}`)}</span></div></div>`;
 }
+function paintBudgetHelp(input) {
+  const help = $2("#budget-help");
+  if (!input || !help) return;
+  const check = budgetCheck(input.value, { max: Number(input.dataset.max) || null });
+  help.textContent = input.value.trim() ? check.text : `\u4F8B\u5982 200K\u30010.5M\uFF0C\u6700\u5927 ${compact(Number(input.dataset.max) || null)}`;
+  help.classList.toggle("bad", !check.ok);
+  input.classList.toggle("bad", !check.ok);
+}
+var budgetNote = "\u9884\u7B97\u53EA\u51B3\u5B9A\u8FD0\u884C\u73AF\u5883\u4F55\u65F6\u538B\u7F29\u4E0A\u4E0B\u6587\uFF0C\u4E0D\u6539\u53D8\u4E0A\u6E38\u7A97\u53E3\u3002\u9884\u7B97\u8D8A\u5927\uFF0C\u6BCF\u4E00\u6B65\u91CD\u53D1\u7ED9\u6A21\u578B\u7684\u5386\u53F2\u8D8A\u591A\uFF0C\u7528\u91CF\u4E5F\u8D8A\u5927\u3002";
 function paramsHtml() {
   if (state.modelKey === "native") return nativeParamsHtml();
   const m = currentModel();
   if (!m) return "";
   if (m.source === "antigravity") return `<div class="param-note">${icon("info")}<span>Gemini \u7531 Antigravity \u539F\u751F\u6267\u884C\u3002\u601D\u8003\u6863\u4F4D\u5DF2\u5305\u542B\u5728\u6A21\u578B ID \u4E2D\uFF0C\u4E0A\u4E0B\u6587\u7531\u539F\u751F\u540E\u7AEF\u7BA1\u7406\u3002</span></div>`;
-  return `${effortRow(m, state.reasoning)}${contextRow(m, state.contextTokens)}${budgetRow(m, state.contextBudget)}<div class="param-hint">\u9884\u7B97\u53EA\u51B3\u5B9A\u8FD0\u884C\u73AF\u5883\u4F55\u65F6\u538B\u7F29\u4E0A\u4E0B\u6587\uFF0C\u4E0D\u6539\u53D8\u4E0A\u6E38\u7A97\u53E3\u3002</div><div class="param-actions"><button class="btn sm" id="save-model-default">${icon("check")}\u8BB0\u4F4F\u6B64\u642D\u914D</button></div>`;
+  return `${effortRow(m, state.reasoning)}${contextRow(m, state.contextTokens)}${budgetRow(m, state.contextBudget, state.contextTokens)}<div class="param-hint">${budgetNote}</div><div class="param-actions"><button class="btn sm" id="save-model-default">${icon("check")}\u8BB0\u4F4F\u6B64\u642D\u914D</button></div>`;
 }
 function nativeEfforts() {
   const rows = nativeCatalog.get(state.runtimeId) ?? [], row = rows.find((r) => r.id === state.nativeModel);
@@ -19913,7 +20086,7 @@ function sessionParamsHtml(s) {
   const m = modelOf(s.selection), p = state.params;
   const native = s.selection.modelKey === "native";
   if (!m || m.source === "antigravity") return `<div class="menu-session-head">${icon("lock")}<div><b>${esc4(m?.name ?? (native ? "\u539F\u751F\u6A21\u578B" : s.selection.modelKey))}</b><small>${esc4(native ? s.selection.nativeModel || "\u539F\u751F\u5F53\u524D\u6A21\u578B" : m ? m.id : "\u4E0D\u5728\u5F53\u524D\u6A21\u578B\u76EE\u5F55\u4E2D")}</small></div></div><div class="param-note">${icon("info")}<span>${m ? "Gemini \u7531 Antigravity \u539F\u751F\u6267\u884C\uFF0C\u53C2\u6570\u5728\u539F\u751F\u754C\u9762\u4E2D\u8C03\u6574\u3002" : native ? "\u539F\u751F\u6A21\u578B\u4F1A\u8BDD\u7684\u53C2\u6570\u8BF7\u5728\u539F\u751F\u754C\u9762\u4E2D\u8C03\u6574\u3002" : "\u8FD9\u4E2A\u6A21\u578B\u4E0D\u5728\u5F53\u524D\u76EE\u5F55\u4E2D\u3002\u8BF7\u5237\u65B0\u6A21\u578B\u6E90\uFF0C\u518D\u7528\u7F16\u8F91\u6846\u4E0A\u65B9\u7684\u201C\u91CD\u65B0\u786E\u8BA4\u6A21\u578B\u201D\u3002"}</span></div>`;
-  return `<div class="menu-session-head">${icon("lock")}<div><b>${esc4(m.name)}</b><small>${esc4(sourceNames[m.source])} \xB7 ${esc4(m.id)}</small></div></div><div class="menu-params">${effortRow(m, p.reasoning)}${contextRow(m, p.contextTokens)}${budgetRow(m, p.contextBudget)}<div class="param-hint">\u4F1A\u8BDD\u521B\u5EFA\u540E\u4E0D\u80FD\u66F4\u6362\u6A21\u578B\u6216\u8FD0\u884C\u73AF\u5883\u3002\u5E94\u7528\u65B0\u53C2\u6570\u4F1A\u91CD\u542F\u8FD9\u4E2A\u4F1A\u8BDD\u7684\u8FD0\u884C\u73AF\u5883\uFF0C\u4E0B\u4E00\u8F6E\u4F1A\u91CD\u65B0\u53D1\u9001\u5B8C\u6574\u4E0A\u4E0B\u6587\u3002</div><div class="param-actions"><button class="btn primary sm" id="apply-session-params" ${busy(s) ? "disabled" : ""}>\u5E94\u7528\u5230\u6B64\u4F1A\u8BDD</button></div></div>`;
+  return `<div class="menu-session-head">${icon("lock")}<div><b>${esc4(m.name)}</b><small>${esc4(sourceNames[m.source])} \xB7 ${esc4(m.id)}</small></div></div><div class="menu-params">${effortRow(m, p.reasoning)}${contextRow(m, p.contextTokens)}${budgetRow(m, p.contextBudget, p.contextTokens)}<div class="param-hint">${budgetNote}\u4F1A\u8BDD\u521B\u5EFA\u540E\u4E0D\u80FD\u66F4\u6362\u6A21\u578B\u6216\u8FD0\u884C\u73AF\u5883\uFF1B\u5E94\u7528\u65B0\u53C2\u6570\u4F1A\u91CD\u542F\u8FD9\u4E2A\u4F1A\u8BDD\u7684\u8FD0\u884C\u73AF\u5883\uFF0C\u4E0B\u4E00\u8F6E\u4F1A\u91CD\u65B0\u53D1\u9001\u5B8C\u6574\u4E0A\u4E0B\u6587\u3002</div><div class="param-actions"><button class="btn primary sm" id="apply-session-params" ${busy(s) ? "disabled" : ""}>\u5E94\u7528\u5230\u6B64\u4F1A\u8BDD</button></div></div>`;
 }
 function modelMenuHtml() {
   const s = session();
@@ -19922,9 +20095,14 @@ function modelMenuHtml() {
 }
 var paramTarget = () => session() ? state.params : state;
 function setBudget(raw) {
-  const s = session(), target = paramTarget(), m = s ? modelOf(s.selection) : currentModel(), value = raw === "" ? null : Number(raw);
-  if (value !== null && !validBudget(m, value, target.contextTokens)) throw new Error(`\u9884\u7B97\u9700\u4E3A 4096\u2013${compact(m?.source === "qoder" && target.contextTokens ? target.contextTokens : m?.contextMaximum)} \u4E4B\u95F4\u7684\u6574\u6570`);
-  target.contextBudget = value;
+  const s = session(), target = paramTarget(), m = s ? modelOf(s.selection) : currentModel(), check = budgetCheck(raw, { max: budgetMax(m, target.contextTokens) });
+  if (!check.ok || check.value !== null && !validBudget(m, check.value, target.contextTokens)) throw new Error(`\u672C\u5730\u538B\u7F29\u9884\u7B97\uFF1A${check.ok ? "\u8D85\u51FA\u8FD9\u4E2A\u6A21\u578B\u5141\u8BB8\u7684\u8303\u56F4" : check.text}`);
+  target.contextBudget = check.value;
+  const input = $2("#budget-input");
+  if (input) {
+    input.value = check.value ? formatTokens(check.value) : "";
+    paintBudgetHelp(input);
+  }
   if (!s) renderComposerControls();
 }
 async function loadNativeModels() {
@@ -19967,7 +20145,14 @@ function bindNativeInputs() {
     state.reasoning = e.target.value;
     renderComposerControls();
   });
+  bind("#budget-input", "input", (e) => paintBudgetHelp(e.target));
   bind("#budget-input", "change", (e) => void action(() => setBudget(e.target.value)));
+  bind("#budget-input", "keydown", (e) => {
+    if (e.key === "Enter" && !e.isComposing) {
+      e.preventDefault();
+      e.target.blur();
+    }
+  });
 }
 function repaintParams() {
   const s = session();
@@ -20369,11 +20554,8 @@ async function submit() {
   await action(async () => {
     if (!project()) throw new Error("\u8BF7\u5148\u6253\u5F00\u4E00\u4E2A\u5DE5\u4F5C\u6587\u4EF6\u5939");
     let s = session();
-    if (s && busy(s)) {
-      toast("Agent \u4ECD\u5728\u6267\u884C\u3002\u53EF\u4EE5\u7B49\u5F85\u672C\u8F6E\u7ED3\u675F\uFF0C\u6216\u70B9\u51FB\u505C\u6B62\u6309\u94AE\u3002");
-      return;
-    }
-    if (s?.selectionIssue) throw new Error(s.selectionIssue + "\uFF1B\u8BF7\u5148\u5237\u65B0\u6765\u6E90\u5E76\u91CD\u65B0\u786E\u8BA4\u6A21\u578B");
+    const delivery = s && busy(s) ? deliveryFor(s) : void 0;
+    if (s?.selectionIssue && !delivery) throw new Error(s.selectionIssue + "\uFF1B\u8BF7\u5148\u5237\u65B0\u6765\u6E90\u5E76\u91CD\u65B0\u786E\u8BA4\u6A21\u578B");
     if (submitting) return;
     if (runtime(s ? s.runtimeId : state.runtimeId)?.checking) {
       toast("\u6B63\u5728\u68C0\u6D4B\u8FD0\u884C\u73AF\u5883\uFF0C\u7A0D\u7B49\u51E0\u79D2\u518D\u53D1\u9001");
@@ -20428,16 +20610,19 @@ async function submit() {
         }
         renderTray();
       }
-      const sent = call("session:prompt", { sessionId: s.id, text: text3, ...attachments.length ? { attachments } : {} });
+      const sent = call("session:prompt", { sessionId: s.id, text: text3, ...attachments.length ? { attachments } : {}, ...delivery ? { delivery } : {} });
       submitting = false;
+      let result;
       try {
-        await sent;
+        result = await sent;
       } catch (error) {
         for (const item of taken) pending.add(projectId + ":" + s.id, item);
         markDiscarded([]);
         if (state.sessionId === s.id) renderTray();
         throw error;
       }
+      if (delivery === "steer" && result?.delivery === "queue") toast(result.note || "\u8FD9\u4E00\u523B\u8FD8\u4E0D\u80FD\u63D2\u8BDD\uFF0C\u5DF2\u6539\u4E3A\u6392\u961F\uFF0C\u672C\u8F6E\u7ED3\u675F\u540E\u53D1\u9001");
+      else if (delivery === "queue" && result?.delivery === "queue") toast("\u5DF2\u6392\u961F\uFF0C\u672C\u8F6E\u7ED3\u675F\u540E\u81EA\u52A8\u53D1\u9001");
       await snapshot();
       if (state.sessionId === s.id) {
         renderComposerControls();
@@ -20560,9 +20745,10 @@ function openRecovery(s) {
   modal("\u91CD\u65B0\u786E\u8BA4\u6A21\u578B\u4E0E\u53C2\u6570", `<p>\u7EE7\u7EED\u4F7F\u7528 ${esc4(sourceNames[model.source])} \xB7 ${esc4(model.name)}<br><span class="mono">\u6A21\u578B ID\uFF1A${esc4(model.id)}</span><br>\u786E\u8BA4\u540E\u4FDD\u7559\u5F53\u524D\u8FD0\u884C\u73AF\u5883\u3001\u539F\u751F\u4F1A\u8BDD\u548C\u5386\u53F2\u8BB0\u5F55\u3002</p>
     <label for="rebind-reasoning">\u601D\u8003\u5F3A\u5EA6</label><select id="rebind-reasoning"><option value="">\u6765\u6E90\u9ED8\u8BA4</option>${model.reasoning.map((e) => `<option value="${esc4(e)}" ${selected.reasoning === e ? "selected" : ""}>${esc4(effortName(e))}</option>`).join("")}</select>
     <label for="rebind-context">\u4E0A\u4E0B\u6587\u7A97\u53E3</label><select id="rebind-context">${model.contexts.length ? "" : '<option value="">\u539F\u751F\u9ED8\u8BA4</option>'}${model.contexts.map((c) => `<option value="${c.tokens}" ${(hasContext ? selected.contextTokens : defaultContext(model)) === c.tokens ? "selected" : ""}>${compact(c.tokens)}${c.tokens === model.defaultContextTokens ? "\uFF08\u9ED8\u8BA4\uFF09" : ""}</option>`).join("")}</select>
-    <label for="rebind-budget">\u672C\u5730\u538B\u7F29\u9884\u7B97\uFF08\u53EF\u7559\u7A7A\uFF09</label><input id="rebind-budget" type="number" min="4096" max="${model.contextMaximum ?? ""}" value="${selected.contextBudget ?? ""}">`, async () => {
-    const context = $2("#rebind-context").value, budget = $2("#rebind-budget").value;
-    await call("session:rebind", { sessionId: s.id, selection: { ...selected, identity: model.identity, reasoning: $2("#rebind-reasoning").value || void 0, contextTokens: context ? Number(context) : null, contextBudget: budget ? Number(budget) : null } });
+    <label for="rebind-budget">\u672C\u5730\u538B\u7F29\u9884\u7B97\uFF08\u53EF\u7559\u7A7A\uFF0C\u4F8B\u5982 200K\u30010.5M\uFF09</label><input id="rebind-budget" type="text" inputmode="decimal" autocomplete="off" spellcheck="false" placeholder="\u4E0D\u8BBE\u7F6E" value="${esc4(selected.contextBudget ? formatTokens(selected.contextBudget) : "")}">`, async () => {
+    const context = $2("#rebind-context").value, contextTokens = context ? Number(context) : null, check = budgetCheck($2("#rebind-budget").value, { max: budgetMax(model, contextTokens) });
+    if (!check.ok) throw new Error(`\u672C\u5730\u538B\u7F29\u9884\u7B97\uFF1A${check.text}`);
+    await call("session:rebind", { sessionId: s.id, selection: { ...selected, identity: model.identity, reasoning: $2("#rebind-reasoning").value || void 0, contextTokens, contextBudget: check.value } });
     await snapshot();
     if (state.sessionId === s.id) {
       renderComposerControls();
@@ -20725,6 +20911,17 @@ document.addEventListener("click", (e) => {
       renderSettings();
       renderComposerControls();
     });
+    return;
+  }
+  if (el = hit("[data-model-group]")) {
+    const source = el.dataset.modelGroup;
+    if (openGroups.has(source)) openGroups.delete(source);
+    else openGroups.add(source);
+    const list = $2("#menu-list");
+    if (list) {
+      list.innerHTML = modelListHtml();
+      placeMenu();
+    }
     return;
   }
   if (el = hit("[data-model-key]")) {
@@ -20965,6 +21162,27 @@ document.addEventListener("click", (e) => {
     removeAttachment(el.dataset.attachRemove);
     return;
   }
+  if (el = hit("[data-delivery]")) {
+    state.delivery = el.dataset.delivery === "queue" ? "queue" : "steer";
+    renderComposerControls();
+    $2("#prompt")?.focus();
+    return;
+  }
+  if (el = hit("[data-queue-edit]")) {
+    void action(() => editQueued(el.dataset.queueEdit));
+    return;
+  }
+  if (el = hit("[data-queue-remove]")) {
+    void action(() => removeQueued(el.dataset.queueRemove));
+    return;
+  }
+  if (el = hit("[data-queue-send]")) {
+    el.disabled = true;
+    void action(sendQueuedNow).finally(() => {
+      el.disabled = false;
+    });
+    return;
+  }
   if (el = hit("[data-media-open]")) {
     openLightbox(el.dataset.mediaOpen, el.dataset.mediaName);
     return;
@@ -21067,10 +21285,12 @@ document.addEventListener("click", (e) => {
     case "native-session":
       void openNative();
       break;
-    case "send": {
+    case "send":
+      void submit();
+      break;
+    case "stop-run": {
       const s = session();
       if (s && busy(s)) stopSession(s.id);
-      else void submit();
       break;
     }
     case "attach-btn":

@@ -39,7 +39,7 @@ export class DshHost extends EventEmitter {
     const login=await fetch(`${this.origin}/?token=${this.token}`,{redirect:'manual',signal:AbortSignal.timeout(10000)});this.cookie=login.headers.get('set-cookie')?.split(';')[0];if(login.status!==303||!this.cookie)throw new Error('DSH 原生 Host 认证失败');
     return this;
   }
-  async rpc(method,args={}){await this.ready();const result=await fetch(`${this.origin}/api/${method}`,{method:'POST',headers:{cookie:this.cookie,origin:this.origin,'content-type':'application/json'},body:JSON.stringify({type:'client-request',rpcId:randomUUID(),method,payload:{args}}),redirect:'error',signal:AbortSignal.timeout(30000)});const body=await result.json();if(!result.ok||!body.result?.ok)throw new Error(`${method}: ${body.result?.error?.message??`HTTP ${result.status}`}`);return body.result.value;}
+  async rpc(method,args={}){await this.ready();const result=await fetch(`${this.origin}/api/${method}`,{method:'POST',headers:{cookie:this.cookie,origin:this.origin,'content-type':'application/json'},body:JSON.stringify({type:'client-request',rpcId:randomUUID(),method,payload:{args}}),redirect:'error',signal:AbortSignal.timeout(30000)});const body=await result.json();if(!result.ok||!body.result?.ok)throw Object.assign(new Error(`${method}: ${body.result?.error?.message??`HTTP ${result.status}`}`),{rpcRejected:body.result?.ok===false});return body.result.value;}
   configure(model,variant,endpoint,sessionId){const task=this.settingsQueue.then(()=>this.configureOne(model,variant,endpoint,sessionId));this.settingsQueue=task.catch(()=>{});return task;}
   async configureOne(model,variant,endpoint,sessionId){
     await this.configureSearch();

@@ -44,7 +44,7 @@ export async function bridgeKey(path = '.runtime/bridge-key') {
   return value;
 }
 export async function createBridgeServer(config: Config, options: {
-  port?: number; key?: string; infer?: typeof runProbe; reportDir?: string; prewarm?: boolean; telemetry?: boolean;
+  port?: number; key?: string; infer?: typeof runProbe; reportDir?: string; prewarm?: boolean; prewarmModel?: string; telemetry?: boolean;
 } = {}) {
   const bridgePort = options.port ?? 8646;
   decisionRetryLimit(config.decisionRetries);
@@ -69,9 +69,9 @@ export async function createBridgeServer(config: Config, options: {
     return selected;
   };
   // Independent pools prevent a model switch from carrying Qoder history or replay/cache state across models.
-  const pool = options.prewarm === false ? null : poolFor(PUBLIC_MODEL);
+  const pool = options.prewarm === false ? null : poolFor(options.prewarmModel ?? PUBLIC_MODEL);
   // Keep serving when the runtime is not reachable yet; the pool retries warm-up and opens sessions on demand.
-  if (pool) await pool.prewarm().catch(() => {});
+  if (pool) void pool.prewarm().catch(() => {});
   const slots = new RequestSlots(3);
   const server = createServer(async (req, res) => {
     const startedAt = Date.now();
@@ -196,7 +196,7 @@ export async function createBridgeServer(config: Config, options: {
         failurePhase = 'upstream';
         const selectedPool = poolFor(request.model);
         const pooled = selectedPool ? await selectedPool.infer(request, { signal: controller.signal, reasoningEffort,
-          onText: request.stream ? text => projector.push(text) : undefined,
+          onText: request.stream && !request.response_format ? text => projector.push(text) : undefined,
           onThinking: request.stream ? text => {
             firstClientThinkingMs ??= Date.now() - startedAt;
             emit({ reasoning_content: text });
@@ -213,7 +213,7 @@ export async function createBridgeServer(config: Config, options: {
           prepareRetry:request.stream?()=>projector.resetUncommitted():undefined,
           validateDecision:request.stream?decision=>projector.validate(decision):undefined,
           invoke:async prompt=>infer({...requestConfig(request.model),...(reasoningEffort?{reasoning:reasoningEffort}:{})},prompt,undefined,
-            request.stream?text=>projector.push(text):()=>{})});
+            request.stream&&!request.response_format?text=>projector.push(text):()=>{})});
         decisionRecovery=pooled?.recovery??direct?.recovery;
         const turn=pooled?pooled.report:{...direct!.turn,decision_recovery:direct!.recovery};
         failureTurn = turn;

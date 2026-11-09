@@ -793,3 +793,70 @@ dialog h2{margin:0 0 12px;font:600 16px var(--font-display)}
 .perm-observed{margin:0;font-size:11px;color:var(--faint)}
 .composer-left{flex-wrap:wrap;row-gap:4px}
 .perm-chip{flex-shrink:0}
+
+/* 0.1.19 — the model chip keeps its parameters (budget included) visible; the name gives way first */
+.model-chip{max-width:380px}
+.model-chip .ml-name{min-width:0;flex-shrink:1}
+.model-chip .ml-meta{flex-shrink:0;overflow:visible}
+
+/* compaction budget typed as 900K / 1M, with the exact count beside it */
+.budget{display:flex;align-items:center;gap:8px;flex-wrap:wrap;min-width:0;flex:1}
+.budget input{width:92px;height:28px;font-variant-numeric:tabular-nums}
+.budget input.bad{border-color:color-mix(in srgb,var(--red) 60%,var(--line));box-shadow:0 0 0 3px color-mix(in srgb,var(--red) 14%,transparent)}
+.budget-help{font-size:11.5px;color:var(--faint);line-height:1.4;min-width:0;flex:1}
+.budget-help.bad{color:var(--red)}
+
+/* model menu: one closed group per source */
+.menu-list{max-height:330px}
+.model-group+.model-group{margin-top:2px}
+.model-group-head{width:100%;display:flex;align-items:center;gap:8px;padding:9px 10px;border-radius:9px;text-align:left;color:var(--text);min-height:40px}
+.model-group-head:hover{background:var(--hover)}
+.model-group.open .model-group-head{position:sticky;top:-4px;z-index:1;background:var(--surface)}
+.model-group.open .model-group-head:hover{background:color-mix(in srgb,var(--surface) 92%,var(--text))}
+.mg-caret{width:14px;height:14px;color:var(--muted);transition:transform .15s;flex-shrink:0}
+.model-group.open .mg-caret{transform:rotate(90deg)}
+.mg-name{font:600 14.5px var(--font-display);letter-spacing:.2px}
+.mg-count{font-size:11.5px;color:var(--faint)}
+.mg-chosen{margin-left:auto;display:inline-flex;align-items:center;gap:4px;font-size:11.5px;color:var(--accent);min-width:0;max-width:210px;overflow:hidden;white-space:nowrap;text-overflow:ellipsis}
+.mg-chosen .icon{width:12px;height:12px;flex-shrink:0}
+.model-group-body{margin:0 0 4px 16px;padding-left:4px;border-left:1px solid var(--line-soft)}
+
+/* plan items of a turn that has ended */
+.plan-stalled{width:14px;height:14px;flex-shrink:0;margin-top:3px;border-radius:50%;border:1.5px solid var(--amber);background:linear-gradient(90deg,color-mix(in srgb,var(--amber) 75%,transparent) 50%,transparent 50%)}
+.plan-state{margin-left:auto;font-size:11px;font-weight:500;color:var(--amber);border:1px solid color-mix(in srgb,var(--amber) 40%,transparent);border-radius:5px;padding:0 6px;line-height:18px}
+
+/* sending while a turn runs: stop stays, send and 插话/排队 appear once there is a draft */
+.run-actions{margin-left:auto;display:flex;align-items:center;gap:6px;flex-shrink:0}
+.run-actions .send{margin-left:0}
+.run-actions .run-send,.run-actions .delivery-seg{display:none}
+.composer-box.has-draft .run-actions .run-send{display:grid}
+.composer-box.has-draft .run-actions .delivery-seg{display:flex}
+.composer-box.has-draft .run-actions .stop{width:30px;height:30px;border-radius:10px;background:var(--surface-2);color:var(--text-2);box-shadow:none}
+.composer-box.has-draft .run-actions .stop:hover{color:var(--text);background:var(--active)}
+.composer-box.has-draft .run-actions .stop .icon{width:13px;height:13px}
+.delivery-seg{gap:2px;padding:2px;border-radius:9px;background:var(--sunken);border:1px solid var(--line-soft)}
+.delivery-seg button{height:24px;padding:0 9px;border-radius:7px;font-size:12px;color:var(--muted)}
+.delivery-seg button:hover{color:var(--text)}
+.delivery-seg button.on{background:var(--surface-2);color:var(--text);box-shadow:var(--shadow-soft)}
+[data-theme=light] .delivery-seg button.on{background:var(--surface)}
+
+/* messages waiting for the turn to end */
+.queue-strip{margin:0 6px 8px;padding:7px 10px 5px;border-radius:12px;background:var(--hover);border:1px solid var(--line-soft);font-size:12.5px}
+.queue-strip[hidden]{display:none}
+.queue-head{display:flex;align-items:center;gap:7px;color:var(--muted);font-size:12px;min-height:24px}
+.queue-head .icon{width:14px;height:14px}
+.queue-head .btn{margin-left:auto}
+.queue-head .btn .icon{width:13px;height:13px}
+.queue-item{display:flex;align-items:center;gap:4px;padding:2px 0 2px 21px;color:var(--text-2)}
+.queue-text{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.queue-att{display:inline-flex;align-items:center;gap:2px;color:var(--faint);font-size:11.5px;margin-right:2px}
+.queue-att .icon{width:12px;height:12px}
+
+/* where a mid-turn or queued message went */
+.user-message.steer .user-bubble{box-shadow:inset 0 0 0 1px color-mix(in srgb,var(--accent) 38%,transparent)}
+.user-note{display:flex;align-items:center;gap:5px;margin-top:5px;padding-right:6px;font-size:11.5px;color:var(--faint);max-width:84%}
+.user-note .icon{width:12px;height:12px;flex-shrink:0}
+.user-note.pending .icon{color:var(--accent);animation:pulse 1.6s ease-in-out infinite}
+.user-note.delivered .icon{color:var(--green)}
+.user-note.failed{color:var(--amber)}
+.queue-held{font-size:11px;color:var(--amber);border:1px solid color-mix(in srgb,var(--amber) 40%,transparent);border-radius:5px;padding:0 6px;line-height:18px;white-space:nowrap}

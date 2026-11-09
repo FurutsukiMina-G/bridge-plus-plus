@@ -1,8 +1,13 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { RequestSlots } from '../src/async.js';
 import { QoderPool } from '../src/pool.js';
 import { ChatRequest } from '../src/compat.js';
+import { IsolationCache } from '../src/isolation-cache.js';
+import { DISABLED_RUNTIME_MEMORY, runtimeMemory, startupTransport, type StartupAttempt } from '../src/startup-phases.js';
 import type { Config } from '../src/client.js';
 
 const request = ChatRequest.parse({ model: 'qoder-deepseek-flash', prompt_cache_key: 'test-session',
@@ -191,5 +196,239 @@ test('billing mode sends the cache split solved from each request bill, with its
       assert.ok(billing!.cachedTokens >= 0 && billing!.cachedTokens <= usage.prompt_tokens);
       assert.ok(['peak', 'off_peak'].includes(report.billing_tier as string));
     }
+  } finally { pool.closeAll(); }
+});
+test('runtimeMemory is disabled by default without spawning PowerShell and only samples when opted in', async () => {
+  let execCalls = 0;
+  const unexpectedExec = (async () => { execCalls++; throw new Error('PowerShell should not be spawned'); }) as never;
+  assert.deepEqual(await runtimeMemory(1234, { env: {}, exec: unexpectedExec }), DISABLED_RUNTIME_MEMORY);
+  assert.deepEqual(await runtimeMemory(1234, { env: { QODER_BRIDGE_STARTUP_MEMORY: '0' }, exec: unexpectedExec }), DISABLED_RUNTIME_MEMORY);
+  assert.deepEqual(await runtimeMemory(undefined, { env: { QODER_BRIDGE_STARTUP_MEMORY: '1' }, exec: unexpectedExec }), { rss_bytes: null, private_bytes: null, source: 'runtime_pid_unavailable' });
+  assert.equal(execCalls, 0);
+  if (process.platform === 'win32') {
+    let observedTimeout = 0;
+    const sampled = await runtimeMemory(4321, {
+      env: { QODER_BRIDGE_STARTUP_MEMORY: '1' },
+      exec: (async (_file: string, _args: readonly string[], options: { timeout?: number }) => {
+        execCalls++; observedTimeout = options.timeout ?? 0;
+        return { stdout: '{"rss_bytes":104857600,"private_bytes":52428800}', stderr: '' };
+      }) as never,
+    });
+    assert.equal(execCalls, 1);
+    assert.ok(observedTimeout > 0 && observedTimeout <= 500);
+    assert.deepEqual(sampled, { rss_bytes: 104857600, private_bytes: 52428800, source: 'owned_process_working_set' });
+    const failed = await runtimeMemory(4321, {
+      env: { QODER_BRIDGE_STARTUP_MEMORY: '1' },
+      exec: (async () => { throw new Error('timed out'); }) as never,
+    });
+    assert.deepEqual(failed, { rss_bytes: null, private_bytes: null, source: 'runtime_memory_unavailable' });
+  }
+  const phase: StartupAttempt = { attempt: 1, transport_kind: 'unobserved', transport_initialize_ms: null,
+    sdk_startup_ms: 0, sdk_initialize_ms: null, initialization_result_ms: 0, isolate_ms: 0,
+    get_available_models_ms: 0, total_ms: 0, isolation_retry: false, memory: { ...DISABLED_RUNTIME_MEMORY } };
+  const options = { transport: { create: (_launch?: unknown) => ({ pid: 9876, async initialize() {}, write() {}, async *readMessages() {}, isReady: () => true, endInput() {}, async close() {} }) } };
+  const pid = startupTransport(options as never, phase);
+  const transport = options.transport.create({} as never);
+  await transport.initialize();
+  assert.equal(phase.transport_kind, 'injected');
+  assert.equal(typeof phase.transport_initialize_ms, 'number');
+  assert.equal(pid(), 9876);
+});
+test('isolation cache handles miss, hit, new plugin discovery, corruption, and identity mismatch while recording startup_phases', async () => {
+  const cacheDir = await mkdtemp(join(tmpdir(), 'qoder-isolation-cache-'));
+  const identity = { version: '1.0.50-test', fingerprint: 'fp-1' };
+  let installedPlugins = ['presentations@builtin'];
+  let installedSkills = ['slide-skill'];
+  let listPluginsCalls = 0;
+  let warmCloses = 0;
+  const appliedSettingsPerStart: Array<{ enabledPlugins?: Record<string, boolean>; skillOverrides?: Record<string, string> }> = [];
+  const fakeStartRuntime = (async ({ options }: { options?: { settings?: string } }) => {
+    const parsed = JSON.parse(options?.settings ?? '{}') as { enabledPlugins?: Record<string, boolean>; skillOverrides?: Record<string, string> };
+    appliedSettingsPerStart.push(parsed);
+    let activePlugins = installedPlugins.filter(id => parsed.enabledPlugins?.[id] !== false);
+    let activeSkills = installedSkills.filter(name => parsed.skillOverrides?.[name] !== 'off');
+    let phase = 0;
+    return {
+      close() { warmCloses++; },
+      query() {
+        return {
+          async initializationResult() { return { account: { userId: 'u-1' }, skills: activeSkills.map(name => ({ name })) }; },
+          async listPlugins() { listPluginsCalls++; return activePlugins.map(id => ({ id })); },
+          async applyFlagSettings(flags: { enabledPlugins?: Record<string, boolean>; skillOverrides?: Record<string, string> }) {
+            activePlugins = activePlugins.filter(id => flags.enabledPlugins?.[id] !== false);
+            activeSkills = activeSkills.filter(name => flags.skillOverrides?.[name] !== 'off');
+          },
+          async reloadPlugins() { return { error_count: 0 }; },
+          async getContextUsage() { return { skills: { count: activeSkills.length, items: activeSkills.map(name => ({ name })) } }; },
+          async getAvailableModels() { return [{ value: 'dfmodel', displayName: 'DeepSeek Flash', description: '', isEnabled: true }]; },
+          async next() {
+            const step = phase++ % 3;
+            if (step === 0) return { done: false, value: { type: 'system', subtype: 'init', session_id: 'sdk-iso', qodercli_version: '0.1.99', tools: [], skills: [], plugins: [] } };
+            if (step === 1) return { done: false, value: { type: 'assistant', uuid: String(phase), session_id: 'sdk-iso',
+              message: { id: String(phase), content: [{ type: 'text', text: '{"kind":"final","content":"OK"}' }], usage: { input_tokens: 10, output_tokens: 2 } } } };
+            return { done: false, value: { type: 'result', session_id: 'sdk-iso', subtype: 'success', is_error: false, total_credits: 0.001, usage: {}, modelUsage: {} } };
+          },
+        };
+      },
+    };
+  }) as never;
+  const makeConfig = (overrides: Partial<Config> = {}): Config => ({
+    auth: 'cli', timeout: 5000, strategy: 'permission', system: 'test', model: 'dfmodel',
+    sessionSettings: '{}', isolationCacheDir: cacheDir, isolationRuntimeIdentity: identity, blankWarmLimit: 0, ...overrides,
+  });
+  try {
+    // 1. Cache miss: discovers plugin & skill, persists cache, retries once (2 attempts), records startup_phases.
+    const poolMiss = new QoderPool(makeConfig(), fakeStartRuntime);
+    try {
+      const first = await poolMiss.infer(request);
+      const phases = first.report.startup_phases!;
+      assert.ok(phases);
+      assert.equal(phases.isolation_cache.enabled, true);
+      assert.equal(phases.isolation_cache.hit, false);
+      assert.equal(phases.isolation_cache.status, 'ready');
+      assert.equal(phases.isolation_cache.declared_cli_version, '1.0.50-test');
+      assert.equal(phases.isolation_cache.cli_version, '0.1.99');
+      assert.equal(phases.attempts.length, 2);
+      assert.equal(phases.attempts[0]!.attempt, 1);
+      assert.equal(phases.attempts[0]!.isolation_retry, true);
+      assert.equal(phases.attempts[1]!.attempt, 2);
+      assert.equal(phases.attempts[1]!.isolation_retry, false);
+      for (const field of ['sdk_startup_ms', 'initialization_result_ms', 'isolate_ms', 'get_available_models_ms', 'total_ms'] as const) {
+        assert.equal(typeof phases.attempts[1]![field], 'number');
+      }
+      assert.deepEqual(phases.attempts[1]!.memory, DISABLED_RUNTIME_MEMORY);
+      assert.equal(appliedSettingsPerStart[0]?.enabledPlugins?.['presentations@builtin'], undefined);
+      assert.equal(appliedSettingsPerStart[1]?.enabledPlugins?.['presentations@builtin'], false);
+      assert.equal(appliedSettingsPerStart[1]?.skillOverrides?.['slide-skill'], 'off');
+      assert.equal(warmCloses, 1);
+      const reused = await poolMiss.infer({ ...request, messages: [...request.messages, { role: 'user', content: 'Follow up' }] });
+      assert.equal(reused.report.reused_session, true);
+      assert.equal(reused.report.startup_phases, null);
+    } finally { poolMiss.closeAll(); }
+
+    // 2. Cache hit: applies cached disable list on attempt 1, still runs isolateSession check, finishes in 1 attempt.
+    const callsBeforeHit = listPluginsCalls;
+    const startsBeforeHit = appliedSettingsPerStart.length;
+    const poolHit = new QoderPool(makeConfig(), fakeStartRuntime);
+    try {
+      const hitTurn = await poolHit.infer(request);
+      const phases = hitTurn.report.startup_phases!;
+      assert.equal(phases.isolation_cache.hit, true);
+      assert.equal(phases.isolation_cache.cli_version, '0.1.99');
+      assert.equal(phases.attempts.length, 1);
+      assert.equal(phases.attempts[0]!.isolation_retry, false);
+      assert.equal(appliedSettingsPerStart[startsBeforeHit]?.enabledPlugins?.['presentations@builtin'], false);
+      assert.equal(appliedSettingsPerStart[startsBeforeHit]?.skillOverrides?.['slide-skill'], 'off');
+      assert.ok(listPluginsCalls > callsBeforeHit, 'isolateSession verification still runs on cache hit');
+    } finally { poolHit.closeAll(); }
+
+    // 3. Cache hit + newly installed plugin: discovers new plugin, updates cache, retries once.
+    installedPlugins = ['presentations@builtin', 'extra-plugin@user'];
+    const poolNewPlugin = new QoderPool(makeConfig(), fakeStartRuntime);
+    let cacheFile = '';
+    try {
+      const turn = await poolNewPlugin.infer(request);
+      const phases = turn.report.startup_phases!;
+      assert.equal(phases.isolation_cache.hit, true);
+      assert.equal(phases.attempts.length, 2);
+      assert.equal(phases.attempts[0]!.isolation_retry, true);
+      assert.equal(phases.attempts[1]!.isolation_retry, false);
+      const verifyCache = await IsolationCache.open(cacheDir, '{}', undefined, identity);
+      cacheFile = verifyCache.file;
+      assert.equal(verifyCache.hit, true);
+      assert.deepEqual(new Set(verifyCache.plugins), new Set(['presentations@builtin', 'extra-plugin@user']));
+      assert.deepEqual(verifyCache.skills, ['slide-skill']);
+    } finally { poolNewPlugin.closeAll(); }
+
+    // 4. Corrupted cache file: falls back to miss, never skips verification, repairs cache.
+    await writeFile(cacheFile, '{corrupted json', 'utf8');
+    const callsBeforeCorrupt = listPluginsCalls;
+    const poolCorrupt = new QoderPool(makeConfig(), fakeStartRuntime);
+    try {
+      const turn = await poolCorrupt.infer(request);
+      assert.equal(turn.report.startup_phases!.isolation_cache.hit, false);
+      assert.equal(turn.report.startup_phases!.attempts.length, 2);
+      assert.ok(listPluginsCalls > callsBeforeCorrupt);
+    } finally { poolCorrupt.closeAll(); }
+
+    // 5. Identity mismatch (version, fingerprint, settings, or tampered file metadata): never skips verification.
+    const callsBeforeMismatch = listPluginsCalls;
+    const otherIdentity = { version: '1.0.51-other', fingerprint: 'fp-1' };
+    const poolMismatch = new QoderPool(makeConfig({ isolationRuntimeIdentity: otherIdentity }), fakeStartRuntime);
+    try {
+      const turn = await poolMismatch.infer(request);
+      assert.equal(turn.report.startup_phases!.isolation_cache.hit, false);
+      assert.equal(turn.report.startup_phases!.attempts.length, 2);
+      assert.ok(listPluginsCalls > callsBeforeMismatch);
+    } finally { poolMismatch.closeAll(); }
+
+    const otherCache = await IsolationCache.open(cacheDir, '{}', undefined, otherIdentity);
+    const rawCache = JSON.parse(await readFile(otherCache.file, 'utf8')) as Record<string, unknown>;
+    await writeFile(otherCache.file, JSON.stringify({ ...rawCache, settings_sha256: 'tampered' }), 'utf8');
+    const tampered = await IsolationCache.open(cacheDir, '{}', undefined, otherIdentity);
+    assert.equal(tampered.hit, false);
+    assert.deepEqual(tampered.plugins, []);
+  } finally {
+    await rm(cacheDir, { recursive: true, force: true });
+  }
+});
+test('one-shot requests claim prewarmed blank runtimes, replenish in background, and release native runtime on completion', async () => {
+  const { pool, opened } = streamingPool('none', [0.001, 0.001, 0.001, 0.001]);
+  const oneShotReq = ChatRequest.parse({ model: 'qoder-deepseek-flash', bridge_scope: 'dsh-review',
+    messages: [{ role: 'system', content: 'Review tool call' }, { role: 'user', content: 'Check safety' }] });
+  try {
+    await pool.prewarm();
+    assert.equal(pool.stats().prewarmed, true);
+    assert.equal(pool.stats().blank_runtimes.ready, 1);
+    const firstRecord = opened[0]!;
+    const firstTurn = await pool.infer(oneShotReq);
+    assert.equal(firstTurn.report.warm_start, true);
+    assert.equal(firstTurn.record, firstRecord);
+    assert.equal((firstRecord as { nativeReleased?: boolean }).nativeReleased, true);
+    assert.equal(firstRecord.controller.signal.aborted, true);
+    // Released one-shot runtimes do not occupy conversation pool slots, while blank runtimes are replenished.
+    assert.equal(pool.stats().sessions, 0);
+    assert.equal(pool.stats().blank_runtimes.target, 2);
+    assert.ok(opened.length >= 2, 'blank runtime replenished in background after prewarmed runtime was claimed');
+    // Identical one-shot retry within 120s replays locally without consuming another runtime.
+    const replayTurn = await pool.infer(oneShotReq);
+    assert.equal(replayTurn.report.local_response_replay, true);
+    assert.equal(replayTurn.report.model_requests, 0);
+    assert.equal(pool.stats().sessions, 0);
+    // Distinct one-shot request in the same scope does not match the released runtime and claims a replenished blank runtime.
+    const secondOneShot = ChatRequest.parse({ model: 'qoder-deepseek-flash', bridge_scope: 'dsh-review',
+      messages: [{ role: 'system', content: 'Review tool call' }, { role: 'user', content: 'Another check' }] });
+    const secondTurn = await pool.infer(secondOneShot);
+    assert.equal(secondTurn.report.reused_session, false);
+    assert.equal(secondTurn.report.warm_start, true);
+    assert.notEqual(secondTurn.record, firstRecord);
+    assert.equal(secondTurn.record.nativeReleased, true);
+    assert.equal(pool.stats().sessions, 0);
+  } finally { pool.closeAll(); }
+});
+test('aborting infer while opening a new session closes the newly opened runtime', async () => {
+  const config: Config = { auth: 'cli', timeout: 5000, strategy: 'permission', system: 'test', blankWarmLimit: 0 };
+  const pool = new QoderPool(config);
+  let resolveOpen!: (record: unknown) => void;
+  let warmClosed = false;
+  const fakeRecord = {
+    id: 'late-open', messages: [], touched: Date.now(), locked: Promise.resolve(),
+    lastCredits: null, model: 'dfmodel', busy: 0, toolSignature: null, retryHint: null, retryMessageHash: null,
+    policyCalls: [], closed: false, lastSuccessHash: null, lastDecision: null, sdkSessionId: null,
+    lastPromptTokens: null, lastFailedDecision: null, lastCompletionId: null, policy: { reasoning: null },
+    controller: new AbortController(), warm: { close() { warmClosed = true; } },
+    queue: { push() {}, close() {} }, q: { next: async () => ({ done: true, value: undefined }) },
+  };
+  (pool as unknown as { open: () => Promise<unknown> }).open = () => new Promise(resolve => { resolveOpen = resolve; });
+  try {
+    const abortController = new AbortController();
+    const pending = pool.infer(request, { signal: abortController.signal });
+    abortController.abort(new Error('client disconnected'));
+    await assert.rejects(pending, /client disconnected/);
+    resolveOpen(fakeRecord);
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(fakeRecord.closed, true);
+    assert.equal(warmClosed, true);
+    assert.equal(pool.stats().sessions, 0);
   } finally { pool.closeAll(); }
 });

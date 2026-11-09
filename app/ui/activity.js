@@ -82,6 +82,8 @@ export class ActivityTracker {
   replay(id,events){this.sessions.delete(id);for(const event of events)this.feed(event,id);}
   feed(event,id=event.sessionId){
     if(!id||!event)return;
+    // A message added mid-turn joins the running turn; it does not start a new one.
+    if(event.type==='user'&&event.delivery==='steer')return;
     if(event.type==='user'){this.sessions.set(id,fresh(event.at));return;}
     let r=this.sessions.get(id);
     if(!r){r=fresh(event.at);this.sessions.set(id,r);}

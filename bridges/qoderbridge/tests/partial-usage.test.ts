@@ -33,7 +33,7 @@ test('token reports keep complete totals null and expose subtotals across new pa
   assert.equal(summary.completionTokens,24100);assert.equal(summary.reasoningTokens,24080);assert.equal(summary.unknownPromptRequests,1);
 });
 test('a final attempt with no input measurement must not borrow a previous attempt context',async()=>{
-  const request=ChatRequest.parse({model:'qoder-deepseek-flash',messages:[{role:'user',content:'fixture'}]});let call=0;
+  const request=ChatRequest.parse({model:'qoder-deepseek-flash',messages:[{role:'user',content:'fixture'}],response_format:{type:'json_object'}});let call=0;
   const result=await recoverDecision({request,prompt:'fixture',invoke:async():Promise<RecoveryTurn>=>++call===1?
     {response:'{',error:null,stage:'inference',normalized_usage:completed,normalized_usage_source:'result'}:
     {response:'',error:null,stage:'reasoning_guard',reasoning_guard_stopped:true,streamed_output_tokens:24000,streamed_reasoning_tokens:24000,streamed_token_deltas_reliable:true},retries:1});

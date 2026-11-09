@@ -1,5 +1,7 @@
 /** Reuse the native transcript; repeat only the schema involved in a validation error. */
+import {hasUsableTools,answerInstructions} from './final-answer.mjs';
 export function correctionInput(body,error){
+  if(!hasUsableTools(body))return {prompt:'Your preceding answer was rejected. Correct the complete answer. '+answerInstructions(body),schemaCharacters:0,toolNames:[]};
   const issue=error.decisionIssue;
   const pinned=body.tool_choice&&typeof body.tool_choice==='object'?body.tool_choice.function?.name:null;
   const target=issue?.tool??(error.code==='wrong_pinned_tool'?pinned:null);

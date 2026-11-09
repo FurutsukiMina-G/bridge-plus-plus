@@ -1,7 +1,9 @@
 import {query} from '@tencent-ai/agent-sdk';
+import {hasUsableTools,answerInstructions} from './final-answer.mjs';
 import {join,resolve} from 'node:path';
 import {randomUUID} from 'node:crypto';
 import {existsSync} from 'node:fs';
+import {mkdir,writeFile,rm} from 'node:fs/promises';
 import {DECISION_INSTRUCTIONS,decisionInput,compileTools} from './decision.mjs';
 import {DecisionOutput} from './decision-output.mjs';
 import {BridgeError,publicError} from './errors.mjs';
@@ -20,6 +22,15 @@ export {normalizedUsage} from './usage.mjs';
 const DENIED_TOOLS=['Agent','Read','Write','Edit','Bash','Glob','Grep','PowerShell','EnterPlanMode','ExitPlanMode','TaskCreate','TaskGet','TaskUpdate','TaskList','WebFetch','WebSearch','TaskStop','TaskOutput','Skill','AskUserQuestion','StructuredOutput','ToolSearch','DeferExecuteTool','SendMessage','TeamCreate','TeamDelete','ImageGen','LibraryUpload','VideoGen','AudioTranscribe','A2AGetAgentCard','A2ASendMessage','A2AGetTask','A2ACancelTask','ListMcpResources','ReadMcpResource','MessageColleague','SpeakInChannel','ChannelTasks','CreateColleague','CreateChannel','ListColleagues'];
 const RETRYABLE=['invalid_decision','invalid_tool_arguments','required_tool_missing','tools_disabled','wrong_pinned_tool','ambiguous_decision','unfinished_turn','missing_native_output'];
 const WARM_DELAY_MS=25,WARM_READY_MS=20000;
+// Avoid per-session 60–70 MB marketplace downloads, file logs and prompt traces, plus unused startup work.
+export const LEAN_RUNTIME_ENV=Object.freeze({
+  CODEBUDDY_DISABLE_PLUGIN_INSTALLS:'1',CODEBUDDY_SKIP_BUILTIN_MARKETPLACE:'1',CODEBUDDY_DISABLE_FILE_LOGS:'1',
+  CODEBUDDY_DISABLE_SHELL_SNAPSHOT:'1',CODEBUDDY_DISABLE_TRACE_COLLECTOR:'1',CODEBUDDY_CODE_DISABLE_FILE_CHECKPOINTING:'1',
+  CODEBUDDY_DISABLE_BUILTIN_SUBAGENTS:'1',CODEBUDDY_DISABLE_GIT_PROMPT_CONTEXT:'1',CODEBUDDY_DISABLE_SYSTEM_INFO_GIT:'1',
+  CODEBUDDY_GIT_REPO_SCAN_DISABLED:'1',CODEBUDDY_DISABLE_IDE:'1',CODEBUDDY_DISABLE_WORKFLOWS:'1',
+  CODEBUDDY_DISABLE_HOT_RELOAD:'1',CODEBUDDY_DISABLE_INPROCESS_TEAMMATES:'1',CODEBUDDY_TEAM_IDLE_DETECTION_DISABLED:'1',
+  CODEBUDDY_MEMORY_EXTRACTION_DISABLED:'1',CODEBUDDY_MEMORY_RELEVANCE_DISABLED:'1'
+});
 // The runtime's own message once a denied host call has used the single permitted turn.
 const RUNTIME_STOP=/^Max turns \(1\) exceeded\.?$/i;
 // The SDK throws ExecutionError before yielding an error result. Every reported reason
@@ -32,26 +43,52 @@ export function sdkOptions(cfg,credential,body,dir,controller,onDenied,onStderr=
   const env={...process.env,CODEBUDDY_AUTH_TOKEN:credential.accessToken,CODEBUDDY_BASE_URL:'https://copilot.tencent.com/v2',ACC_USER_ID:credential.uid,
     CODEBUDDY_CUSTOM_HEADERS:`X-Domain: ${credential.domain}`,CODEBUDDY_CONFIG_DIR:join(dir,'home'),WORKBUDDY_CONFIG_DIR:join(dir,'home'),
     CODEBUDDY_CODE_DISABLE_BACKGROUND_TASKS:'1',CODEBUDDY_DISABLE_AUTO_MEMORY:'1',CODEBUDDY_DISABLE_CRON:'1',DISABLE_TELEMETRY:'1',
+    ...(process.env.WORKBUDDY_FULL_RUNTIME==='1'?{}:LEAN_RUNTIME_ENV),
     CODEBUDDY_CODE_MAX_OUTPUT_TOKENS:String(body.max_tokens),CODEBUDDY_API_KEY:undefined,CODEBUDDY_API_KEY_HELPER_DISABLED:'1',
     ACC_PRODUCT_CONFIG:undefined,ACC_PRODUCT_CONFIG_V2:undefined,ACC_PRODUCT_CONFIG_V3:undefined,ACC_PRODUCT_CONFIG_PATH:undefined,WORKBUDDY_BRIDGE_ACTUAL_CLI:cli};
   // Native turns stop at the first host call; the denial text becomes that call's interim result.
-  const tools=native?hostTools(body):[],denial=native?FORWARDED:'Host-owned tools';
+  const tools=native?hostTools(body):[],denial=native?(cfg.forwardedMessage??FORWARDED):'Host-owned tools';
   return {model:body.model,cwd:dir,tools:[],disallowedTools:DENIED_TOOLS,settingSources:[],strictMcpConfig:true,mcpServers:tools.length?{[HOST]:hostServer(tools)}:{},agents:{},
-    canUseTool:async name=>{onDenied(name);return {behavior:'deny',message:native?FORWARDED:'Only the external host can execute tools'};},
-    hooks:{PreToolUse:[{hooks:[async input=>{onDenied(input?.tool_name);return {continue:false,stopReason:native?'Forwarded to the external host':'Only the external host executes tools',hookSpecificOutput:{hookEventName:'PreToolUse',permissionDecision:'deny',permissionDecisionReason:denial}};}]}]},
-    systemPrompt:cfg.hostPrompts?(native?cfg.hostPrompts.native:cfg.hostPrompts.decision):{append:native?NATIVE_INSTRUCTIONS:DECISION_INSTRUCTIONS},maxTurns:1,includePartialMessages:true,persistSession:false,effort:body.reasoning_effort,...(body.bridge_thinking_disabled?{thinking:{type:'disabled'}}:{}),
+    canUseTool:async name=>{onDenied(name);return {behavior:'deny',message:native?denial:'Only the external host can execute tools'};},
+    hooks:{PreToolUse:[{hooks:[async input=>{onDenied(input?.tool_name);return {continue:false,stopReason:native?denial:'Only the external host executes tools',hookSpecificOutput:{hookEventName:'PreToolUse',permissionDecision:'deny',permissionDecisionReason:denial}};}]}]},
+    systemPrompt:!hasUsableTools(body)?answerInstructions(body):cfg.hostPrompts?(native?cfg.hostPrompts.native:cfg.hostPrompts.decision):{append:native?NATIVE_INSTRUCTIONS:DECISION_INSTRUCTIONS},maxTurns:1,includePartialMessages:true,persistSession:false,effort:body.reasoning_effort,...(body.bridge_thinking_disabled?{thinking:{type:'disabled'}}:{}),
     abortController:controller,pathToCodebuddyCode:join(cfg.root??resolve(import.meta.dirname,'..'),'scripts/runtime-launcher.mjs'),executable:process.execPath,env,stderr:onStderr};
 }
 export class SdkTransport {
   constructor(cfg,auth,{run=query}={}){
     this.cfg=cfg;this.auth=auth;this.run=run;this.pool=new ContextPool(cfg);this.failures=new Map();
     this.warm=new WarmRuntimes({ttlMs:cfg.prewarmMs??0,max:cfg.maxWarm??4});this.pool.onRemove=record=>this.warm.discard(record.id);
-    this.metrics={started:0,completed:0,deniedTools:0,hostCalls:0,decodedDsml:0,replays:0,correctionCalls:0,recoveredRequests:0,localDecisionRepairs:0,lastFailure:null,warm:this.warm.stats};
+    this.blank=new WarmRuntimes({ttlMs:cfg.prewarmMs??0,max:cfg.maxBlankWarm??0});this.blankPending=false;
+    this.metrics={started:0,completed:0,deniedTools:0,hostCalls:0,decodedDsml:0,replays:0,correctionCalls:0,recoveredRequests:0,localDecisionRepairs:0,lastFailure:null,warm:this.warm.stats,blankWarm:this.blank.stats};
   }
-  async close(){this.warm.close();await this.pool.close();}
+  async close(){this.closed=true;this.warm.close();this.blank.close();await this.pool.close();}
+  optionsKey(body,credential,native){return {native,model:body.model,publicModel:body.bridge_public_model,nativeContextWindow:body.bridge_native_context_window,effort:body.reasoning_effort,max:body.max_tokens,tools:body.tools??[],choice:body.tool_choice,format:body.response_format,thinking:body.bridge_thinking_disabled,prompts:this.cfg.hostPrompts,token:credential.accessToken,uid:credential.uid,domain:credential.domain};}
   warmKey(record,body,credential,native){
-    return digest({native,model:body.model,effort:body.reasoning_effort,max:body.max_tokens,tools:native?hostTools(body):null,
-      session:record.sessionId,dir:record.dir,token:credential.accessToken,uid:credential.uid,domain:credential.domain});
+    return digest({...this.optionsKey(body,credential,native),session:record.sessionId,dir:record.dir});
+  }
+  createWarm(body,credential,native,dir,sessionId=null){
+    const controller=new AbortController(),input=promptQueue();let sink=()=>{},denied=()=>{};
+    const options=sdkOptions(this.cfg,credential,body,dir,controller,name=>denied(name),s=>sink(s),{native});
+    options.persistSession=true;if(sessionId)options.resume=sessionId;
+    const q=this.run({prompt:input.iterable,options});
+    const handle={dir,query:q,controller,failed:false,push:text=>input.push(userMessage(text)),setStderr:f=>{sink=f;},setDenied:f=>{denied=f;},ready:Promise.resolve().then(()=>q.connect?.())};
+    handle.ready.catch(()=>{handle.failed=true;});
+    handle.close=()=>{input.end();controller.abort();q.cleanup?.();handle.ready.then(()=>q.cleanup?.(),()=>q.cleanup?.());};
+    return handle;
+  }
+  // Empty runtimes have never received a prompt or resume ID. Only fresh conversations may adopt them.
+  async prewarmBlank(body,credential,native){
+    if(this.closed||this.blankPending||this.blank.size||!this.blank.ttlMs||!this.blank.max||hasUsableTools(body))return;
+    this.blankPending=true;const dir=join(this.cfg.runtime,'sdk',randomUUID());
+    try{
+      await mkdir(dir,{recursive:true});await writeFile(join(dir,'.bridge-owner.json'),JSON.stringify({pid:process.pid}),{mode:0o600});
+      if(this.closed)return;
+      const started=this.blank.start('blank',digest(this.optionsKey(body,credential,native)),()=>{
+        const handle=this.createWarm(body,credential,native,dir),close=handle.close;
+        handle.close=()=>{close();if(!handle.adopted)void handle.ready.finally(()=>rm(dir,{recursive:true,force:true})).catch(()=>{});};return handle;
+      });
+      if(started)return;
+    }finally{this.blankPending=false;if(![...this.blank.entries.values()].some(e=>e.handle.dir===dir))await rm(dir,{recursive:true,force:true});}
   }
   /** Boot the runtime for this session's next turn while the host executes the tool calls. */
   prewarm(record,body,credential,native){
@@ -61,27 +98,20 @@ export class SdkTransport {
     setTimeout(()=>{
       if(record.busy||record.sessionId!==sessionId||this.pool.closed||this.pool.records.get(record.id)!==record)return;
       this.warm.start(record.id,this.warmKey(record,body,credential,native),()=>{
-        const controller=new AbortController(),input=promptQueue();let sink=()=>{},denied=()=>{};
-        const options=sdkOptions(this.cfg,credential,body,record.dir,controller,name=>{if(!native)this.metrics.deniedTools++;denied(name);},s=>sink(s),{native});
-        options.persistSession=true;options.resume=sessionId;
-        const q=this.run({prompt:input.iterable,options});
-        const handle={query:q,controller,failed:false,push:text=>input.push(userMessage(text)),setStderr:f=>{sink=f;},setDenied:f=>{denied=f;},
-          ready:Promise.resolve().then(()=>q.connect?.())};
-        handle.ready.catch(()=>{handle.failed=true;});
-        // An unused query has no running iterator to end it. The SDK's cleanup() stops its runtime
-        // and releases the session lock, so repeat it once a late initialize has settled.
-        handle.close=()=>{input.end();controller.abort();q.cleanup?.();handle.ready.then(()=>q.cleanup?.(),()=>q.cleanup?.());};
-        return handle;
+        return this.createWarm(body,credential,native,record.dir,sessionId);
       });
     },WARM_DELAY_MS).unref?.();
   }
   async takeWarm(record,body,credential,native,signal){
-    const handle=this.warm.take(record.id,this.warmKey(record,body,credential,native));if(!handle)return null;
+    const fresh=!record.sessionId&&!record.history.length;
+    const owner=fresh?this.blank:this.warm;
+    const handle=fresh?owner.take('blank',digest(this.optionsKey(body,credential,native))):owner.take(record.id,this.warmKey(record,body,credential,native));if(!handle)return null;
     let timer;const timeout=new Promise((_,reject)=>{timer=setTimeout(()=>reject(new Error('Prestarted runtime did not become ready')),WARM_READY_MS);});
     try{await abortable(Promise.race([handle.ready,timeout]),signal);}
-    catch(error){this.warm.fail(handle);if(signal.aborted)throw error;return null;}
+    catch(error){owner.fail(handle);if(signal.aborted)throw error;return null;}
     finally{clearTimeout(timer);}
-    if(handle.failed){this.warm.fail(handle);return null;}
+    if(handle.failed){owner.fail(handle);return null;}
+    if(fresh){await rm(record.dir,{recursive:true,force:true});record.dir=handle.dir;handle.blank=true;handle.adopted=true;}
     return handle;
   }
   async chat(body,signal,context={}){
@@ -99,7 +129,7 @@ export class SdkTransport {
     }
     const lease=await this.pool.acquire(body,credential,signal,{mode});const {record,metrics}=lease;
     Object.assign(metrics,{toolMode:mode,attempts:[],firstTextMs:null,firstThinkingMs:null,firstModelEventMs:null,warmStart:false,runtimeReadyMs:null});
-    let prompt=native?nativeInput(body,{messages:lease.messages,delta:lease.reused}):decisionInput(body,{messages:lease.messages,toolsReused:lease.toolsReused,delta:lease.reused});
+    let prompt=native?nativeInput(body,{messages:lease.messages,delta:lease.reused,batching:this.cfg.nativeBatching!==false}):decisionInput(body,{messages:lease.messages,toolsReused:lease.toolsReused,delta:lease.reused});
     metrics.promptCharacters=prompt.length;metrics.fullPromptCharacters=(native?nativeInput(body):decisionInput(body)).length;
     metrics.charactersAvoided=Math.max(0,metrics.fullPromptCharacters-prompt.length);
     if(lease.replay)Object.assign(metrics,{historyMode:'replay',sentMessageCount:0,promptCharacters:0,charactersAvoided:0});
@@ -143,10 +173,10 @@ export class SdkTransport {
               const deniedTools=new Set();let deniedToolCount=0;
               const onDenied=name=>{deniedToolCount++;if(typeof name==='string')deniedTools.add(/^[\w.:-]{1,160}$/.test(name)?name:'<invalid-tool-name>');};
               const needsTool=body.tool_choice==='required'||typeof body.tool_choice==='object';
-              if(native)gate=new NativeTextGate(text=>send(chunk({content:text})),{enabled:!needsTool&&!carried,params,structured:structuredResponse(body),canStreamFinal:this.cfg.canStreamFinal});
-              else projector=new FinalTextProjector(text=>send(chunk({content:text})),{enabled:!needsTool,canStream:this.cfg.canStreamFinal});
+              if(native)gate=new NativeTextGate(text=>send(chunk({content:text})),{enabled:!needsTool&&!carried&&!structuredResponse(body),params,structured:structuredResponse(body),canStreamFinal:this.cfg.canStreamFinal});
+              else projector=new FinalTextProjector(text=>send(chunk({content:text})),{enabled:!needsTool&&!structuredResponse(body),canStream:this.cfg.canStreamFinal});
               const stderr=s=>{runtimeStderr=(runtimeStderr+s).slice(-3000);};
-              const warm=attempt===0&&native&&!warmFailed?await this.takeWarm(record,body,credential,native,signal):null;
+              const warm=attempt===0&&!warmFailed?await this.takeWarm(record,body,credential,native,signal):null;
               this.metrics.started++;if(attempt){this.metrics.correctionCalls++;metrics.correctionCalls=(metrics.correctionCalls??0)+1;}
               let relay=null;
               if(warm){
@@ -214,7 +244,7 @@ export class SdkTransport {
                 }
               }catch(error){
                 // A prestarted runtime that failed before initializing is replaced once, cold.
-                if(warm&&!initialized&&!signal.aborted&&!(error instanceof BridgeError)&&!/^\s*(?:HTTP\s*)?429\b/.test(String(error?.message??''))){this.warm.fail(warm);warmFailed=true;metrics.warmStart=false;metrics.warmFailed=true;attempt--;continue;}
+                if(warm&&!initialized&&!signal.aborted&&!(error instanceof BridgeError)&&!/^\s*(?:HTTP\s*)?429\b/.test(String(error?.message??''))){(warm.blank?this.blank:this.warm).fail(warm);warmFailed=true;metrics.warmStart=false;metrics.warmFailed=true;attempt--;continue;}
                 // A native host call ends with the runtime's own stop after its denial; the call is complete.
                 closeCall();
                 if(native&&expectedCallStop(error))metrics.nativeStop=observation();
@@ -226,6 +256,8 @@ export class SdkTransport {
               closeCall();
               const result=output.result;
               usages.push(normalizedUsage({usage:output.usage(attemptPriorUsage,{resumed:attemptResumed})}));usageRecorded=true;
+              const nativeWindow=body.bridge_native_context_window,latestUsage=usages.at(-1);
+              record.contextUsageRatio=Number.isFinite(nativeWindow)&&nativeWindow>0&&latestUsage?.prompt_tokens>0?latestUsage.total_tokens/nativeWindow:null;
               snapshotUsage();
               if(result?.usage)record.lastSdkUsage=result.usage;
               else if(stoppedAtCall||stoppedEmpty)record.lastSdkUsage=addSdkUsage(attemptResumed?record.lastSdkUsage:{input_tokens:0,output_tokens:0,cache_read_input_tokens:0,cache_creation_input_tokens:0},output.usage(attemptPriorUsage,{resumed:attemptResumed}));
@@ -292,13 +324,13 @@ export class SdkTransport {
               if(content)deltas.push({content});message.content=content||null;
             }else if(decision.action==='final')deltas.push({content:decision.content});
             else if(decision.content){send(chunk({content:decision.content}));deltas.push({content:decision.content});}
-            let echo=!native||!!decision.textCalls;
+            let echo=native&&!decision.textCalls?'native':true;
             if(decision.action==='tool_calls'){
               const used=new Set();
-              // Native calls keep the runtime's IDs, so the host's results match the native transcript.
+              // Echo the exact dispatched batch next turn, including any host-assigned replacement IDs.
               const calls=decision.calls.map(call=>{
                 let callId=native&&!decision.textCalls&&typeof call.id==='string'&&/^[A-Za-z0-9_.:-]{1,128}$/.test(call.id)&&!used.has(call.id)?call.id:null;
-                if(!callId){callId=`call_${randomUUID().replaceAll('-','')}`;echo=true;}
+                if(!callId)callId=`call_${randomUUID().replaceAll('-','')}`;
                 used.add(callId);return {id:callId,type:'function',function:{name:call.name,arguments:JSON.stringify(call.arguments)}};
               });
               message.tool_calls=calls;
@@ -342,6 +374,7 @@ export class SdkTransport {
             if(!success||!record.sessionId)await lease.discard();lease.release();
             if(!closed){closed=true;sink.close();}
             if(prewarmNext)this.prewarm(record,body,credential,native);
+            if(success)void this.prewarmBlank(body,credential,native).catch(()=>{});
           }
         })();
       },

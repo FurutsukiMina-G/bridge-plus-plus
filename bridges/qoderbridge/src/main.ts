@@ -59,6 +59,7 @@ Native tool-result replay runs after interception passes; history auditing remai
     sessionSettings: values['session-settings'] ? JSON.stringify(JSON.parse(await readFile(values['session-settings'], 'utf8'))) : undefined,
     cacheUsage: values['cache-usage'] as Config['cacheUsage'],
     decisionRetries:Number(values['decision-retries']),
+    prunedHistoryReuseRatio:process.env.QODERBRIDGE_PRUNED_HISTORY_REUSE_RATIO===undefined?undefined:Number(process.env.QODERBRIDGE_PRUNED_HISTORY_REUSE_RATIO),
     reasoningGuardTokens,
     system: values['system-file'] ? await readFile(values['system-file'], 'utf8') :
       'Follow the user request directly. The host owns planning and tool execution. Be concise.',

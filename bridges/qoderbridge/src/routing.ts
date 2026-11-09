@@ -2,22 +2,22 @@ import type { ChatRequest } from './compat.js';
 import {conversationMessages} from './compat.js';
 import {createHash} from 'node:crypto';
 import {isDeepStrictEqual} from 'node:util';
+import {historyReset,toolPrunedPrefix,type HistoryEntry} from './history-pruning.js';
+const stable=(value:unknown):unknown=>Array.isArray(value)?value.map(stable):value&&typeof value==='object'?Object.fromEntries(Object.entries(value).sort(([a],[b])=>a.localeCompare(b)).map(([k,v])=>[k,stable(v)])):value;
+export function historyEntries(messages:ChatRequest['messages']):HistoryEntry[]{return conversationMessages(messages).map(m=>({
+  key:createHash('sha256').update(JSON.stringify(stable(m))).digest('hex'),role:m.role,...m.tool_call_id?{toolId:m.tool_call_id}:{},
+  callIds:(m.tool_calls??[]).flatMap(c=>c&&typeof c==='object'&&'id' in c&&typeof c.id==='string'?[c.id]:[]),
+}));}
+export function prunedConversationPrefix(previous:ChatRequest['messages'],current:ChatRequest['messages']){return toolPrunedPrefix(historyEntries(previous),historyEntries(current));}
 
 export function hasConversationPrefix(previous: ChatRequest['messages'], current: ChatRequest['messages']) {
   return current.length >= previous.length &&
     isDeepStrictEqual(conversationMessages(current.slice(0, previous.length)),conversationMessages(previous));
 }
 
-/** Counts and hashes only: diagnose history resets without retaining another copy of user text. */
+/** Counts and roles only: do not copy user text into reset diagnostics. */
 export function prefixIssue(previous: ChatRequest['messages'], current: ChatRequest['messages']) {
-  const before=conversationMessages(previous),after=conversationMessages(current);
-  let at=0;while(at<Math.min(before.length,after.length)&&isDeepStrictEqual(before[at],after[at]))at++;
-  if(at===before.length)return null;
-  const stamp=(value:unknown)=>value===undefined?null:createHash('sha256').update(JSON.stringify(value)).digest('hex');
-  return {reason:after.length<before.length?'history_shortened':'history_rewritten',first_changed_index:at,
-    previous_message_count:before.length,current_message_count:after.length,
-    previous_role:before[at]?.role??null,current_role:after[at]?.role??null,
-    previous_sha256:stamp(before[at]),current_sha256:stamp(after[at])};
+  return historyReset(historyEntries(previous),historyEntries(current));
 }
 
 export function routeConversation(

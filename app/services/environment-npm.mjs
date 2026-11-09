@@ -3,6 +3,7 @@ import {join,dirname,resolve,delimiter} from 'node:path';
 import {homedir} from 'node:os';
 import {createServer} from 'node:http';
 import {randomBytes} from 'node:crypto';
+import {once} from 'node:events';
 import {httpsUrl} from './environment-utils.mjs';
 import {withIdleResponse} from './download-stream.mjs';
 export async function findNpmCli({root=resolve(import.meta.dirname,'../..'),resources=process.resourcesPath,node=process.execPath}={}){
@@ -12,32 +13,47 @@ export async function findNpmCli({root=resolve(import.meta.dirname,'../..'),reso
 // npm resolves/extracts dependencies locally; every remote byte goes through
 // Electron net.fetch, including redirected tarballs, so the system proxy works.
 export async function npmRegistryProxy({registry,fetchImpl,signal,onProgress=()=>{},idleTimeoutMs=60000,qoderRuntime=false}){
- const origin=httpsUrl(registry).origin,token=randomBytes(24).toString('hex'),active=new Set();let received=0;
+ const origin=httpsUrl(registry).origin,token=randomBytes(24).toString('hex'),active=new Set();let received=0,lastFailure=null;
  const rewrite=(value,base)=>{if(Array.isArray(value))return value.map(v=>rewrite(v,base));if(value&&typeof value==='object'){const result={...value};if(result.dist?.tarball){const target=httpsUrl(result.dist.tarball).href;result.dist={...result.dist,tarball:base+'tarball/'+encodeURIComponent(target)};}for(const key of Object.keys(result))if(key!=='dist')result[key]=rewrite(result[key],base);return result;}return value;};
- const server=createServer((req,res)=>{const controller=new AbortController();active.add(controller);const downloadSignal=signal?AbortSignal.any([signal,controller.signal]):controller.signal;res.on('close',()=>{if(!res.writableEnded)controller.abort();});void(async()=>{if(req.method!=='GET'||req.headers.origin!==undefined||!/^127\.0\.0\.1:\d+$/.test(req.headers.host??'')||!req.url?.startsWith('/'+token+'/')){res.writeHead(403);res.end();return;}const path=req.url.slice(token.length+2);const tar=path.startsWith('tarball/'),target=tar?httpsUrl(decodeURIComponent(path.slice(8))).href:origin+'/'+path;
+ const server=createServer((req,res)=>{const controller=new AbortController();active.add(controller);let remote;const downloadSignal=signal?AbortSignal.any([signal,controller.signal]):controller.signal;res.on('close',()=>{if(!res.writableEnded)controller.abort();});void(async()=>{if(req.method!=='GET'||req.headers.origin!==undefined||!/^127\.0\.0\.1:\d+$/.test(req.headers.host??'')||!req.url?.startsWith('/'+token+'/')){res.writeHead(403);res.end();return;}const path=req.url.slice(token.length+2);const tar=path.startsWith('tarball/'),target=tar?httpsUrl(decodeURIComponent(path.slice(8))).href:origin+'/'+path;
    // Tarball destinations are supplied by registry metadata, not renderer IPC.
    if(tar&&!knownTarballs.has(target)){res.writeHead(403);res.end();return;}
    const worker=path.startsWith('qoder-runtime/');if(worker&&(!qoderRuntime||!/^qoder-runtime\/releases\/1\.1\.64\/qoderclicn-worker-runtime-(?:win32|darwin|linux)-(?:x64|arm64)\.tgz(?:\.sha256)?$/.test(path))){res.writeHead(403);res.end();return;}
-   const remote=worker?'https://static.qoder.com.cn/qoder-cli-cn/'+path.slice('qoder-runtime/'.length):target;
-   const bytes=await withIdleResponse(fetchImpl,remote,{signal:downloadSignal,idleTimeoutMs},async(_response,chunks)=>{const buffers=[];let size=0;for await(const chunk of chunks){size+=chunk.length;if(size>(tar||worker?150*1024*1024:16*1024*1024))throw new Error('下载内容超过允许大小');buffers.push(Buffer.from(chunk));received+=chunk.length;onProgress(received,null);}return Buffer.concat(buffers);});
-   if(tar||worker){res.setHeader('content-type','application/octet-stream');res.end(bytes);}else{const data=JSON.parse(bytes.toString('utf8'));const collect=value=>{if(value&&typeof value==='object'){if(value.dist?.tarball)knownTarballs.add(httpsUrl(value.dist.tarball).href);for(const v of Object.values(value))if(v&&typeof v==='object')collect(v);}};collect(data);res.setHeader('content-type','application/json');res.end(JSON.stringify(rewrite(data,base)));}
- })().catch(()=>{if(!res.headersSent)res.writeHead(502);res.end();}).finally(()=>active.delete(controller));});const knownTarballs=new Set();await new Promise((r,j)=>{server.once('error',j);server.listen(0,'127.0.0.1',r);});const base='http://127.0.0.1:'+server.address().port+'/'+token+'/';return {base,allowTarball(target){knownTarballs.add(httpsUrl(target).href);},async close(){for(const controller of active)controller.abort();server.closeAllConnections();await new Promise(r=>server.close(r));}};
+   remote=worker?'https://static.qoder.com.cn/qoder-cli-cn/'+path.slice('qoder-runtime/'.length):target;
+   if(tar||worker){
+     await withIdleResponse(fetchImpl,remote,{signal:downloadSignal,idleTimeoutMs},async(response,chunks,upstreamSignal)=>{
+       const limit=150*1024*1024;if(Number(response.headers.get('content-length'))>limit)throw new Error('下载内容超过允许大小');
+       res.setHeader('content-type','application/octet-stream');let size=0;
+       for await(const chunk of chunks){size+=chunk.length;if(size>limit)throw new Error('下载内容超过允许大小');received+=chunk.length;onProgress(received,null);
+         if(!res.write(chunk))await once(res,'drain',{signal:upstreamSignal});
+       }
+     });res.end();
+   }else{
+     const bytes=await withIdleResponse(fetchImpl,remote,{signal:downloadSignal,idleTimeoutMs},async(_response,chunks)=>{const buffers=[];let size=0;for await(const chunk of chunks){size+=chunk.length;if(size>16*1024*1024)throw new Error('下载内容超过允许大小');buffers.push(Buffer.from(chunk));received+=chunk.length;onProgress(received,null);}return Buffer.concat(buffers);});
+     const data=JSON.parse(bytes.toString('utf8'));const collect=value=>{if(value&&typeof value==='object'){if(value.dist?.tarball)knownTarballs.add(httpsUrl(value.dist.tarball).href);for(const v of Object.values(value))if(v&&typeof v==='object')collect(v);}};collect(data);res.setHeader('content-type','application/json');res.end(JSON.stringify(rewrite(data,base)));
+   }
+ })().catch(error=>{
+   const url=new URL(remote??origin);let filename=url.pathname.split('/').at(-1)||'registry metadata';try{filename=decodeURIComponent(filename);}catch{}filename=filename.replace(/[\x00-\x1f\x7f]/g,'').slice(-180);
+   lastFailure=`下载文件 ${filename} 在镜像 ${url.hostname} ${/超时|timeout/i.test(error.message)?'超时':'失败'}：${downloadSignal.aborted?'下载已取消':error.message}`;
+   if(!res.headersSent){res.writeHead(502,{'content-type':'text/plain; charset=utf-8'});res.end(lastFailure);}else res.destroy();
+ }).finally(()=>active.delete(controller));});const knownTarballs=new Set();await new Promise((r,j)=>{server.once('error',j);server.listen(0,'127.0.0.1',r);});const base='http://127.0.0.1:'+server.address().port+'/'+token+'/';return {base,lastFailure:()=>lastFailure,allowTarball(target){knownTarballs.add(httpsUrl(target).href);},async close(){for(const controller of active)controller.abort();server.closeAllConnections();await new Promise(r=>server.close(r));}};
 }
 export async function installPackageNpm({directory,package:packageName,version,registry,node,npm,fetchImpl,execute,signal,onProgress,scripts=false,qoderRuntime=false,lock}){
  const locked=lock?JSON.parse(await readFile(lock,'utf8')):null,dependencies=locked?.packages?.['']?.dependencies;if(locked&&dependencies?.[packageName]!==version)throw new Error('组件锁定文件与需要的包版本不一致');
  if(!/^(@[a-z0-9_.-]+\/)?[a-z0-9_.-]+$/.test(packageName)||!/^\d+\.\d+\.\d+(?:-[\w.-]+)?$/.test(version))throw new Error('无效的受管 npm 包或版本');
  await mkdir(directory,{recursive:true});const userRc=join(directory,'user.npmrc'),globalRc=join(directory,'global.npmrc');await writeFile(userRc,'',{mode:0o600});await writeFile(globalRc,'',{mode:0o600});await writeFile(join(directory,'package.json'),JSON.stringify({private:true,...locked?{dependencies}:{}}));await writeFile(join(directory,'.npmrc'),'');
  const proxy=await npmRegistryProxy({registry,fetchImpl,signal,onProgress,qoderRuntime});
+ const executeDownload=async(...args)=>{const result=await execute(...args);return result.code!==0&&proxy.lastFailure()?{...result,stderr:[proxy.lastFailure(),result.stderr].filter(Boolean).join('\n')}:result;};
  // Qoder's official postinstall downloads its Worker outside the registry. Its
  // supported mirror override routes that archive and checksum through net.fetch too.
  const systemRoot=process.env.SystemRoot??process.env.WINDIR??'C:\\Windows';
  const env={...node.env,PATH:[dirname(node.command),...(process.platform==='win32'?[join(systemRoot,'System32'),systemRoot]:String(process.env.PATH??'').split(delimiter))].join(delimiter),HTTP_PROXY:'',HTTPS_PROXY:'',ALL_PROXY:'',http_proxy:'',https_proxy:'',all_proxy:'',NO_PROXY:'127.0.0.1,localhost',npm_config_proxy:'',npm_config_https_proxy:'',npm_config_ignore_scripts:scripts?'false':'true',npm_config_offline:'false',QODER_SKIP_DOWNLOAD:undefined,QODER_SKIP_CHECKSUM:undefined,QODER_WORKER_RUNTIME_URL:undefined,QODER_CLI_VERSION:undefined,QODER_CLI_PLATFORM:undefined,QODER_INSTALL_BUNDLED_CLI:undefined,QODER_CLI_MIRROR:qoderRuntime?proxy.base+'qoder-runtime':undefined};
  try{
   if(locked){const origin=httpsUrl(registry).origin,rewriteUrl=value=>{const source=httpsUrl(value).href,url=new URL(source),mirror=url.origin==='https://registry.npmjs.org'?origin+url.pathname+url.search+url.hash:source;proxy.allowTarball(mirror);return proxy.base+'tarball/'+encodeURIComponent(mirror);},rewrite=value=>{if(Array.isArray(value))return value.map(rewrite);if(value&&typeof value==='object')return Object.fromEntries(Object.entries(value).map(([key,item])=>[key,key==='resolved'&&typeof item==='string'?rewriteUrl(item):rewrite(item)]));return value;};await writeFile(join(directory,'package-lock.json'),JSON.stringify(rewrite(locked)));
-   const result=await execute(node.command,[...node.args,npm.cli,'ci','--prefix',directory,'--registry',proxy.base,'--userconfig',userRc,'--globalconfig',globalRc,'--cache',join(directory,'.npm-cache'),'--noproxy=127.0.0.1,localhost','--ignore-scripts','--engine-strict','--no-audit','--no-fund','--fetch-timeout=0'],{cwd:directory,signal,timeoutMs:0,env:{...env,npm_config_ignore_scripts:'true'}});if(result.code!==0||!qoderRuntime)return result;
-   return await execute(node.command,[...node.args,npm.cli,'rebuild',packageName,'--prefix',directory,'--registry',proxy.base,'--userconfig',userRc,'--globalconfig',globalRc,'--cache',join(directory,'.npm-cache'),'--noproxy=127.0.0.1,localhost','--ignore-scripts=false','--foreground-scripts','--engine-strict','--no-audit','--no-fund'],{cwd:directory,signal,timeoutMs:0,env:{...env,npm_config_ignore_scripts:'false'}});
+   const result=await executeDownload(node.command,[...node.args,npm.cli,'ci','--prefix',directory,'--registry',proxy.base,'--userconfig',userRc,'--globalconfig',globalRc,'--cache',join(directory,'.npm-cache'),'--noproxy=127.0.0.1,localhost','--ignore-scripts','--engine-strict','--no-audit','--no-fund','--fetch-timeout=0'],{cwd:directory,signal,timeoutMs:0,env:{...env,npm_config_ignore_scripts:'true'}});if(result.code!==0||!qoderRuntime)return result;
+   return await executeDownload(node.command,[...node.args,npm.cli,'rebuild',packageName,'--prefix',directory,'--registry',proxy.base,'--userconfig',userRc,'--globalconfig',globalRc,'--cache',join(directory,'.npm-cache'),'--noproxy=127.0.0.1,localhost','--ignore-scripts=false','--foreground-scripts','--engine-strict','--no-audit','--no-fund'],{cwd:directory,signal,timeoutMs:0,env:{...env,npm_config_ignore_scripts:'false'}});
   }
-  return await execute(node.command,[...node.args,npm.cli,'install','--prefix',directory,'--registry',proxy.base,'--userconfig',userRc,'--globalconfig',globalRc,'--cache',join(directory,'.npm-cache'),'--noproxy=127.0.0.1,localhost',scripts?'--ignore-scripts=false':'--ignore-scripts',...(scripts?['--foreground-scripts']:['--omit=optional']),'--engine-strict','--no-audit','--no-fund','--no-save','--no-package-lock','--fetch-timeout=0',`${packageName}@${version}`],{cwd:directory,signal,timeoutMs:0,env});
+  return await executeDownload(node.command,[...node.args,npm.cli,'install','--prefix',directory,'--registry',proxy.base,'--userconfig',userRc,'--globalconfig',globalRc,'--cache',join(directory,'.npm-cache'),'--noproxy=127.0.0.1,localhost',scripts?'--ignore-scripts=false':'--ignore-scripts',...(scripts?['--foreground-scripts']:['--omit=optional']),'--engine-strict','--no-audit','--no-fund','--no-save','--no-package-lock','--fetch-timeout=0',`${packageName}@${version}`],{cwd:directory,signal,timeoutMs:0,env});
  }finally{await proxy.close();}
 }
 export function installKimiNpm(options){return installPackageNpm({...options,package:'@moonshot-ai/kimi-code',scripts:false});}

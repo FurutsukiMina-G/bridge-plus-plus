@@ -17,6 +17,7 @@ import {Terminals} from './services/terminals.mjs';
 import {codexLaunchSettings} from './runtimes/codex.mjs';
 import {writeNativeLauncher,cleanupNativeLaunchers,quotePowerShell} from './services/native-launch.mjs';
 import {usageForDisplay} from './services/usage-view.mjs';
+import {coalesceSessionEvents} from './services/session-events.mjs';
 import {withRuntimePermissions,saveRuntimePermission,antigravityPermissionArgs,validatePermissionMode} from './services/runtime-permissions.mjs';
 import {MediaService,MEDIA_MIMES} from './services/media.mjs';
 import {withRuntimeMedia,MAX_ATTACHMENTS_PER_TURN} from './services/media-capabilities.mjs';
@@ -96,8 +97,9 @@ const methods={
   async 'preference:theme'({theme}){if(!['system','light','dark'].includes(theme))throw new Error('Invalid theme');await store.mutate(s=>{s.preferences.theme=theme;});applyChrome();},
   async 'preference:save'({modelKey,value}){if(typeof modelKey!=='string'||!value||typeof value!=='object')throw new Error('Invalid preference');await store.mutate(s=>{s.preferences.modelDefaults[modelKey]={runtimeId:value.runtimeId,nativeModel:value.nativeModel,reasoning:value.reasoning,contextTokens:value.contextTokens,contextBudget:value.contextBudget};});},
   async 'session:create'(args){return sessions.create(args);},
-  async 'session:events'({sessionId}){const key=id(sessionId),source=store.session(key).selection?.modelKey?.split(':')[0];return (await store.events(key)).map(e=>usageForDisplay(e,source));},
-  async 'session:prompt'({sessionId,text='',attachments=[]}){await sessions.prompt(id(sessionId),text,attachments);return true;},
+  async 'session:events'({sessionId}){const key=id(sessionId),source=store.session(key).selection?.modelKey?.split(':')[0];return coalesceSessionEvents(await store.events(key)).map(e=>usageForDisplay(e,source));},
+  async 'session:prompt'({sessionId,text='',attachments=[],delivery}){return sessions.prompt(id(sessionId),text,attachments,{delivery});},
+  async 'session:dequeue'({sessionId,queueId}){return sessions.dequeue(id(sessionId),id(queueId));},
   async 'attachment:capabilities'({runtimeId,selection}){return attachmentCapabilities(id(runtimeId),selection);},
   async 'attachment:stage'({projectId,name,data}){return media.stage({projectId:id(projectId),name,data});},
   async 'attachment:pick'({projectId,kinds=['image']}){store.project(id(projectId));if(!Array.isArray(kinds)||!kinds.length||kinds.some(k=>!Object.hasOwn(MEDIA_MIMES,k)))throw new Error('无效媒体类型');const extensions={image:['png','jpg','jpeg','gif','webp'],audio:['wav','mp3','ogg','flac'],video:['mp4','webm']};const result=await dialog.showOpenDialog(window,{title:'选择媒体附件',properties:['openFile','multiSelections'],filters:[{name:'媒体文件',extensions:kinds.flatMap(k=>extensions[k])}]});if(result.canceled)return [];const staged=[];try{if(result.filePaths.length>MAX_ATTACHMENTS_PER_TURN)throw new Error(`最多选择 ${MAX_ATTACHMENTS_PER_TURN} 个附件`);for(const path of result.filePaths)staged.push(await media.stageFile(projectId,path,kinds));return staged;}catch(error){for(const a of staged)await media.discard(a.id);throw error;}},

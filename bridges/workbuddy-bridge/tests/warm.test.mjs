@@ -78,3 +78,25 @@ test('final answers start no runtime, and prestarting can be disabled',async t=>
   const final=await fixture(t,[{text:'All done.'}]);await collect(final.transport,body);await sleep(450);assert.equal(final.runs.length,1);
   const disabled=await fixture(t,[call],{prewarmMs:0});await collect(disabled.transport,body);await sleep(450);assert.equal(disabled.runs.length,1);
 });
+test('one bounded blank runtime serves only a fresh matching conversation and closes on shutdown',async t=>{
+  const runtime=await mkdtemp(join(tmpdir(),'wb-blank-')),runs=[];
+  const run=({prompt,options})=>{
+    const entry={options,prestarted:typeof prompt!=='string',cleaned:0};runs.push(entry);
+    return Object.assign((async function*(){
+      entry.prompt=typeof prompt==='string'?prompt:(await prompt[Symbol.asyncIterator]().next()).value.message.content;
+      yield {type:'system',subtype:'init',model,session_id:'session-'+runs.indexOf(entry),mcp_servers:[]};
+      yield {type:'assistant',message:{model,content:[{type:'text',text:'{"risk":"low","decision":"allow"}'}]}};
+      yield {type:'result',subtype:'success',is_error:false};
+    })(),{connect:async()=>{},cleanup:()=>{entry.cleaned++;}});
+  };
+  const transport=new SdkTransport({runtime,cliPath:process.execPath,toolMode:'native',prewarmMs:5000,maxBlankWarm:1},{get:async()=>credential},{run});
+  t.after(async()=>{await transport.close();await rm(runtime,{recursive:true,force:true});});
+  const request={...body,tools:[],prompt_cache_key:undefined,response_format:{type:'json_object'}};
+  const first=await collect(transport,request);await sleep(100);assert.equal(runs.length,2);assert.equal(runs[1].options.resume,undefined);
+  const second=await collect(transport,{...request,messages:[{role:'user',content:'new synthetic audit'}]});await sleep(100);
+  assert.equal(second.metrics.warmStart,true);assert.equal(runs[1].options.resume,undefined);assert.match(runs[1].prompt,/new synthetic audit/);
+  assert.equal(transport.blank.size,1);assert.equal(transport.blank.stats.used,1);
+  await collect(transport,{...request,prompt_cache_key:'resumed',messages:[...request.messages,first.result.choices[0].message,{role:'user',content:'resume check'}],reasoning_effort:'high'});await sleep(100);
+  assert.ok(transport.blank.stats.discarded>=1,'different effort discards the unmatched blank');
+  await transport.close();assert.equal(transport.blank.size,0);assert.ok(runs.at(-1).cleaned>0);
+});
