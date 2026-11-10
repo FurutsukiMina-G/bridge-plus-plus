@@ -11,7 +11,7 @@ export type BridgeModel = { id: string; runtimeId: string; name: string; context
   efforts: readonly string[] };
 /**
  * Runtime IDs verified against the authenticated Qoder CN catalog. Missing IDs fail closed. Each context
- * window is its own public model so a Harness model picker can switch it (and its compaction threshold);
+ * window is its own public model so a client model picker can switch it (and its compaction threshold);
  * the original 1M IDs stay first and unchanged for existing sessions.
  */
 export const BRIDGE_MODELS: readonly [BridgeModel, BridgeModel, ...BridgeModel[]] = [

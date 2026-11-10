@@ -25,9 +25,9 @@ async function writeBoundedEvidence(folder,name,owned,base,output,credential){
   }catch{return null;}
 }
 /** Bounded private MODEL OUTPUT evidence for rejected attempts, never host input. */
-export async function rejectedEvidence(cfg,{requestId,model,attempt,errorCode,output,credential}){
-  return writeBoundedEvidence(join(cfg.runtime,'rejected-decisions'),`${Date.now()}-${randomUUID()}-attempt-${attempt}.json`,rejectedOwned,{requestId,model,attempt,errorCode,summary:output.summary()},output,credential);
+export async function rejectedEvidence(cfg,{requestId,model,attempt,errorCode,output,credential,issue}){
+  return writeBoundedEvidence(join(cfg.runtime,'rejected-decisions'),`${Date.now()}-${randomUUID()}-attempt-${attempt}.json`,rejectedOwned,{requestId,model,attempt,errorCode,...(issue?{issue}:{}),summary:output.summary()},output,credential);
 }
-export async function decisionErrorEvidence(cfg,{requestId,model,errorCode,output,credential}){
-  return writeBoundedEvidence(join(cfg.runtime,'decision-errors'),`${Date.now()}-${randomUUID()}.json`,errorOwned,{requestId,model,errorCode,summary:output.summary()},output,credential);
+export async function decisionErrorEvidence(cfg,{requestId,model,errorCode,output,credential,issue}){
+  return writeBoundedEvidence(join(cfg.runtime,'decision-errors'),`${Date.now()}-${randomUUID()}.json`,errorOwned,{requestId,model,errorCode,...(issue?{issue}:{}),summary:output.summary()},output,credential);
 }

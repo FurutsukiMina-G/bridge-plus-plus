@@ -94,8 +94,9 @@ export class Store extends EventEmitter {
   async event(sessionId,event){
     this.session(sessionId);const value={...event,id:event.type==='media'&&validId(event.id)?event.id:randomUUID(),at:new Date().toISOString(),sessionId};
     await this.enqueue(async()=>{
-      const stream=['thinking','text'].includes(value.type)&&typeof value.text==='string',prior=this.streamBuffers.get(sessionId);
-      const same=stream&&prior&&['type','attemptId','turnId','itemId'].every(key=>prior.value[key]===value[key]);
+      // Merge only plain text chunks; a native payload (data) keeps one record per event.
+      const stream=(['thinking','text'].includes(value.type)||value.type==='tool-output'&&value.data===undefined)&&typeof value.text==='string',prior=this.streamBuffers.get(sessionId);
+      const same=stream&&prior&&['type','attemptId','turnId','itemId','toolId'].every(key=>prior.value[key]===value[key]);
       if(prior&&!same)await this.flushStream(sessionId);
       if(!stream){await this.writeEvent(sessionId,value);return;}
       const current=this.streamBuffers.get(sessionId);

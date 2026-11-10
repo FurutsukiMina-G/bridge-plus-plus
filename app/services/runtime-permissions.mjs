@@ -11,6 +11,13 @@ export function successfulPermissionProbes(){return new Map(durable);}
 const labels={ask:'每次询问','auto-review':'自动审查',auto:'一键授权',readonly:'只读'};
 const mode=(id,description,native)=>({id,label:labels[id],description,native});
 export const KIMI_PERMISSION_IDS={ask:'default','auto-review':'auto',auto:'yolo',readonly:'plan'};
+export const CLAUDE_PERMISSION_MODES={ask:'default','auto-review':'auto',auto:'bypassPermissions',readonly:'plan'};
+const CLAUDE_NATIVE_MODES=['default','acceptEdits','auto','bypassPermissions','dontAsk','plan','manual'];
+export function claudePermissionModes(help,error=''){
+  let section=/--permission-mode\b/.exec(help)?.index;if(section!==undefined){section=help.slice(section).split(/\n\s*--/)[0];if(!/choices\s*:|\|/i.test(section))section='';}
+  for(const text of [section,error])if(typeof text==='string'&&text){const modes=CLAUDE_NATIVE_MODES.filter(mode=>new RegExp(`(?<![A-Za-z])${mode}(?![A-Za-z])`).test(text));if(modes.length)return modes;}
+  return [];
+}
 export const DSH_PERMISSION_PRESETS={readonly:'read-only',ask:'workspace-write','auto-review':'auto',auto:'danger-full-access'};
 export function codexPermissionSettings(mode){
   if(mode==null)return {};
@@ -60,6 +67,11 @@ export function permissionCatalog(runtime,evidence={}){
   if(runtime.id==='kimi')for(const [id,native]of Object.entries(KIMI_PERMISSION_IDS))if(evidence.modes?.availableModes?.some(m=>m.id===native)){
     const descriptions={ask:'ACP session/set_mode=default；原生审批在 Bridge++ 中询问。','auto-review':'ACP session/set_mode=auto；原生自动允许安全操作，其余审批在 Bridge++ 中询问。',auto:'ACP session/set_mode=yolo；原生自动允许操作，沿用原生工具边界，不新增操作系统沙箱。',readonly:'ACP session/set_mode=plan；原生只读规划，禁止工具执行。'};
     modes.push(mode(id,descriptions[id],{modeId:native}));
+  }
+  if(runtime.id==='claude'){
+    // 2.1.319 renamed the ask mode to "manual"; older CLIs still list "default".
+    const available=evidence.modes??[],descriptions={ask:'原生 manual（旧版本叫 default）；写文件和执行命令前在 Bridge++ 里询问。','auto-review':'原生 auto；工作区内的编辑直接执行，其余操作由 Claude Code 原生自动模式判断（会多发模型请求）。',auto:'原生 bypassPermissions；跳过所有权限询问。',readonly:'原生 plan；只读规划，Bridge++ 拒绝所有工具执行请求。'};
+    for(const [id,fallback]of Object.entries(CLAUDE_PERMISSION_MODES)){const native=id==='ask'?available.includes('manual')?'manual':available.includes('default')?'default':null:fallback;if(native&&available.includes(native))modes.push(mode(id,descriptions[id],{mode:native}));}
   }
   if(runtime.id==='antigravity'&&evidence.sandbox){
     if(evidence.auto)modes.push(mode('auto-review','原生 --mode auto --sandbox；由原生 auto 模式决定操作。它要确认的操作（实测包括新建文件）在 Bridge++ 里弹不出确认，这一轮会直接停止；要改文件请选“一键授权”或默认。',{args:antigravityPermissionArgs('auto-review')}));
@@ -120,6 +132,12 @@ async function inspect(runtime){
   const root=await mkdtemp(join(tmpdir(),'bridgepp-permissions-'));
   try{
     const run=(args)=>exec(runtime.executable,args,{windowsHide:true,timeout:20000,maxBuffer:2*1024*1024,env:childEnvironment(),cwd:root});
+    if(runtime.id==='claude'){
+      const {stdout,stderr}=await run(['--help']),help=stdout+stderr;let modes=claudePermissionModes(help),source='installed --help',reason=null;
+      if(!modes.length){source='installed --permission-mode error';try{const result=await run(['--permission-mode','bridgepp-invalid']);modes=claudePermissionModes('',result.stdout+result.stderr);}catch(error){modes=claudePermissionModes('',String(error.stdout??'')+String(error.stderr??'')+String(error.message??''));}}
+      if(!modes.length){modes=['default'];source='default fallback';reason='未能从 Claude Code 帮助或报错中核实权限模式，仅开放原生 default。';}
+      return {version:runtime.version??null,source,modes,...reason?{reason}:{}};
+    }
     if(runtime.id==='antigravity'){
       const {stdout,stderr}=await run(['--help']),help=stdout+stderr;
       return {version:runtime.version??null,sandbox:/--sandbox\b/.test(help),auto:/accept-edits, auto, plan/.test(help),edits:/accept-edits/.test(help),plan:/accept-edits, auto, plan/.test(help),skip:/--dangerously-skip-permissions\b/.test(help)};

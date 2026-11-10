@@ -2,7 +2,7 @@ import type { RecoveryTrace } from './decision-recovery.js';
 import {redactFailure,upstreamText} from './failure-text.js';
 
 export type FailurePhase = 'request' | 'queue' | 'upstream' | 'decision' | 'reporting' | 'delivery';
-export type FailureOrigin = 'account' | 'bridge' | 'model_output' | 'upstream' | 'dsh_request' | 'connection' | 'unknown';
+export type FailureOrigin = 'account' | 'bridge' | 'model_output' | 'upstream' | 'client_request' | 'connection' | 'unknown';
 /** Codes are metadata, not an opportunity to copy provider text/commands into the UI. */
 export function sdkErrorCode(value: unknown): number | string | null {
   return typeof value === 'number' && Number.isSafeInteger(value) ? value
@@ -39,12 +39,12 @@ export function upstreamDiagnosis(errors: unknown[] = [], categories: string[] =
   if (account) return diagnosis('account', account[0], account[1], accountAction, 'sdk_result_error_code');
   const reasons: Record<string, [FailureOrigin, string, string, string]> = {
     '406': ['upstream', 'upstream_policy_blocked', '上游策略拒绝了本次请求。', '检查请求是否符合服务策略；不要自动绕过限制。'],
-    '416': ['dsh_request', 'upstream_request_unsatisfiable', '上游无法满足本次请求的范围或形式。', '检查 DSH 的模型设置和请求参数。'],
-    '430': ['dsh_request', 'upstream_capability_unsupported', '上游不支持本次请求的能力。', '核对 DSH 模型能力配置与 Bridge 支持范围。'],
+    '416': ['client_request', 'upstream_request_unsatisfiable', '上游无法满足本次请求的范围或形式。', '检查客户端的模型设置和请求参数。'],
+    '430': ['client_request', 'upstream_capability_unsupported', '上游不支持本次请求的能力。', '核对客户端模型能力配置与 Bridge 支持范围。'],
     '47902': ['upstream', 'qoder_turn_limit', 'Qoder SDK 达到单次请求轮数上限，未完成模型决策。', '保留请求 ID 排查 SDK 终止原因；不要直接放大轮数。'],
     '48716': ['upstream', 'upstream_hook_blocked', 'Qoder SDK 的 Hook 阻止了请求。', '检查 SDK Hook 和权限规则，不要自动批准或绕过。'],
-    '80411': ['dsh_request', 'upstream_input_too_long', '上游拒绝请求：输入上下文过长。', '检查 DSH 上下文压缩及所选模型窗口。'],
-    '80412': ['dsh_request', 'upstream_too_many_attachments', '上游拒绝请求：附件数量过多。', '减少请求附件并检查客户端配置。'],
+    '80411': ['client_request', 'upstream_input_too_long', '上游拒绝请求：输入上下文过长。', '检查客户端上下文压缩及所选模型窗口。'],
+    '80412': ['client_request', 'upstream_too_many_attachments', '上游拒绝请求：附件数量过多。', '减少请求附件并检查客户端配置。'],
     '500': ['upstream', 'upstream_request_failed', 'Qoder SDK 报告请求或网络失败，尚不能区分网络、SDK 与模型服务。', '凭请求 ID 检查 Bridge 日志和上游状态。'],
     '10408': ['upstream', 'upstream_timeout', '上游报告请求超时。', '检查上游可用性和连接，避免重复提交同一操作。'],
     '10500': ['upstream', 'upstream_service_error', '上游明确报告模型服务内部错误。', '保留请求 ID，待服务恢复后再继续。'],
@@ -65,10 +65,13 @@ export function upstreamDiagnosis(errors: unknown[] = [], categories: string[] =
   return null;
 }
 
-const labels: Record<FailureOrigin, string> = { account: '账号', bridge: 'Bridge', model_output: '模型输出/协议',
-  upstream: '上游服务/SDK', dsh_request: 'DSH/客户端请求', connection: '连接/客户端中断', unknown: '来源未确定' };
+/** `dsh_request` stays readable in reports written by earlier versions. */
+const labels: Record<FailureOrigin | 'dsh_request', string> = { account: '账号', bridge: 'Bridge', model_output: '模型输出/协议',
+  upstream: '上游服务/SDK', client_request: '客户端请求', dsh_request: '客户端请求', connection: '连接/客户端中断', unknown: '来源未确定' };
 export type FailureInput = {
   requestId: string; phase: FailurePhase; accepted: boolean; cause?: unknown;
+  /** Display name of the calling host; absent means a generic client. */
+  hostName?: string;
   abort?: 'deadline' | 'client_disconnect'; early?: 'authentication' | 'route';
   turn?: { sdk_error_code?: number | string | null; sdk_errors?: unknown[]; api_error_categories?: string[];
     sdk_exception?: SDKExceptionDetails | null; result?: string; stage?: string; error?: string | null;
@@ -83,11 +86,15 @@ export function bridgeFailure(input: FailureInput) {
   const causeText = input.cause instanceof Error ? input.cause.message : String(input.cause ?? t?.error ?? '');
   const upstream = upstreamDiagnosis(t?.sdk_errors?.length?t.sdk_errors:[causeText], t?.api_error_categories, sdkCode);
   let d: Diagnosis | null = null;
-  if (input.early === 'authentication') d = diagnosis('dsh_request', 'bridge_authentication_failed', 'DSH 请求使用的 Bridge 本地访问密钥不正确；这不是 Qoder 账号登录错误。', '核对 DSH 模型提供商配置中的 Bridge 密钥。', 'bridge_authentication');
-  else if (input.early === 'route') d = diagnosis('dsh_request', 'bridge_endpoint_not_found', 'DSH 请求的 Bridge 接口或 HTTP 方法不存在。', '核对 DSH 的提供商类型及 base URL。', 'bridge_route');
-  else if (input.abort === 'deadline') d = diagnosis('bridge', 'bridge_request_timeout', '请求达到 Bridge 总时限，已中止等待；不据此认定账号受限或 DSH 故障。', '凭请求 ID 检查排队与上游耗时；不要重复提交未确认的操作。', 'bridge_deadline');
-  else if (input.abort === 'client_disconnect') d = diagnosis('connection', 'client_disconnected', 'DSH/客户端连接已断开，可能是手动取消、客户端退出或连接故障。', '核对 DSH 端的取消记录；Bridge 无法向已断开的连接送达报错。', 'response_closed');
-  else if (!input.accepted) d = diagnosis('dsh_request', 'invalid_request_error', 'DSH 发给 Bridge 的请求未通过格式、模型或工具 schema 校验。', '检查 DSH 模型配置和请求契约；详细校验原因见对应请求日志。', 'request_validation');
+  // One bridge serves several hosts; name the caller instead of assuming DSH.
+  const rawHost = input.hostName?.trim() || '客户端';
+  // A Latin host name needs a separator before following Chinese text; 客户端 does not.
+  const host = /[\u4e00-\u9fff]$/.test(rawHost) ? rawHost : `${rawHost} `;
+  if (input.early === 'authentication') d = diagnosis('client_request', 'bridge_authentication_failed', `${host}请求使用的 Bridge 本地访问密钥不正确；这不是 Qoder 账号登录错误。`, `核对${host}模型提供商配置中的 Bridge 密钥。`, 'bridge_authentication');
+  else if (input.early === 'route') d = diagnosis('client_request', 'bridge_endpoint_not_found', `${host}请求的 Bridge 接口或 HTTP 方法不存在。`, `核对${host}的提供商类型及 base URL。`, 'bridge_route');
+  else if (input.abort === 'deadline') d = diagnosis('bridge', 'bridge_request_timeout', `请求达到 Bridge 总时限，已中止等待；不据此认定账号受限或${host}故障。`, '凭请求 ID 检查排队与上游耗时；不要重复提交未确认的操作。', 'bridge_deadline');
+  else if (input.abort === 'client_disconnect') d = diagnosis('connection', 'client_disconnected', `${host}连接已断开，可能是手动取消、客户端退出或连接故障。`, `核对${host}端的取消记录；Bridge 无法向已断开的连接送达报错。`, 'response_closed');
+  else if (!input.accepted) d = diagnosis('client_request', 'invalid_request_error', `${host}发给 Bridge 的请求未通过格式、模型或工具 schema 校验。`, `检查${host}模型配置和请求契约；详细校验原因见对应请求日志。`, 'request_validation');
   else if (input.phase === 'reporting' || input.phase === 'delivery') d = diagnosis('bridge', 'bridge_internal_error', 'Bridge 在记录或交付响应时发生本地错误。', '凭请求 ID 检查 Bridge 日志、磁盘与运行状态。', 'bridge_phase');
   else if (upstream?.origin === 'account') d = upstream;
   // A Bridge output guard explains the SDK interrupt/max_turns it deliberately caused.
@@ -100,17 +107,17 @@ export function bridgeFailure(input: FailureInput) {
     d = diagnosis('account', 'upstream_authentication_failed', 'Qoder SDK 缺少所需认证配置。', accountAction, 'sdk_exception_code');
   if (!d && exception.exit_code === 41) d = diagnosis('account', 'upstream_authentication_failed', 'Qoder CLI 以认证错误退出。', accountAction, 'sdk_process_exit_code');
   if (!d && [42, 44, 52].includes(Number(exception.exit_code))) d = diagnosis('bridge', 'sdk_local_configuration', 'Qoder CLI 报告本地参数、沙箱或配置错误。', '检查 Bridge 启动配置与 SDK 日志；不要自动改权限或 ACL。', 'sdk_process_exit_code');
-  if (!d && (exception.exit_code === 130 || t?.result === 'error_cancelled')) d = diagnosis('connection', 'upstream_cancelled', 'SDK 报告请求已取消；无法仅凭此判断由用户、DSH 还是 SDK 发起。', '对照 DSH 与 Bridge 的取消记录。', 'sdk_cancellation');
+  if (!d && (exception.exit_code === 130 || t?.result === 'error_cancelled')) d = diagnosis('connection', 'upstream_cancelled', `SDK 报告请求已取消；无法仅凭此判断由用户、${host}还是 SDK 发起。`, `对照${host}与 Bridge 的取消记录。`, 'sdk_cancellation');
   if (!d && (t?.result === 'error_max_turns' || t?.error?.includes('Qoder result: error_max_turns') || exception.exit_code === 53))
     d = diagnosis('upstream', 'qoder_turn_limit', 'Qoder SDK 达到单次请求轮数上限（per-request turn limit），未完成模型决策。', '保留请求 ID 排查终止原因；不要直接放大轮数。', 'sdk_terminal_result');
   if (!d && ['exhausted','repeated_invalid_decision','disabled'].includes(outcome??'') && input.recovery?.evidence?.at(-1)?.validationError?.startsWith('Progress-only final answer')) d = diagnosis('model_output', 'unfinished_turn', '模型仅返回了行动预告，未提供下一步工具调用或实际结果；有界纠正已停止，本轮未完成。', '可以继续本轮任务；凭请求 ID 检查模型输出，不能将行动预告视为任务完成。', 'decision_validation');
-  if (!d && ['exhausted', 'repeated_invalid_decision', 'disabled'].includes(outcome ?? '')) d = diagnosis('model_output', outcome === 'disabled' ? 'model_decision_error' : 'model_decision_recovery_exhausted', '模型输出的工具名、参数或决策格式不符合 DSH/Bridge 契约，有界纠正已停止；被拒绝的工具未派发。', '凭请求 ID 检查模型原始输出与工具 schema，不能据此直接认定 DSH 程序故障。', 'decision_validation');
+  if (!d && ['exhausted', 'repeated_invalid_decision', 'disabled'].includes(outcome ?? '')) d = diagnosis('model_output', outcome === 'disabled' ? 'model_decision_error' : 'model_decision_recovery_exhausted', `模型输出的工具名、参数或决策格式不符合${host}与 Bridge 契约，有界纠正已停止；被拒绝的工具未派发。`, `凭请求 ID 检查模型原始输出与工具 schema，不能据此直接认定${host}程序故障。`, 'decision_validation');
   if (!d && ['already_streamed', 'stream_conflict'].includes(outcome ?? '')) d = diagnosis('bridge', 'bridge_stream_conflict', 'Bridge 流式一致性保护停止响应，已发送的正文与最终决策不能安全拼接。', '检查同一请求的流式输出与最终决策；不要补写或重放工具。', 'bridge_stream_validation');
   if (!d && outcome === 'empty_response') d = diagnosis('upstream', 'upstream_empty_response', '上游结束时没有可用模型正文；尚不能确定是 SDK 还是模型输出问题。', '凭请求 ID 检查 SDK 结束事件与输出记录。', 'empty_response');
-  if (!d && input.phase === 'decision') d = diagnosis('model_output', 'model_decision_error', '模型输出未能解析为符合 DSH/Bridge 契约的决策。', '凭请求 ID 检查输出格式与工具 schema。', 'decision_validation');
+  if (!d && input.phase === 'decision') d = diagnosis('model_output', 'model_decision_error', `模型输出未能解析为符合${host}与 Bridge 契约的决策。`, '凭请求 ID 检查输出格式与工具 schema。', 'decision_validation');
   const isolationText=t?.error?.startsWith('Thin session isolation failed:')?t.error:causeText;
   if (!d && isolationText.startsWith('Thin session isolation failed:')) d = diagnosis('bridge', 'qoder_session_isolation_failed', 'Qoder 里有无法关闭的插件或技能：' + redactFailure(isolationText.slice('Thin session isolation failed:'.length)).slice(0,600), '检查 Qoder 插件或技能；隔离失败的会话已关闭。', 'session_isolation');
-  d ??= diagnosis('unknown', 'unclassified_failure', '请求在 Bridge 与上游 SDK 边界失败，现有证据不足以定位到账号、模型服务、Bridge 或 DSH。', '保留请求 ID 对照 Bridge 与 DSH 日志；不要按猜测重试。', 'insufficient_evidence');
+  d ??= diagnosis('unknown', 'unclassified_failure', `请求在 Bridge 与上游 SDK 边界失败，现有证据不足以定位到账号、模型服务、Bridge 或${host}。`, `保留请求 ID 对照 Bridge 与${host}日志；不要按猜测重试。`, 'insufficient_evidence');
   const label = labels[d.origin];
   const raw = upstreamText(t?.sdk_errors?.filter(v=>typeof v==='string').join('\n') || (input.phase==='upstream'&&d.origin!=='bridge'?causeText:''));
   const message = `[${label}] ${redactFailure(d.reason)}\n建议：${d.action}\n错误码：${d.code}${sdkCode !== null ? ` | SDK错误码：${sdkCode}` : ''} | 请求ID：${input.requestId}${raw.message?'\n上游原文：'+raw.message:''}`;

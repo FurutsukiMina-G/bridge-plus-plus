@@ -46,3 +46,17 @@ test('session metrics report context fill, last and cumulative cache hits, and m
   assert.equal(m.lastRequest(),null);
   assert.ok(estimateTokens('中文字符')>estimateTokens('abcd'));
 });
+
+test('the context ring and the latest cache figure follow the main conversation, not the auxiliary requests between its steps',()=>{
+  const m=new SessionMetrics(),at='2026-11-11T00:00:00.000Z';
+  const usage=(prompt,cached,extra={})=>m.feed({type:'usage',at,turnId:'t1',data:{prompt_tokens:prompt,completion_tokens:100,cached_tokens:cached,cache_status:'reported',context_window:200000,...extra}});
+  usage(87000,86000);usage(9000,0,{auxiliary:true});
+  assert.equal(m.context(200000).used,87100);
+  assert.equal(m.cache().ratio,86000/87000);
+  assert.equal(m.cache().sessionRatio,86000/96000);
+  usage(90000,89000);usage(9500,0,{auxiliary:true});usage(9400,0,{auxiliary:true});
+  assert.equal(m.context(200000).used,90100);
+  // A session that so far only made auxiliary requests still shows them rather than nothing.
+  const only=new SessionMetrics();only.feed({type:'usage',at,data:{prompt_tokens:5000,completion_tokens:20,auxiliary:true}});
+  assert.equal(only.context(200000).used,5020);
+});

@@ -11,13 +11,18 @@ import {limitNotice,sameUpstream,stopLabel,stopNote,turnExtras,upstreamHtml} fro
 import {mathExtension,replaceMath} from './math.js';
 import {fileLinks,toolFilePath,webLink} from './file-links.js';
 import {usable,unusableReason,permissionWarning,environmentCardHtml,servicesPageHtml,serviceCardsHtml,serviceModelsHtml,onboardingHtml,sourceCardHtml} from './setup.js';
+import {structuredQuestions,questionFormHtml,buildAnswers} from './questions.js';
 import {budgetCheck,compactTokens,formatTokens,parseTokens} from './tokens.js';
 
 const $=selector=>document.querySelector(selector);
 const esc=value=>String(value??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'})[c]);
 const labels={idle:'准备就绪',starting:'正在连接',running:'运行中',waiting:'等待授权',completed:'已完成',failed:'运行失败',interrupted:'已中断',paused:'已暂停'};
 const sourceNames={qoder:'Qoder CN',workbuddy:'WorkBuddy',antigravity:'Antigravity · Gemini'};
-const tiles={dsh:'DS',kimi:'Ki',codex:'Cx',antigravity:'AG'};
+const tiles={dsh:'DS',kimi:'Ki',codex:'Cx',antigravity:'AG',claude:'CC'};
+/** Runtimes that only run Qoder CN / WorkBuddy models through the gateway: no native model choice. */
+const gatewayOnly=runtimeId=>runtimeId==='dsh'||runtimeId==='claude';
+/** Claude Code runs only as a tool executor inside Bridge++: there is no native window to hand off to. */
+const hasNativeUi=runtimeId=>runtimeId!=='claude';
 const choiceLabels={approve:'允许这次','approve-session':'本会话始终允许',reject:'拒绝','reject-session':'本会话始终拒绝'};
 const resolvedLabels={approve:'已允许','approve-session':'已允许（本会话）',reject:'已拒绝','reject-session':'已拒绝（本会话）',expired:'已过期'};
 const busyStates=['running','starting','waiting'];
@@ -133,7 +138,7 @@ function greeting(){
 
 /* ---------- selection: environment first, then model ---------- */
 function compatible(runtimeId,model){
-  if(!model)return runtimeId!=='dsh';
+  if(!model)return!gatewayOnly(runtimeId);
   if(!model.enabled||model.tools===false)return false;
   if(model.boundRuntime)return runtimeId===model.boundRuntime;
   return runtimeId==='antigravity'?model.source==='antigravity':model.source!=='antigravity';
@@ -145,12 +150,12 @@ function preferredModel(runtimeId){
 /** Last model used with this environment, then a saved pairing for it, then a sensible default. */
 function fallbackModel(runtimeId){
   const remembered=ui.models?.[runtimeId],usable=key=>{const m=models().find(x=>x.key===key);return!!m&&compatible(runtimeId,m);};
-  if(remembered==='native'&&runtimeId!=='dsh')return'native';
+  if(remembered==='native'&&!gatewayOnly(runtimeId))return'native';
   if(usable(remembered))return remembered;
   const paired=Object.entries(state.snapshot?.preferences.modelDefaults??{}).find(([key,v])=>v?.runtimeId===runtimeId&&usable(key));
   if(paired)return paired[0];
   if(runtimeId==='kimi'||runtimeId==='codex')return'native';
-  return preferredModel(runtimeId)?.key??(runtimeId==='dsh'?null:'native');
+  return preferredModel(runtimeId)?.key??(gatewayOnly(runtimeId)?null:'native');
 }
 const defaultContext=model=>model?.contexts.length?(model.contexts.some(c=>c.tokens===model.defaultContextTokens)?model.defaultContextTokens:model.contexts[0].tokens):null;
 function validBudget(model,budget,context){
@@ -178,7 +183,7 @@ function selectRuntime(runtimeId){
   if(!usable(runtime(runtimeId))){toast(unusableReason(runtime(runtimeId))||'这个运行环境暂时不能使用',true);return false;}
   state.runtimeId=runtimeId;ui.runtimeId=runtimeId;saveUi();
   const current=state.modelKey;
-  if(current==='native'&&runtimeId!=='dsh'&&(ui.models?.[runtimeId]??(runtimeId==='antigravity'?null:'native'))==='native'){selectModel('native');return true;}
+  if(current==='native'&&!gatewayOnly(runtimeId)&&(ui.models?.[runtimeId]??(runtimeId==='antigravity'?null:'native'))==='native'){selectModel('native');return true;}
   if(current&&current!=='native'&&compatible(runtimeId,currentModel())){ui.models={...ui.models,[runtimeId]:current};saveUi();return true;}
   const key=fallbackModel(runtimeId);
   if(key)selectModel(key);else state.modelKey=null;
@@ -290,7 +295,7 @@ function renderTopbar(){
   const left=ui.left?'':`<button class="icon-btn" id="toggle-left" title="展开侧栏 (Ctrl+B)">${icon('panelLeft')}</button><span class="topbar-brand">${logo(18)}</span>`;
   const crumb=p?`<span class="crumb" title="${esc(p.path)}">${icon('folder')}${esc(p.name)}</span>`:'';
   const title=s?`<span class="crumb-sep">/</span><button class="title-btn" id="rename-session" title="重命名会话">${esc(s.title)}</button>`:p?'<span class="crumb-sep">/</span><span class="title-muted">新会话</span>':'<span class="title-muted">Bridge++</span>';
-  const actions=s?`<button class="ghost-btn" id="native-session" title="在原生完整界面中继续">${icon('external')}<span>原生界面</span></button><button class="icon-btn" id="session-more" title="更多">${icon('more')}</button>`:'';
+  const actions=s?`${hasNativeUi(s.runtimeId)?`<button class="ghost-btn" id="native-session" title="在原生完整界面中继续">${icon('external')}<span>原生界面</span></button>`:''}<button class="icon-btn" id="session-more" title="更多">${icon('more')}</button>`:'';
   const right=ui.right?'':`<button class="icon-btn" id="toggle-right" title="展开右侧面板 (Ctrl+Alt+B)">${icon('panelRight')}</button>`;
   $('#topbar').innerHTML=`<div class="topbar-left">${left}${crumb}${title}</div><div class="topbar-right">${actions}${right}</div>`;
 }
@@ -516,7 +521,8 @@ function renderComposerControls(){
   const folder=s?'':`<button class="chip-btn" id="folder-chip" data-value="${esc(p?.id??'')}" title="${esc(p?.path??'选择工作文件夹')}">${icon('folder')}<span class="chip-text">${esc(p?.name??'选择文件夹')}</span>${icon('chevronDown','caret')}</button>`;
   const envOk=!!s||usable(env);
   const envChip=`<button class="chip-btn${s?' locked':''}${envOk?'':' unavailable'}" id="env-chip" data-value="${esc(env?.id??'')}" title="${s?'会话创建后不能更换运行环境':envOk?'先选择运行环境':esc(unusableReason(env))}">${tile(env)}<span class="chip-text">${esc(env?.name??'选择环境')}</span>${icon(s?'lock':'chevronDown','caret')}</button>`;
-  const modelChip=`<button class="chip-btn model-chip" id="model-chip" data-value="${esc(selection.modelKey??'')}" title="${esc(modelTitle(selection,model,!!s))}">${icon('layers')}<span class="chip-text">${modelLabel(selection,model)}</span>${icon('chevronDown','caret')}</button>`;
+  const chipTitle=modelTitle(selection,model,!!s)+(s?.selectionNext?`\n已排队（本轮结束后应用）：${paramsText(s.selectionNext)}`:'');
+  const modelChip=`<button class="chip-btn model-chip${s?.selectionNext?' has-queued':''}" id="model-chip" data-value="${esc(selection.modelKey??'')}" title="${esc(chipTitle)}">${icon('layers')}<span class="chip-text">${modelLabel(selection,model)}</span>${s?.selectionNext?`<span class="queued-dot" aria-label="参数修改已排队"></span>`:''}${icon('chevronDown','caret')}</button>`;
   const permChip=permissionChipHtml(s,env);
   const waiting=!running&&!!env?.checking;
   // While a turn runs: stop is always there; send (with 插话/排队 when the runtime can take messages mid-turn) appears once something is typed.
@@ -586,7 +592,9 @@ function permissionMenuHtml(){
   const exec=p.protocol==='exec-json'?`<div class="menu-note">${icon('info')}<span>原生 Codex 按官方 CLI 的 exec 方式运行，不能逐条询问；需要更高权限的操作由原生沙箱拒绝，或交给自动审查。</span></div>`:'';
   // Measured on DSH: every tool call is reviewed by its own model request, so the request count roughly doubles.
   const review=env?.id==='dsh'&&p.modes?.some(m=>m.id==='auto-review')?`<div class="menu-note">${icon('zap')}<span>自动审查会在每次工具调用前另发一次模型请求，请求数大约翻倍，也更慢。</span></div>`:'';
-  return`<div class="menu-label">授权方式 · ${head}</div>${items}${issue}${migrated}${exec}${review}<div class="menu-note">${icon('info')}<span>由原生运行环境执行：Bridge++ 只传原生参数或代你回答授权请求，不会越过原生沙箱。</span></div>`;
+  // Claude Code's native auto mode asks the same model whether an action is safe before running it.
+  const claudeAuto=env?.id==='claude'&&p.modes?.some(m=>m.id==='auto-review')?`<div class="menu-note">${icon('zap')}<span>“自动审查”用 Claude Code 原生的 auto 模式：工作区内的编辑直接执行，其他操作先由同一个模型判断是否安全，会多发模型请求。</span></div>`:'';
+  return`<div class="menu-label">授权方式 · ${head}</div>${items}${issue}${migrated}${exec}${review}${claudeAuto}<div class="menu-note">${icon('info')}<span>由原生运行环境执行：Bridge++ 只传原生参数或代你回答授权请求，不会越过原生沙箱。</span></div>`;
 }
 /** Applies a permission change; a mode that drops the sandbox asks first, unless it is already in effect. */
 function changePermission(runtimeId,mode,current,apply){
@@ -627,12 +635,13 @@ function renderBanner(){
       return;
     }
     if(env&&!usable(env))notes.push(env.checking?`${unusableReason(env)}…`:`${unusableReason(env)}。请换一个运行环境，或到设置 → 运行环境处理。`);
-    else if(!state.modelKey)notes.push(state.runtimeId==='dsh'?'DSH 统一会话需要 Qoder CN 或 WorkBuddy 模型。请在设置 → 模型源下载组件并登录。':'请选择模型。');
+    else if(!state.modelKey)notes.push(state.runtimeId==='dsh'?'DSH 统一会话需要 Qoder CN 或 WorkBuddy 模型。请在设置 → 模型源下载组件并登录。':state.runtimeId==='claude'?'Claude Code 在 Bridge++ 里只用 Qoder CN 或 WorkBuddy 的模型，不用 Claude 模型。请在设置 → 模型源下载组件并登录。':'请选择模型。');
     else if(state.modelKey!=='native'&&!currentModel())notes.push('所选模型不在当前目录中，请重新选择或刷新模型源。');
   }
   const limit=s&&!busy(s)?limitNotice(s.lastFailure):'';
   if(limit)notes.push(limit);
-  el.innerHTML=notes.map(text=>`<div class="banner">${icon('info')}<span>${esc(text)}</span></div>`).join('');
+  const queued=s?.selectionNext?`<div class="banner" id="queued-params-banner">${icon('clock')}<span>参数修改已排队：${esc(paramsText(s.selectionNext))}，本轮结束后自动应用。</span><span class="banner-actions"><button class="btn sm" id="cancel-queued-params">取消</button></span></div>`:'';
+  el.innerHTML=queued+notes.map(text=>`<div class="banner">${icon('info')}<span>${esc(text)}</span></div>`).join('');
 }
 function ringSvg(ratio){
   const r=8.5,c=2*Math.PI*r,level=ratio==null?'none':ratio>=0.85?'high':ratio>=0.6?'mid':'low';
@@ -703,8 +712,10 @@ function toolOutput(t){
   const d=t.end?.data;
   if(!d)return'';
   const content=d.message?.content??d.content;
+  // Claude Code returns a tool result as plain text, or as blocks: text, or a reference to a tool definition ToolSearch just loaded.
+  if(typeof content==='string'&&content)return content;
   if(Array.isArray(content)){
-    const text=content.map(p=>p?.text??p?.content?.text??'').join('');
+    const text=content.map(p=>p?.type==='tool_reference'&&typeof p.tool_name==='string'?`已加载工具定义：${p.tool_name}\n`:p?.text??p?.content?.text??'').join('');
     if(text)return text;
   }
   if(typeof d.error?.message==='string')return d.error.message;
@@ -751,7 +762,8 @@ function approvalSummary(e){
   }
   const v=argsOf(d.toolCall??d);
   const command=Array.isArray(d.command)?d.command.join(' '):d.command;
-  return[d.toolCall?.title,command,d.reason,v.command&&(Array.isArray(v.command)?v.command.join(' '):v.command),v.file_path??v.path,d.grantRoot].find(x=>typeof x==='string'&&x.trim())??'';
+  // Claude Code's requests carry the tool input as-is: a plan to approve (ExitPlanMode), a URL (WebFetch), then its own one-line description.
+  return[d.toolCall?.title,command,d.reason,v.command&&(Array.isArray(v.command)?v.command.join(' '):v.command),v.file_path??v.path,v.plan,v.url,d.grantRoot,d.description].find(x=>typeof x==='string'&&x.trim())??'';
 }
 function approvalBlock(e,resolved){
   const done=resolved.get(e.approvalId);
@@ -759,7 +771,7 @@ function approvalBlock(e,resolved){
   const summary=approvalSummary(e),choices=e.choices?.length?e.choices:['approve','reject'];
   let buttons;
   if(choices.includes('native'))buttons='<button class="btn primary sm" data-approval-native="true">在完整工具界面处理</button>';
-  else if(e.type==='question')buttons=`<button class="btn primary sm" data-question="${esc(e.approvalId)}">回答</button><button class="btn sm" data-approval-native="true">在原生界面处理</button>`;
+  else if(e.type==='question')buttons=`<button class="btn primary sm" data-question="${esc(e.approvalId)}">回答</button><button class="btn sm danger" data-approval="${esc(e.approvalId)}" data-choice="reject">不回答</button>${hasNativeUi(session()?.runtimeId)?'<button class="btn sm" data-approval-native="true">在原生界面处理</button>':''}`;
   else buttons=choices.filter(c=>choiceLabels[c]).map(c=>`<button class="btn sm${c==='approve'?' primary':c.startsWith('reject')?' danger':''}" data-approval="${esc(e.approvalId)}" data-choice="${esc(c)}">${choiceLabels[c]}</button>`).join('');
   return`<div class="approval-card"><div class="approval-head">${icon(e.type==='question'?'info':'key')}<b>${e.type==='question'?'Agent 需要你补充信息':'Agent 请求授权'}</b>${e.name?`<span class="muted">${esc(e.name)}</span>`:''}</div>${summary?`<div class="approval-summary">${esc(summary)}</div>`:''}<details class="approval-details" data-expand="approval-${esc(e.approvalId)}"><summary>详细参数</summary><pre>${esc(clip(pretty(e.data)))}</pre></details><div class="approval-actions">${buttons}</div></div>`;
 }
@@ -902,7 +914,9 @@ function openMenu(anchor,kind){
   if(kind==='model'){
     state.menuSearch='';openGroups.clear();
     const s=session();
-    if(s)state.params={reasoning:s.selection.reasoning??'',contextTokens:s.selection.contextTokens??null,contextBudget:s.selection.contextBudget??null};
+    // A queued change is what the next turn will use, so the controls start from it.
+    const base=s?.selectionNext??s?.selection;
+    if(s)state.params={reasoning:base.reasoning??'',contextTokens:base.contextTokens??null,contextBudget:base.contextBudget??null};
   }
   paintMenu();
 }
@@ -998,7 +1012,7 @@ function modelListHtml(){
     const open=!!q||openGroups.has(source),chosen=all.find(m=>m.key===state.modelKey);
     return`<div class="model-group${open?' open':''}"><button class="model-group-head" data-model-group="${source}" aria-expanded="${open}">${icon('chevronRight','mg-caret')}<span class="mg-name">${esc(sourceNames[source])}</span><span class="mg-count">${q?`${list.length}/${all.length}`:all.length} 个</span>${chosen&&!open?`<span class="mg-chosen" title="当前选择">${icon('check')}${esc(sourceName(chosen))}</span>`:''}</button>${open?`<div class="model-group-body">${list.map(modelItemHtml).join('')}</div>`:''}</div>`;
   }).join('');
-  const native=env!=='dsh'&&(!q||'原生 native'.includes(q))?`<div class="menu-label">原生</div><button class="menu-item model-item${state.modelKey==='native'?' selected':''}" data-model-key="native"><span class="mi-main"><span class="mi-name">原生模型设置</span><span class="mi-sub">使用 ${esc(runtime(env)?.name??'')} 自己的模型与登录</span></span>${state.modelKey==='native'?icon('check','mi-check'):''}</button>`:'';
+  const native=!gatewayOnly(env)&&(!q||'原生 native'.includes(q))?`<div class="menu-label">原生</div><button class="menu-item model-item${state.modelKey==='native'?' selected':''}" data-model-key="native"><span class="mi-main"><span class="mi-name">原生模型设置</span><span class="mi-sub">使用 ${esc(runtime(env)?.name??'')} 自己的模型与登录</span></span>${state.modelKey==='native'?icon('check','mi-check'):''}</button>`:'';
   return groups+native||`<div class="menu-empty">${models().length?'没有匹配的模型':'还没有模型目录。请到设置 → 模型源下载组件并登录。'}</div>`;
 }
 function effortRow(model,value){
@@ -1066,7 +1080,10 @@ function sessionParamsHtml(s){
   const m=modelOf(s.selection),p=state.params;
   const native=s.selection.modelKey==='native';
   if(!m||m.source==='antigravity')return`<div class="menu-session-head">${icon('lock')}<div><b>${esc(m?.name??(native?'原生模型':s.selection.modelKey))}</b><small>${esc(native?s.selection.nativeModel||'原生当前模型':m?m.id:'不在当前模型目录中')}</small></div></div><div class="param-note">${icon('info')}<span>${m?'Gemini 由 Antigravity 原生执行，参数在原生界面中调整。':native?'原生模型会话的参数请在原生界面中调整。':'这个模型不在当前目录中。请刷新模型源，再用编辑框上方的“重新确认模型”。'}</span></div>`;
-  return`<div class="menu-session-head">${icon('lock')}<div><b>${esc(m.name)}</b><small>${esc(sourceNames[m.source])} · ${esc(m.id)}</small></div></div><div class="menu-params">${effortRow(m,p.reasoning)}${contextRow(m,p.contextTokens)}${budgetRow(m,p.contextBudget,p.contextTokens)}<div class="param-hint">${budgetNote}会话创建后不能更换模型或运行环境；应用新参数会重启这个会话的运行环境，下一轮会重新发送完整上下文。</div><div class="param-actions"><button class="btn primary sm" id="apply-session-params" ${busy(s)?'disabled':''}>应用到此会话</button></div></div>`;
+  const running=busy(s),pending=s.selectionNext;
+  const queued=pending?`<div class="param-pending">${icon('clock')}<span><b>已排队</b>${esc(paramsText(pending))}<small>本轮结束后自动应用</small></span><button class="btn sm" id="cancel-session-params">取消排队</button></div>`:'';
+  const timing=running?'任务正在运行：新参数先排队，本轮结束后自动应用，应用前可以随时取消。':'';
+  return`<div class="menu-session-head">${icon('lock')}<div><b>${esc(m.name)}</b><small>${esc(sourceNames[m.source])} · ${esc(m.id)}</small></div></div><div class="menu-params">${effortRow(m,p.reasoning)}${contextRow(m,p.contextTokens)}${budgetRow(m,p.contextBudget,p.contextTokens)}<div class="param-hint">${budgetNote}会话创建后不能更换模型或运行环境；应用新参数会重启这个会话的运行环境，下一轮会重新发送完整上下文。${timing}</div>${queued}<div class="param-actions"><button class="btn primary sm" id="apply-session-params">${running?(pending?'替换排队的参数':'本轮结束后应用'):'应用到此会话'}</button></div></div>`;
 }
 function modelMenuHtml(){
   const s=session();
@@ -1559,14 +1576,42 @@ function openRecovery(s){
 async function applySessionParams(){
   const s=session(),m=modelOf(s?.selection),p=state.params;
   if(!s||!m)return;
-  await call('session:rebind',{sessionId:s.id,selection:{...s.selection,identity:m.identity,reasoning:p.reasoning||undefined,contextTokens:p.contextTokens,contextBudget:p.contextBudget}});
+  // While a turn runs the backend queues the change and applies it when the turn ends.
+  const result=await call('session:rebind',{sessionId:s.id,selection:{...s.selection,identity:m.identity,reasoning:p.reasoning||undefined,contextTokens:p.contextTokens,contextBudget:p.contextBudget}});
   closeMenu();
   await snapshot();
   renderComposerControls();renderBanner();renderFooter();
-  toast('已更新此会话的参数，下一轮生效');
+  toast(result?.queued?'新参数已排队，本轮结束后自动应用；应用前可以取消':'已更新此会话的参数，下一轮生效');
 }
+async function cancelQueuedParams(){
+  const s=session();
+  if(!s?.selectionNext)return;
+  await call('session:rebind-cancel',{sessionId:s.id});
+  closeMenu();
+  await snapshot();
+  renderComposerControls();renderBanner();
+  toast('已取消排队的参数修改');
+}
+/** One line for a parameter set, as it will be applied. */
+function paramsText(selection){
+  const parts=[selection.reasoning?effortName(selection.reasoning):'默认思考'];
+  if(selection.contextTokens)parts.push(`窗口 ${compact(selection.contextTokens)}`);
+  if(selection.contextBudget)parts.push(`预算 ${compact(selection.contextBudget)}`);
+  return parts.join(' · ');
+}
+/** What the answer form holds for each question, read from the open dialog. */
+const readQuestionForm=i=>({picked:[...document.querySelectorAll(`input[name="q${i}"]:checked`)].map(x=>Number(x.value)),other:document.querySelector(`[data-q-other="${i}"]`)?.value??''});
 function answerQuestion(approvalId){
   const e=state.events.find(x=>x.approvalId===approvalId&&x.type==='question'),summary=e?approvalSummary(e):'';
+  const qs=structuredQuestions(e?.data);
+  if(qs){
+    modal(qs.length>1?`回答 Agent 的 ${qs.length} 个问题`:'回答 Agent 的问题',questionFormHtml(qs),async()=>{
+      const {answers,items}=buildAnswers(qs,readQuestionForm);
+      if(!Object.keys(answers).length)throw new Error(qs.length>1?'至少回答一个问题；都不想回答可以关掉这个窗口，点“不回答”':'请选一项或者填写你的回答；不想回答可以点“不回答”');
+      await call('session:approve',{sessionId:state.sessionId,approvalId,choice:'approve',answer:{answers,items}});
+    },{confirm:'发送回答'});
+    return;
+  }
   modal('回答 Agent 的问题',`${summary?`<p class="question-text">${esc(summary)}</p>`:''}<p class="muted">按原生协议填写 answers 对象（JSON）。复杂交互也可以在原生界面中完成。</p><textarea id="question-answer" rows="7" placeholder="{}" spellcheck="false"></textarea>`,async()=>{
     const answer=JSON.parse($('#question-answer').value||'{}');
     await call('session:approve',{sessionId:state.sessionId,approvalId,choice:'approve',answer});
@@ -1777,6 +1822,7 @@ document.addEventListener('click',e=>{
     case'lightbox-close':$('#lightbox').close();break;
     case'save-model-default':void action(saveModelDefault);break;
     case'apply-session-params':void action(applySessionParams);break;
+    case'cancel-session-params':case'cancel-queued-params':void action(cancelQueuedParams);break;
     case'load-native-models':void loadNativeModels();break;
     case'refresh-session-model':{const s=session();void action(async()=>{await call('provider:refresh',{source:s.selection.modelKey.split(':')[0]});await snapshot();renderComposerControls();renderBanner();});break;}
     case'rebind-session-model':void action(()=>openRecovery(session()));break;

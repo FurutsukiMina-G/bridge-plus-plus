@@ -101,7 +101,7 @@ export function userMediaHtml(list,discarded=new Set()){
   const missing=gone.map(a=>mediaElement(a,{gone:discarded.has(a.id)})).join('');
   return`<div class="user-media">${grid}${rest}${missing}</div>`;
 }
-const originNames={imageGeneration:'图片生成',image_generation:'图片生成',generate_image:'图片生成',codex:'Codex',kimi:'Kimi Code',dsh:'DSH',antigravity:'Antigravity'};
+const originNames={imageGeneration:'图片生成',image_generation:'图片生成',generate_image:'图片生成',codex:'Codex',kimi:'Kimi Code',dsh:'DSH',antigravity:'Antigravity',claude:'Claude Code'};
 /** Media a runtime produced (a generated image, an audio reply…). */
 export function mediaCardHtml(e){
   const url=mediaUrl(e.url),name=e.name??kindName(e.kind),raw=e.origin?.tool??e.origin?.runtimeId??'',origin=originNames[raw]??raw;

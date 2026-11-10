@@ -45,6 +45,8 @@ export async function bridgeKey(path = '.runtime/bridge-key') {
 }
 export async function createBridgeServer(config: Config, options: {
   port?: number; key?: string; infer?: typeof runProbe; reportDir?: string; prewarm?: boolean; prewarmModel?: string; telemetry?: boolean;
+  /** Display name of the calling host; failure text falls back to a generic client. */
+  hostName?: string;
 } = {}) {
   const bridgePort = options.port ?? 8646;
   decisionRetryLimit(config.decisionRetries);
@@ -59,7 +61,7 @@ export async function createBridgeServer(config: Config, options: {
   const requestConfig = (model: string): Config => {
     const spec = bridgeModel(model);
     if (!spec) throw new Error(`Unknown model: ${model}`);
-    // Each public variant pins its Qoder context window; the Harness entry declares the same window.
+    // Each public variant pins its Qoder context window; the host entry declares the same window.
     return { ...config, model: spec.runtimeId, context: spec.contextWindow, expectedModelName: spec.expectedModelName };
   };
   const poolFor = (model: string) => {
@@ -94,14 +96,14 @@ export async function createBridgeServer(config: Config, options: {
     let firstClientThinkingMs: number | null = null;
     let streamChunks = 0;
     const disconnect = () => { if (!res.writableEnded && !controller.signal.aborted) {
-      abortKind = 'client_disconnect'; controller.abort(new Error('Harness client disconnected'));
+      abortKind = 'client_disconnect'; controller.abort(new Error('Client disconnected'));
     } };
     res.once('close', disconnect);
     const streamBase = { id: `chatcmpl-${bridgeRequestId}`, object: 'chat.completion.chunk',
       created: Math.floor(startedAt / 1000), model: PUBLIC_MODEL as string };
     let lastEmitAt = Date.now();
     const emit = (delta: Record<string, unknown>, finish: string | null = null) => {
-      if (res.destroyed) throw new Error('Harness client disconnected');
+      if (res.destroyed) throw new Error('Client disconnected');
       streamChunks++; lastEmitAt = Date.now();
       res.write(`data: ${JSON.stringify({ ...streamBase, choices: [{ index: 0, delta, finish_reason: finish }] })}\n\n`);
     };
@@ -130,7 +132,8 @@ export async function createBridgeServer(config: Config, options: {
       catch (cause) { process.stderr.write(`[bridge] Error logging failed: ${safeError(cause)}\n`); }
     };
     const earlyFailure = async (kind: 'authentication' | 'route', status: number) => {
-      const error = bridgeFailure({ requestId: bridgeRequestId, phase: 'request', accepted: false, early: kind });
+      const error = bridgeFailure({ requestId: bridgeRequestId, phase: 'request', accepted: false, early: kind,
+        hostName: options.hostName });
       if (kind === 'authentication') error.type = 'authentication_error';
       await recordFailure(error); send(res, status, { error });
     };
@@ -143,7 +146,8 @@ export async function createBridgeServer(config: Config, options: {
         activeRequests: slots.active, queuedRequests: slots.queued, pool: pool?.stats() ?? null,
         pools: Object.fromEntries([...pools].map(([model, value]) => [model, value.stats()])),
         capabilities: { finalTextStreaming: true, thinkingStreaming: true, validatedTools: true,
-          errorDiagnostics: { version: 1, origins: ['account','bridge','model_output','upstream','dsh_request','connection','unknown'],
+          // `dsh_request` stays listed for reports written by earlier versions; new rows use `client_request`.
+          errorDiagnostics: { version: 1, origins: ['account','bridge','model_output','upstream','client_request','dsh_request','connection','unknown'],
             visibleMessage: true, sdkErrorCode: true, requestId: true },
           decisionRecovery: {maxCorrectionCalls:decisionRetryLimit(config.decisionRetries),
             beforeToolDispatch:true,retriesRuntimeFailures:false},
@@ -221,7 +225,8 @@ export async function createBridgeServer(config: Config, options: {
         upstreamFailure=turn.error?publicUpstreamFailure(turn.sdk_errors,turn.api_error_categories,turn.sdk_error_code):null;
         failurePhase = turn.error ? 'upstream' : 'decision';
         const failure = turn.error || decisionError ? bridgeFailure({ requestId: bridgeRequestId,
-          phase: failurePhase, accepted: true, turn, recovery: decisionRecovery, abort: abortKind }) : null;
+          phase: failurePhase, accepted: true, turn, recovery: decisionRecovery, abort: abortKind,
+          hostName: options.hostName }) : null;
         taskTurn = { ...turn, first_client_text_ms: firstClientTextMs,
           first_client_thinking_ms: firstClientThinkingMs, stream_chunks: streamChunks,upstream_failure:upstreamFailure, failure };
         const turnPhase = failurePhase;
@@ -273,7 +278,7 @@ export async function createBridgeServer(config: Config, options: {
     } catch (cause) {
       const message = safeError(cause);
       const failure = bridgeFailure({ requestId: bridgeRequestId, phase: failurePhase, accepted: requestAccepted,
-        cause, abort: abortKind, turn: failureTurn, recovery: decisionRecovery });
+        cause, abort: abortKind, turn: failureTurn, recovery: decisionRecovery, hostName: options.hostName });
       taskTurn = { ...taskTurn, failure };
       await recordFailure(failure);
       await writeTaskLog(undefined, failure.message);

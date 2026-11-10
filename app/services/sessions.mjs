@@ -8,6 +8,7 @@ import {DshAdapter} from '../runtimes/dsh.mjs';
 import {KimiAcpAdapter} from '../runtimes/kimi-acp.mjs';
 import {CodexAdapter} from '../runtimes/codex.mjs';
 import {AntigravityAdapter} from '../runtimes/antigravity.mjs';
+import {ClaudeAdapter} from '../runtimes/claude.mjs';
 import {taskIntent,planEntries,unfinishedTask,taskContinuationPrompt,TASK_CONTINUATION_LIMIT} from './turn-completion.mjs';
 import {processIdentity,sameProcess} from './process-identity.mjs';
 import {validatePermissionMode,migratePermissionMode,sessionPermissionView} from './runtime-permissions.mjs';
@@ -16,7 +17,7 @@ import {assertRuntimeReady} from './runtime-availability.mjs';
 import {failureText,failureValue,runtimeReason} from './failure-details.mjs';
 import {interjectCapability,queuedBatch} from './session-input.mjs';
 
-const defaults={dsh:DshAdapter,kimi:KimiAcpAdapter,codex:CodexAdapter,antigravity:AntigravityAdapter};
+const defaults={dsh:DshAdapter,kimi:KimiAcpAdapter,codex:CodexAdapter,claude:ClaudeAdapter,antigravity:AntigravityAdapter};
 export class Sessions {
   constructor(store,providers,gateway,runtimes,{constructors=defaults,identifyProcess=processIdentity,media,capabilities,runtimeReady,now=Date.now,adapterIdleMs=600000,adapterMaxIdle=4,adapterSweepMs=60000}={}){
     this.media=media;this.capabilities=capabilities;this.runtimeReady=runtimeReady;this.now=now;this.adapterIdleMs=adapterIdleMs;this.adapterMaxIdle=adapterMaxIdle;
@@ -30,8 +31,10 @@ export class Sessions {
   ensureReady(runtimeId){return assertRuntimeReady(this.runtimes.find(r=>r.id===runtimeId),this.runtimeReady?.(runtimeId));}
   validate(runtimeId,selection){
     if(!selection||typeof selection.modelKey!=='string')throw new Error('请选择模型');
+    if(runtimeId==='claude'&&selection.modelKey==='native')throw new Error('Claude Code 在 Bridge++ 里只使用 Qoder CN / WorkBuddy 模型，不使用 Claude 模型');
     if(selection.modelKey==='native')return {...selection};
     const model=this.providers.get(selection.modelKey);
+    if(runtimeId==='claude'&&!['qoder','workbuddy'].includes(model.source))throw new Error('Claude Code 在 Bridge++ 里只使用 Qoder CN / WorkBuddy 模型，不使用 Claude 模型');
     if(model.boundRuntime&&runtimeId!==model.boundRuntime)throw new Error('Antigravity 来源的 Gemini 仅由 Antigravity 执行，请选择 Antigravity 后端');
     if(runtimeId==='antigravity'&&model.source!=='antigravity')throw new Error('Antigravity 使用其独立 Gemini 模型源，请选择该来源或原生模型');
     const selected=validateSelection(model,selection);
@@ -71,6 +74,7 @@ export class Sessions {
     const resolved=migratePermissionMode(runtime,session.selection,session.permissionMode),permissionMode=validatePermissionMode(runtime,resolved.mode,session.selection);
     if(resolved.migration){await this.store.mutate(()=>{session.permissionMode=permissionMode;session.permissionMigration=resolved.migration;});await this.store.event(session.id,{type:'notice',source:'permissions',text:resolved.migration.reason});}
     const options={runtime,project,session,dir,mediaDir:join(this.store.root,'media/sessions',session.id),model,variant,endpoint,selection:session.selection,permissionMode,emit,saveNative};
+    if(session.runtimeId==='claude')options.configDir=join(this.store.root,'engines/claude-code/config');
     if(session.runtimeId==='dsh'){
       if(!model)throw new Error('DSH 统一会话需选择 Qoder CN 或 WorkBuddy 模型；原生模型可在完整界面使用。');
       this.dsh??=new DshHost(this.store,runtime,{gateway:this.gateway});options.host=this.dsh;
@@ -181,7 +185,7 @@ export class Sessions {
     try{
     if(!['completed','paused'].includes(status)&&run.adapter?.retractSteers){
       const removed=await run.adapter.retractSteers().catch(()=>[]);
-      for(const id of removed){const row=session.pendingSteers?.find(row=>row.id===id);if(row){await this.returnSteer(session,row);await this.store.event(session.id,{type:'steer-state',steerId:id,state:'failed',reason:'本轮未完成，已从 DSH 原生 inbox 撤回到 Bridge++ 队列。',turnId:run.id});}}
+      for(const id of removed){const row=session.pendingSteers?.find(row=>row.id===id);if(row){await this.returnSteer(session,row);await this.store.event(session.id,{type:'steer-state',steerId:id,state:'failed',reason:'本轮未完成，插话已撤回到 Bridge++ 队列。',turnId:run.id});}}
     }
     let reason;
     if(status!=='completed'){
@@ -197,6 +201,12 @@ export class Sessions {
     }finally{
     if(this.runs.get(session.id)===run)this.runs.delete(session.id);
     if(['completed','paused'].includes(status))this.touchAdapter(session.id);if(!['completed','paused'].includes(status)&&!(status==='interrupted'&&event.retainAdapter===true)&&this.adapters.get(session.id)===run.adapter){this.adapters.delete(session.id);this.adapterUsed.delete(session.id);void run.adapter?.close().catch(()=>{});}
+    // A queued selection is applied before any queued message starts the next turn.
+    if(session.selectionNext){
+      const queued={...session.selectionNext};delete queued.requestedAt;await this.store.mutate(()=>{delete session.selectionNext;});
+      try{await this.applyRebind(session,this.validate(session.runtimeId,queued));await this.store.event(session.id,{type:'notice',source:'session',text:'已应用排队的新参数。'});}
+      catch(error){await this.store.event(session.id,{type:'notice',source:'session',text:'排队的新参数没有应用：'+failureText(error)});}
+    }
     if(session.queue?.length){
       if(['completed','paused'].includes(status)&&!this.closed)this.scheduleQueue(session.id);
       else await this.store.event(session.id,{type:'notice',source:'queue',text:`本轮未完成，排队的 ${session.queue.length} 条消息没有发送。`});
@@ -323,7 +333,7 @@ export class Sessions {
     run.cancelled=true;
     if(run.adapter){
       const removed=await run.adapter.retractSteers?.().catch(()=>[])??[];
-      for(const steerId of removed){const row=session.pendingSteers?.find(row=>row.id===steerId);if(row){await this.returnSteer(session,row);await this.store.event(id,{type:'steer-state',steerId,state:'failed',reason:'任务已停止，已从原生 inbox 撤回队列。',turnId:run.id});}}
+      for(const steerId of removed){const row=session.pendingSteers?.find(row=>row.id===steerId);if(row){await this.returnSteer(session,row);await this.store.event(id,{type:'steer-state',steerId,state:'failed',reason:'任务已停止，插话已撤回到 Bridge++ 队列。',turnId:run.id});}}
       this.adapters.delete(id);await run.adapter.close().catch(()=>{});
     }
     await run.prepared;await run.events;await this.finish(session,run,'interrupted');
@@ -337,13 +347,16 @@ export class Sessions {
     if(run?.approvals.size||session.status==='waiting'||this.adapters.get(id)?.requests?.size)throw new Error('当前存在待处理授权或提问，请先处理或停止任务，再修改授权模式');
     this.permissionChanging.add(id);
     try{
-      if(run){
+      const adapter=this.adapters.get(id),hot=adapter?.ready&&typeof adapter.setPermissionMode==='function';
+      if(hot){
+        await adapter.setPermissionMode(mode);await this.store.mutate(()=>{session.permissionMode=mode;delete session.permissionModeNext;});
+      }else if(run){
         await this.store.mutate(()=>{session.permissionModeNext=mode;});
       }else{
-        const adapter=this.adapters.get(id);this.adapters.delete(id);await adapter?.close();
+        this.adapters.delete(id);await adapter?.close();
         await this.store.mutate(()=>{session.permissionMode=mode;delete session.permissionModeNext;});
       }
-      await this.store.event(id,{type:'notice',source:'permissions',text:run?'授权模式已保存，将从下一轮用户任务生效；本轮及其有界续作保留当前权限。':'授权模式已保存，将在下一轮原生启动时应用。'});
+      await this.store.event(id,{type:'notice',source:'permissions',text:hot?`授权模式已在当前 ${runtime.name??'原生'} 原生会话中生效。`:run?'授权模式已保存，将从下一轮用户任务生效；本轮及其有界续作保留当前权限。':'授权模式已保存，将在下一轮原生启动时应用。'});
       return session;
     }finally{this.permissionChanging.delete(id);}
   }
@@ -378,9 +391,27 @@ export class Sessions {
     if(this.closed)throw new Error('工作区正在关闭');const session=this.store.session(id);
     this.ensureReady(session.runtimeId);
     if(this.external.get(id)?.restoredPid)await this.refreshNative(id);
-    if(this.runs.has(id)||this.rebinding.has(id)||this.permissionChanging.has(id)||this.nativeBusy(id)||['running','starting','waiting'].includes(session.status))throw new Error('请先停止当前任务或退出原生客户端，再确认模型更新');
+    if(this.rebinding.has(id)||this.permissionChanging.has(id)||this.nativeBusy(id))throw new Error('请先停止当前任务或退出原生客户端，再确认模型更新');
     if(selection?.modelKey!==session.selection.modelKey||session.selection.modelKey==='native'&&(selection.nativeModel!==session.selection.nativeModel||!['codex','antigravity'].includes(session.runtimeId)))throw new Error('这里只能重新确认同一来源、同一模型 ID；更换模型或环境请新建会话');
-    const selected=this.validate(session.runtimeId,selection);this.rebinding.add(id);
+    const selected=this.validate(session.runtimeId,selection);
+    // A running turn keeps its request parameters; the validated selection waits
+    // for finish() to apply it exactly like an idle reconfirmation.
+    if(this.runs.has(id)||['running','starting','waiting'].includes(session.status)){
+      await this.store.mutate(()=>{session.selectionNext={...selected,requestedAt:new Date().toISOString()};});
+      await this.store.event(id,{type:'notice',source:'session',text:'新参数已排队，本轮结束后自动应用；应用前可以随时取消。'});
+      return {queued:true};
+    }
+    return this.applyRebind(session,selected);
+  }
+  async cancelRebind(id){
+    const session=this.store.session(id);
+    if(!session.selectionNext)return false;
+    await this.store.mutate(()=>{delete session.selectionNext;});
+    await this.store.event(id,{type:'notice',source:'session',text:'已取消排队的参数修改。'});
+    return true;
+  }
+  async applyRebind(session,selected){
+    const id=session.id;this.rebinding.add(id);
     try{
       const prior=session.selection,adapter=this.adapters.get(id);
       const hot=adapter&&!adapter.closed&&['codex','antigravity'].includes(session.runtimeId)&&prior.reasoning!==selected.reasoning&&['identity','contextTokens','contextBudget','nativeModel'].every(key=>prior[key]===selected[key]);
@@ -389,7 +420,7 @@ export class Sessions {
       if(hot&&adapter.endpoint){const model=this.providers.get(selected.modelKey);await this.gateway.register(model,variantFor(model,selected),selected,session.runtimeId,id);}
       await this.store.event(id,{type:'notice',text:'已重新确认当前模型目录与参数，保留原生会话和已有记录。'});
       if(prior.contextTokens!==selected.contextTokens)await this.store.event(id,{type:'notice',text:'上游上下文窗口已改变；下次请求可能需要在新模型窗口重新发送完整历史，不代表已命中上游缓存。'});
-      return session;
+      return {...session,queued:false};
     }finally{this.rebinding.delete(id);}
   }
   async close(){

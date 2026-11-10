@@ -4,9 +4,11 @@ import {StringDecoder} from 'node:string_decoder';
 import {failureText} from '../services/failure-details.mjs';
 
 export function childEnvironment(extra={}){const env={...process.env};delete env.ELECTRON_RUN_AS_NODE;delete env.NODE_OPTIONS;return {...env,...extra};}
+export function exactChildEnvironment(extra={}){const env={...extra};delete env.ELECTRON_RUN_AS_NODE;delete env.NODE_OPTIONS;return env;}
 export function launch(command,args=[],options={}){
   if(!command||!Array.isArray(args)||args.some(a=>typeof a!=='string'||a.includes('\0')))throw new Error('Invalid native process arguments');
-  return spawn(command,args,{windowsHide:true,shell:false,stdio:['pipe','pipe','pipe'],...options,env:childEnvironment(options.env??{})});
+  const {exactEnv=false,...spawnOptions}=options,env=exactEnv?exactChildEnvironment(options.env??{}):childEnvironment(options.env??{});
+  return spawn(command,args,{windowsHide:true,shell:false,stdio:['pipe','pipe','pipe'],...spawnOptions,env});
 }
 export async function stopProcess(child){if(!child||!Number.isSafeInteger(child.pid)||child.exitCode!==null||child.signalCode)return;await new Promise(resolve=>{
   if(process.platform==='win32'){

@@ -32,8 +32,8 @@ test('SDK result codes distinguish account limits and override ambiguous quota t
 });
 test('local Bridge guard, model protocol, client request, upstream service and unknown errors keep distinct evidence', () => {
   const cases: Array<[Partial<FailureInput>, string, string]> = [
-    [{ accepted:false, cause:new Error('private Cookie=SECRET') },'dsh_request','invalid_request_error'],
-    [{ early:'authentication',accepted:false },'dsh_request','bridge_authentication_failed'],
+    [{ accepted:false, cause:new Error('private Cookie=SECRET') },'client_request','invalid_request_error'],
+    [{ early:'authentication',accepted:false },'client_request','bridge_authentication_failed'],
     [{ phase:'reporting',cause:new Error('disk private SECRET') },'bridge','bridge_internal_error'],
     [{ abort:'deadline' },'bridge','bridge_request_timeout'],
     [{ abort:'client_disconnect' },'connection','client_disconnected'],
@@ -42,7 +42,7 @@ test('local Bridge guard, model protocol, client request, upstream service and u
     [{ recovery:recovery('exhausted') },'model_output','model_decision_recovery_exhausted'],
     [{ recovery:recovery('stream_conflict') },'bridge','bridge_stream_conflict'],
     [{ turn:{sdk_error_code:10500} },'upstream','upstream_service_error'],
-    [{ turn:{sdk_error_code:80411} },'dsh_request','upstream_input_too_long'],
+    [{ turn:{sdk_error_code:80411} },'client_request','upstream_input_too_long'],
     [{ turn:{sdk_error_code:500} },'upstream','upstream_request_failed'],
     [{ cause:new Error('private Cookie=SECRET') },'unknown','unclassified_failure'],
   ];
@@ -77,7 +77,7 @@ test('progress diagnosis uses the final exhausted attempt and does not mask a la
 });
 
 test('HTTP and SSE expose the same source, safe text and request ID, with no success terminal or retry', async () => {
-  for (const [sdkCode,origin] of [[115,'account'],[10500,'upstream'],[80411,'dsh_request'],['FUTURE_123','upstream']] as const) {
+  for (const [sdkCode,origin] of [[115,'account'],[10500,'upstream'],[80411,'client_request'],['FUTURE_123','upstream']] as const) {
     const dir = await mkdtemp(join(tmpdir(),'qoderbridge-errors-')); let calls = 0;
     const fake = (async () => { calls++; return { response:'',error:'upstream failed SECRET',stage:'inference',
       result:'error_during_execution',sdk_error_code:sdkCode,sdk_errors:['Cookie=SECRET'],api_error_categories:['unknown'] }; }) as unknown as typeof runProbe;
@@ -118,13 +118,13 @@ test('preflight errors have IDs and identify the local Bridge key rather than up
     ] as const) {
       const response=await fetch(base+path,{method:'POST',headers:{authorization:`Bearer ${key}`},body});
       const error=(await response.json()).error;
-      assert.equal(response.status,status); assert.equal(error.code,code); assert.equal(error.origin,'dsh_request');
+      assert.equal(response.status,status); assert.equal(error.code,code); assert.equal(error.origin,'client_request');
       assert.equal(error.request_id,response.headers.get('x-qoderbridge-request-id')); assert.doesNotMatch(error.message,/SECRET/);
     }
     assert.equal(calls,0);
   } finally {await new Promise<void>(resolve=>server.close(()=>resolve()));}
 });
-test('client disconnect is logged without blaming DSH, while the Bridge deadline is returned in SSE', async () => {
+test('client disconnect is logged without blaming the host, while the Bridge deadline is returned in SSE', async () => {
   const dir=await mkdtemp(join(tmpdir(),'qoderbridge-disconnect-'));
   const fake=(async()=>{await new Promise(resolve=>setTimeout(resolve,100));return {response:'',error:'aborted',stage:'inference'};}) as unknown as typeof runProbe;
   const serve=(timeout:number)=>createBridgeServer({auth:'cli',timeout,strategy:'permission',system:'fixture'},
@@ -147,6 +147,19 @@ test('client disconnect is logged without blaming DSH, while the Bridge deadline
     const response=await fetch(url(expiring),init); const raw=await response.text();
     assert.match(raw,/bridge_request_timeout/); assert.match(raw,/Bridge/); assert.doesNotMatch(raw,/\[DONE\]/);
   } finally {await Promise.all([disconnecting,expiring].map(server=>new Promise<void>(resolve=>server.close(()=>resolve()))));}
+});
+test('failure text names the calling host and never assumes one product', () => {
+  // One bridge serves DSH, Kimi Code, Codex, Claude Code and arbitrary external clients.
+  for (const hostName of ['Kimi Code', 'Codex CLI', 'Claude Code', 'DeepSeek Harness']) {
+    const rejected = bridgeFailure({ ...input, accepted: false, hostName });
+    const timedOut = bridgeFailure({ ...input, abort: 'deadline', hostName });
+    const exhausted = bridgeFailure({ ...input, recovery: recovery('exhausted'), hostName });
+    for (const error of [rejected, timedOut, exhausted]) assert.doesNotMatch(JSON.stringify(error), /DSH/);
+    assert.equal(rejected.origin, 'client_request');
+    assert.match(rejected.message, new RegExp(`^\\[客户端请求\\] ${hostName} 发给 Bridge 的请求`));
+  }
+  const generic = bridgeFailure({ ...input, accepted: false });
+  assert.match(generic.message, /^\[客户端请求\] 客户端发给 Bridge 的请求/);
 });
 test('a local report write failure is identified as Bridge rather than model output', async () => {
   const dir=await mkdtemp(join(tmpdir(),'qoderbridge-report-failure-')); const file=join(dir,'not-a-directory');

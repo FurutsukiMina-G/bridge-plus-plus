@@ -4,7 +4,7 @@ import {join,resolve} from 'node:path';
 import {randomUUID} from 'node:crypto';
 import {existsSync} from 'node:fs';
 import {mkdir,writeFile,rm} from 'node:fs/promises';
-import {DECISION_INSTRUCTIONS,decisionInput,compileTools} from './decision.mjs';
+import {DECISION_INSTRUCTIONS,decisionInput,compileTools,safeToolName,decisionIssueSummary} from './decision.mjs';
 import {DecisionOutput} from './decision-output.mjs';
 import {BridgeError,publicError} from './errors.mjs';
 import {runtimePath} from './contain.mjs';
@@ -20,7 +20,7 @@ export {normalizedUsage} from './usage.mjs';
 // Explicit denies complement tools:[] on WorkBuddy builds that still enumerate
 // their entire tool registry in the init event. The hook covers newly added tools.
 const DENIED_TOOLS=['Agent','Read','Write','Edit','Bash','Glob','Grep','PowerShell','EnterPlanMode','ExitPlanMode','TaskCreate','TaskGet','TaskUpdate','TaskList','WebFetch','WebSearch','TaskStop','TaskOutput','Skill','AskUserQuestion','StructuredOutput','ToolSearch','DeferExecuteTool','SendMessage','TeamCreate','TeamDelete','ImageGen','LibraryUpload','VideoGen','AudioTranscribe','A2AGetAgentCard','A2ASendMessage','A2AGetTask','A2ACancelTask','ListMcpResources','ReadMcpResource','MessageColleague','SpeakInChannel','ChannelTasks','CreateColleague','CreateChannel','ListColleagues'];
-const RETRYABLE=['invalid_decision','invalid_tool_arguments','required_tool_missing','tools_disabled','wrong_pinned_tool','ambiguous_decision','unfinished_turn','missing_native_output'];
+const RETRYABLE=['invalid_decision','invalid_tool_arguments','native_tool_blocked','required_tool_missing','tools_disabled','wrong_pinned_tool','ambiguous_decision','unfinished_turn','missing_native_output'];
 const WARM_DELAY_MS=25,WARM_READY_MS=20000;
 // Avoid per-session 60–70 MB marketplace downloads, file logs and prompt traces, plus unused startup work.
 export const LEAN_RUNTIME_ENV=Object.freeze({
@@ -143,6 +143,8 @@ export class SdkTransport {
         const chunk=(delta,finish=null,usage=null)=>({id,created,model:body.model,object:'chat.completion.chunk',choices:[{index:0,delta,finish_reason:finish}],usage,...(usage?{bridge_usage:{accounting:metrics.usageAccounting??usageAccounting([]),correction_calls:metrics.correctionCalls??0}}:{})});
         void (async()=>{
           let output=new DecisionOutput(),usageRecorded=false,attemptPriorUsage=record.lastSdkUsage,attemptResumed=!!record.sessionId;const usages=[];let success=false,prewarmNext=false;
+          // Reported out of band: a long tool-argument-only phase still proves the upstream is alive.
+          const onActivity=typeof context.onActivity==='function'?context.onActivity:()=>{};
           const snapshotUsage=()=>{
             const current=usageRecorded?[]:[normalizedUsage({usage:output.usage(attemptPriorUsage,{resumed:attemptResumed})})];
             const usage=sumUsage([...usages,...current]);
@@ -169,7 +171,7 @@ export class SdkTransport {
               signal.throwIfAborted();usageRecorded=false;output=new DecisionOutput();
               attemptPriorUsage=record.lastSdkUsage;attemptResumed=!!record.sessionId;
               snapshotUsage();
-              let initialized=false,chars=0,thinkingCharacters=0,textCharacters=0,assistantThinking=0,assistantText=0,hasVisibleText=false;const attemptStart=performance.now();
+              let initialized=false,chars=0,thinkingCharacters=0,textCharacters=0,toolArgumentCharacters=0,assistantThinking=0,assistantText=0,hasVisibleText=false;const attemptStart=performance.now();
               const deniedTools=new Set();let deniedToolCount=0;
               const onDenied=name=>{deniedToolCount++;if(typeof name==='string')deniedTools.add(/^[\w.:-]{1,160}$/.test(name)?name:'<invalid-tool-name>');};
               const needsTool=body.tool_choice==='required'||typeof body.tool_choice==='object';
@@ -190,14 +192,14 @@ export class SdkTransport {
                 q=this.run({prompt:typeof content==='string'?content:{async *[Symbol.asyncIterator](){yield userMessage(content);}},options});
               }
               const calls=[],callIds=new Set(),texts=[];let stoppedAtCall=false,stoppedEmpty=false,open=null;
-              const observation=()=>({thinkingCharacters:Math.max(thinkingCharacters,assistantThinking),textCharacters:Math.max(textCharacters,assistantText),stopReasons:[...output.stopReasons],deniedToolCount,deniedTools:[...deniedTools]});
+              const observation=()=>({thinkingCharacters:Math.max(thinkingCharacters,assistantThinking),textCharacters:Math.max(textCharacters,assistantText),toolArgumentCharacters,stopReasons:[...output.stopReasons],deniedToolCount,deniedTools:[...deniedTools]});
               // The runtime emits an assistant message only for the first host call it stops at, so
               // every call is assembled from the stream. Parallel calls may share one block index.
               const closeCall=()=>{if(!open)return;let input;try{input=open.json.trim()?JSON.parse(open.json):{};}catch{input=undefined;}
                 if(!callIds.has(open.id)){callIds.add(open.id);calls.push({id:open.id,name:open.name,input});}open=null;};
               try{
                 for await(const m of q){
-                  signal.throwIfAborted();if(m.isReplay)continue;
+                  signal.throwIfAborted();if(m.isReplay)continue;onActivity();
                   // After a denied host call the runtime reports only its own turn limit.
                   if(native&&m.type==='assistant'&&(m.message?.content??[]).every(b=>b.type==='text')&&RUNTIME_STOP.test((m.message?.content??[]).map(b=>b.text).join('').trim()))continue;
                   output.observe(m);
@@ -217,8 +219,9 @@ export class SdkTransport {
                       if(b.type==='text'&&typeof b.text==='string'){assistantText+=b.text.length;hasVisibleText||=!!b.text.trim();}
                       if(b.type==='text'&&typeof b.text==='string')texts.push(b.text);
                       if(b.type!=='tool_use')continue;
-                      if(!native||!String(b.name).startsWith(PREFIX))throw new BridgeError(502,'native_tool_blocked','Runtime attempted a native tool; no host action was returned');
-                      // The runtime's parsed input is authoritative for a call it also streamed.
+                      if(!native)throw new BridgeError(502,'native_tool_blocked','Runtime attempted a native tool; no host action was returned');
+                      // Every name is collected here; the decision layer accepts a declared host
+                      // function written without its prefix and otherwise asks for one correction.
                       const known=calls.find(c=>c.id===b.id);if(known)known.input=b.input;else{callIds.add(b.id);calls.push({id:b.id,name:b.name,input:b.input});}
                     }
                   }
@@ -226,9 +229,10 @@ export class SdkTransport {
                   if(m.type==='stream_event'){
                     const event=m.event;
                     if(event?.type==='content_block_start'&&event.content_block?.type==='tool_use'){
-                      if(!(native&&String(event.content_block.name).startsWith(PREFIX)))throw new BridgeError(502,'native_tool_blocked','Runtime attempted a native tool');
-                      closeCall();open={id:event.content_block.id,name:event.content_block.name,json:''};
-                    }else if(open&&event?.delta?.type==='input_json_delta')open.json+=event.delta.partial_json??'';
+                      if(!native)throw new BridgeError(502,'native_tool_blocked','Runtime attempted a native tool');
+                      closeCall();open={id:event.content_block.id,name:String(event.content_block.name??''),json:''};
+                    }else if(open&&event?.delta?.type==='input_json_delta'){
+                      const partial=event.delta.partial_json??'';open.json+=partial;toolArgumentCharacters+=partial.length;metrics.toolArgumentCharacters=toolArgumentCharacters;}
                     else if(open&&['content_block_stop','message_delta','message_stop'].includes(event?.type))closeCall();
                     if(!initialized)throw new BridgeError(502,'sdk_incomplete','SDK streamed output before verifying runtime initialization');
                     if(event?.message?.model&&event.message.model!==body.model)throw new BridgeError(502,'model_mismatch','SDK streamed a different model');
@@ -289,15 +293,16 @@ export class SdkTransport {
               }
               catch(error){
                 const fingerprint=native?digest({calls:calls.map(c=>[c.name,c.input]),text}):digest(output.candidates().map(c=>c.text));
-                const lastAttempt=metrics.attempts.at(-1);
+                const lastAttempt=metrics.attempts.at(-1),calledTool=error.decisionIssue?(error.decisionIssue.tool??error.decisionIssue.undeclaredTool):undefined,
+                  evidenceIssue=error.decisionIssue?{tool:safeToolName(calledTool),issues:decisionIssueSummary(error.decisionIssue.issues)}:undefined;
                 lastAttempt.errorCode=error.code;
                 lastAttempt.rejection={code:error.code,output:output.summary(),...(native?{nativeCalls:calls.length,textCharacters:text.length}:{}),
-                  ...(error.decisionIssue?{tool:error.decisionIssue.tool,validationKeywords:error.decisionIssue.issues.map(i=>i.keyword)}:{})};
-                lastAttempt.rejection.evidenceFile=await rejectedEvidence(this.cfg,{requestId:context.requestId??id,model:body.model,attempt:attempt+1,errorCode:error.code,output,credential});
+                  ...(evidenceIssue?{tool:evidenceIssue.tool,validationKeywords:error.decisionIssue.issues.map(i=>i.keyword)}:{})};
+                lastAttempt.rejection.evidenceFile=await rejectedEvidence(this.cfg,{requestId:context.requestId??id,model:body.model,attempt:attempt+1,errorCode:error.code,output,credential,issue:evidenceIssue});
                 signal.throwIfAborted();
                 const shown=native?gate.emitted>0:!!projector.emitted;
                 const limit=error.code==='missing_native_output'?Math.min(1,retryLimit):retryLimit;
-                const retry=!(!native&&shown)&&!!record.sessionId&&attempt<limit&&!rejected.has(fingerprint)&&RETRYABLE.includes(error.code);
+                const retry=!(!native&&shown)&&!!record.sessionId&&attempt<limit&&!rejected.has(fingerprint)&&RETRYABLE.includes(error.code)&&(native||error.code!=='native_tool_blocked');
                 // An announcement is still an answer: deliver it rather than fail when no retry remains.
                 if(error.code==='unfinished_turn'&&!retry&&!this.cfg.guardDecision){decision={action:'final',content:text,repairs:[]};repairs=[];source='native';format='native';break;}
                 if(!retry)throw error;
@@ -357,7 +362,8 @@ export class SdkTransport {
             const redact=s=>redactSecrets(s,credential);
             const diagnostic=redact(rawMessage).split('\n')[0];
             const safe=publicError(signal.aborted?signal.reason:error,signal.aborted?{}:{diagnostic});
-            const evidenceFile=[...RETRYABLE,'output_budget'].includes(safe.body.error.code)?await decisionErrorEvidence(this.cfg,{requestId:context.requestId??id,model:body.model,errorCode:safe.body.error.code,output,credential}):null;
+            const failureIssue=error?.decisionIssue?{tool:safeToolName(error.decisionIssue.tool??error.decisionIssue.undeclaredTool),issues:decisionIssueSummary(error.decisionIssue.issues)}:undefined;
+            const evidenceFile=[...RETRYABLE,'output_budget'].includes(safe.body.error.code)?await decisionErrorEvidence(this.cfg,{requestId:context.requestId??id,model:body.model,errorCode:safe.body.error.code,output,credential,issue:failureIssue}):null;
             this.metrics.lastFailure={at:new Date().toISOString(),code:safe.body.error.code,diagnostic,stderr:redact(runtimeStderr).slice(-800),output:output.summary(),evidenceFile};
             if(RETRYABLE.includes(safe.body.error.code)){
               if(this.failures.size>=32)this.failures.delete(this.failures.keys().next().value);

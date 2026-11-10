@@ -30,9 +30,9 @@ async function fixture(t,runtimeId='kimi'){
   return {store,root,manager,media,session,instances,end};
 }
 test('capabilities distinguish all native runtimes',()=>{
-  for(const runtimeId of ['dsh','codex','kimi','antigravity'])for(const native of [true,false]){
+  for(const runtimeId of ['dsh','codex','kimi','claude','antigravity'])for(const native of [true,false]){
     const c=interjectCapability({runtimeId,selection:{modelKey:native?'native':'workbuddy:synthetic'}});
-    assert.equal(c.steer,runtimeId==='dsh'||runtimeId==='codex'&&!native);assert.equal(c.reason===null,c.steer);
+    assert.equal(c.steer,runtimeId==='dsh'||runtimeId==='claude'||runtimeId==='codex'&&!native);assert.equal(c.reason===null,c.steer);
   }
 });
 test('concurrent queue messages merge and run once after completion before automatic continuation',async t=>{

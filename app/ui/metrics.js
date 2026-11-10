@@ -75,16 +75,19 @@ export class SessionMetrics{
       }else if(usage.output&&segment&&segment.last-segment.first>=400)rate=usage.output/((segment.last-segment.first)/1000);
       else if(segment&&segment.last-segment.first>=400){rate=segment.tokens/((segment.last-segment.first)/1000);estimated=true;}
       if(usage.window)this.window=usage.window;
-      this.requests.push({...usage,at:t,turnId:event.turnId??null,rate,rateEstimated:estimated});
+      // The gateway marks tool-less requests (auto-review, titles, summaries): they carry their own small context.
+      this.requests.push({...usage,at:t,turnId:event.turnId??null,rate,rateEstimated:estimated,auxiliary:event.data?.auxiliary===true});
     }else if(event.type==='native-event'&&event.name==='request/context'&&count(event.data?.contextWindow))this.window=event.data.contextWindow;
     else if(event.type==='turn-end')this.segment=null;
   }
-  lastRequest(){
-    for(let i=this.requests.length-1;i>=0;i--)if(this.requests[i].input!==null)return this.requests[i];
-    return null;
+  /** The latest request with a prompt count; `main` skips the gateway's auxiliary requests when there is any other. */
+  lastRequest({main=false}={}){
+    for(let i=this.requests.length-1;i>=0;i--){const r=this.requests[i];if(r.input!==null&&(!main||!r.auxiliary))return r;}
+    return main?this.lastRequest():null;
   }
   context(fallbackWindow){
-    const last=this.lastRequest(),window=last?.window??this.window??fallbackWindow??null;
+    // The ring follows the main conversation, not the side requests that alternate with it.
+    const last=this.lastRequest({main:true}),window=last?.window??this.window??fallbackWindow??null;
     if(!last)return{used:null,window,ratio:null};
     const used=last.input+(last.output??0);
     return{used,window,ratio:window?Math.min(1,used/window):null};
@@ -92,7 +95,8 @@ export class SessionMetrics{
   cache(){
     const known=this.requests.filter(r=>r.input>0&&r.cached!==null);
     if(known.length){
-      const last=known.at(-1),input=known.reduce((n,r)=>n+r.input,0),cached=known.reduce((n,r)=>n+r.cached,0);
+      // "Latest request" means the latest main-conversation request; the session ratio still counts every request.
+      const main=known.filter(r=>!r.auxiliary),last=(main.length?main:known).at(-1),input=known.reduce((n,r)=>n+r.input,0),cached=known.reduce((n,r)=>n+r.cached,0);
       return{ratio:last.cached/last.input,status:last.cacheStatus,sessionRatio:cached/input,requests:known.length};
     }
     const c=this.cumulative;

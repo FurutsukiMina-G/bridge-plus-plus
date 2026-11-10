@@ -32,7 +32,9 @@ export function summarize(input){
     medianOutputTokensPerSecond:p50(inference.map(r=>r.context?.outputTokensPerSecond)),
     runtime:{toolModes:Object.fromEntries(['native','json'].map(m=>[m,rows.filter(r=>r.context?.toolMode===m).length])),warmStarts:rows.filter(r=>r.context?.warmStart).length,
       medianColdReadyMs:p50(inference.filter(r=>!r.context?.warmStart).map(r=>r.context?.runtimeReadyMs)),medianWarmReadyMs:p50(inference.filter(r=>r.context?.warmStart).map(r=>r.context?.runtimeReadyMs)),
-      unfinishedCorrections:sum(rows,r=>(r.context?.attempts??[]).filter(a=>a.errorCode==='unfinished_turn').length)},
+      unfinishedCorrections:sum(rows,r=>(r.context?.attempts??[]).filter(a=>a.errorCode==='unfinished_turn').length),
+      // Tool-argument-only phases and mid-request silence stay visible as counters, not only as failures.
+      toolArgumentCharacters:sum(rows,r=>r.context?.toolArgumentCharacters),stalledRequests:rows.filter(r=>r.errorCode==='upstream_stalled').length},
     context:{deltaRequests:rows.filter(r=>r.context?.historyMode==='delta').length,resetRequests:rows.filter(r=>r.context?.reset).length,
       charactersAvoided:sum(rows,r=>r.context?.charactersAvoided),echoCharactersAvoided:sum(rows,r=>r.context?.echoCharactersAvoided),toolsReused:rows.filter(r=>r.context?.toolsReused).length},
     credits:null,source:'workbuddy-official-sdk; local replays excluded from upstream token/cache totals'};

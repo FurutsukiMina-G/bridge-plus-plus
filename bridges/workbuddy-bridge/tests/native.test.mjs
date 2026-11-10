@@ -21,7 +21,7 @@ const usage={input_tokens:5000,output_tokens:20,cache_read_input_tokens:4000,cac
 const zero={input_tokens:0,output_tokens:0};
 const promptText=async prompt=>typeof prompt==='string'?prompt:(await prompt[Symbol.asyncIterator]().next()).value?.message?.content;
 /** The message sequence the official runtime produced in real native probes. */
-async function* turn({text='',calls=[],id='native-session',servers=[{name:'host',status:'connected'}],stop='end_turn',streamed=false,thinkingOnly=false}){
+async function* turn({text='',calls=[],id='native-session',servers=[{name:'host',status:'connected'}],stop='end_turn',streamed=false,thinkingOnly=false,raw=false}){
   yield {type:'system',subtype:'init',model,session_id:id,mcp_servers:servers,tools:servers.length?tools.map(t=>'mcp__host__'+t.function.name):[]};
   if(thinkingOnly){
     yield {type:'stream_event',event:{type:'content_block_delta',index:0,delta:{type:'thinking_delta',thinking:'synthetic private reasoning'}}};
@@ -54,7 +54,7 @@ async function* turn({text='',calls=[],id='native-session',servers=[{name:'host'
   if(stop==='max_tokens')yield {type:'stream_event',event:{type:'message_delta',delta:{stop_reason:'max_tokens'}}};
   if(text)yield {type:'assistant',uuid:'text',message:{model,content:[{type:'text',text}],usage:zero}};
   if(!calls.length){yield {type:'result',subtype:'success',is_error:false,result:text,session_id:id,usage};return;}
-  yield {type:'assistant',uuid:'calls',message:{model,content:calls.map(c=>({type:'tool_use',id:c.id,name:c.name.startsWith('mcp__')||c.name==='Read'?c.name:'mcp__host__'+c.name,input:c.input})),stop_reason:stop==='max_tokens'?'max_tokens':'tool_use',usage}};
+  yield {type:'assistant',uuid:'calls',message:{model,content:calls.map(c=>({type:'tool_use',id:c.id,name:raw||c.name.startsWith('mcp__')||c.name==='Read'?c.name:'mcp__host__'+c.name,input:c.input})),stop_reason:stop==='max_tokens'?'max_tokens':'tool_use',usage}};
   yield {type:'system',subtype:'init',model,session_id:id,mcp_servers:servers};
   yield {type:'assistant',uuid:'stop',message:{content:[{type:'text',text:'Max turns (1) exceeded'}],usage:zero}};
   throw Object.assign(new Error('Max turns (1) exceeded'),{subtype:'error_during_execution'});
@@ -116,7 +116,7 @@ test('native continuation echoes every host-received call before its results und
   const second=await collect(transport,{...body,messages:[...body.messages,call,{role:'tool',tool_call_id:'call_00_A',content:'HOST_RESULT'}]});
   assert.equal(second.result.choices[0].message.content,'a.ts 共 3 行，已检查完毕。');assert.equal(seen[1].options.resume,'native-session');
   const input=JSON.parse(seen[1].prompt.split('\n')[0]);assert.equal(input.history,'new-messages-only');
-  assert.deepEqual(input.messages,[{role:'assistant',host_received_calls:[{id:'call_00_A',name:'read',arguments:{file_path:'a.ts'}}],content:input.messages[0].content},{role:'tool',tool_call_id:'call_00_A',content:'HOST_RESULT'}]);
+  assert.deepEqual(input.messages,[{role:'assistant',host_received_calls:[{id:'call_00_A',name:'read',received_input:{file_path:'a.ts'}}],content:input.messages[0].content},{role:'tool',tool_call_id:'call_00_A',content:'HOST_RESULT'}]);
   assert.match(input.messages[0].content,/all calls.*actually received and executed.*Max turns \(1\) exceeded.*not a limit on you.*results below correspond.*by ID.*resend them now/i);
   assert.ok(!seen[1].prompt.includes('prior_decision_calls'));assert.ok(!seen[1].prompt.includes('host rules'));assert.equal(second.metrics.historyMode,'delta');
   assert.deepEqual(second.metrics.nativeEcho,{calls:1,characters:JSON.stringify(input.messages[0]).length,truncated:false});
@@ -126,7 +126,7 @@ test('native parallel echo preserves call order and the result IDs that follow i
   const {transport,seen}=await fixture(t,[{calls},{text:'两个结果均已收到。'}]);const first=await collect(transport),message=first.result.choices[0].message;
   await collect(transport,{...body,messages:[...body.messages,message,{role:'tool',tool_call_id:'call_00_P',content:'RESULT_A'},{role:'tool',tool_call_id:'call_01_Q',content:'RESULT_B'}]});
   const input=JSON.parse(seen[1].prompt.split('\n')[0]);
-  assert.deepEqual(input.messages[0].host_received_calls,[{id:'call_00_P',name:'read',arguments:{file_path:'a.ts'}},{id:'call_01_Q',name:'write',arguments:{file_path:'b.ts',content:'B'}}]);
+  assert.deepEqual(input.messages[0].host_received_calls,[{id:'call_00_P',name:'read',received_input:{file_path:'a.ts'}},{id:'call_01_Q',name:'write',received_input:{file_path:'b.ts',content:'B'}}]);
   assert.deepEqual(input.messages.slice(1).map(m=>[m.tool_call_id,m.content]),[['call_00_P','RESULT_A'],['call_01_Q','RESULT_B']]);
 });
 test('native echo truncates long string values and reduces later calls at the total limit',async t=>{
@@ -135,8 +135,8 @@ test('native echo truncates long string values and reduces later calls at the to
   const results=calls.map(call=>({role:'tool',tool_call_id:call.id,content:'OK'}));
   const second=await collect(transport,{...body,messages:[...body.messages,message,...results]});
   const echo=JSON.parse(seen[1].prompt.split('\n')[0]).messages[0],received=echo.host_received_calls;
-  assert.equal(received.length,6);assert.equal(received[0].arguments.content,('0'+'x'.repeat(1400)).slice(0,600)+'…(shortened here; the host received all 1401 characters)');
-  assert.match(received[0].arguments.file_path,/the host received all 701 characters/);assert.deepEqual(received.at(-1),{id:'call_long_5',name:'write'});
+  assert.equal(received.length,6);assert.equal(received[0].received_input.content,('0'+'x'.repeat(1400)).slice(0,600)+'…(shortened here; the host received all 1401 characters)');
+  assert.match(received[0].received_input.file_path,/the host received all 701 characters/);assert.deepEqual(received.at(-1),{id:'call_long_5',name:'write'});
   assert.ok(JSON.stringify(echo).length<=6000);assert.deepEqual(second.metrics.nativeEcho,{calls:6,characters:JSON.stringify(echo).length,truncated:true});
 });
 test('new, replayed and reset native requests do not add an echo',async t=>{
@@ -315,7 +315,7 @@ test('a thinking-only Max turns stop gets one correction in the same SDK session
   assert.match(seen[1].prompt,/上一条没有给出工具调用或答复，请给出下一步/);
   assert.equal(result.choices[0].message.tool_calls[0].id,'call_recovered');assert.doesNotMatch(raw,/Max turns/);
   assert.equal(metrics.attempts[0].errorCode,'missing_native_output');
-  assert.deepEqual(metrics.attempts[0].observation,{thinkingCharacters:27,textCharacters:0,stopReasons:['end_turn'],deniedToolCount:2,deniedTools:['mcp__host__read']});
+  assert.deepEqual(metrics.attempts[0].observation,{thinkingCharacters:27,textCharacters:0,toolArgumentCharacters:0,stopReasons:['end_turn'],deniedToolCount:2,deniedTools:['mcp__host__read']});
   assert.doesNotMatch(JSON.stringify(metrics.attempts[0].observation),/synthetic private/);
   assert.equal(result.usage.prompt_tokens,10000);assert.equal(result.bridge_usage.correction_calls,1);
   assert.equal(result.bridge_usage.accounting.attempts,2);assert.equal(result.bridge_usage.accounting.known_prompt_tokens,10000);
@@ -346,4 +346,73 @@ test('empty native recovery honors zero retries and refuses output-budget stops'
     const {transport,seen}=await fixture(t,[step],cfg);const {raw}=await collect(transport);
     assert.equal(seen.length,1);assert.match(raw,new RegExp(code));assert.doesNotMatch(raw,/Max turns|\[DONE\]/);
   }
+});
+
+test('a declared host function called without its prefix is forwarded with a local repair',async t=>{
+  const {transport,seen}=await fixture(t,[{raw:true,calls:[{id:'call_00_U',name:'read',input:{file_path:'a.ts'}}]}]);
+  const {result,metrics}=await collect(transport);
+  assert.equal(seen.length,1);assert.equal(metrics.attempts.length,1);
+  assert.deepEqual(result.choices[0].message.tool_calls.map(c=>[c.id,c.function.name,JSON.parse(c.function.arguments)]),[['call_00_U','read',{file_path:'a.ts'}]]);
+  assert.deepEqual(metrics.attempts[0].repairs,[{kind:'unprefixed_host_tool',tool:'read'}]);
+});
+
+test('an unprefixed host call still has to satisfy the declared schema',async t=>{
+  const {transport}=await fixture(t,[{raw:true,calls:[{id:'call_00_U',name:'read',input:{file_path:5}}]}],{decisionRetries:0});
+  const {raw,metrics}=await collect(transport);
+  assert.match(raw,/invalid_tool_arguments/);assert.equal(metrics.attempts[0].errorCode,'invalid_tool_arguments');
+  assert.match(raw,/read:/);
+});
+
+test('a runtime built-in tool name is corrected once into the declared host function',async t=>{
+  const {transport,seen}=await fixture(t,[
+    {raw:true,calls:[{id:'call_00_B',name:'Read',input:{file_path:'a.ts'}}]},
+    {raw:true,calls:[{id:'call_00_C',name:'read',input:{file_path:'a.ts'}}]}]);
+  const {result,metrics}=await collect(transport);
+  assert.equal(seen.length,2);assert.equal(metrics.attempts[0].errorCode,'native_tool_blocked');
+  assert.match(seen[1].prompt,/You called "Read", which is not a host function/);
+  assert.match(seen[1].prompt,/the declared host functions are: mcp__host__read, mcp__host__write/);
+  assert.equal(seen[1].options.resume,'native-session');
+  assert.equal(result.choices[0].message.tool_calls[0].id,'call_00_C');assert.equal(metrics.attempts[1].errorCode,undefined);
+});
+
+test('a batch mixing a host call with a non-host tool is rejected whole',async t=>{
+  const mixed={raw:true,calls:[{id:'call_00_M',name:'read',input:{file_path:'a.ts'}},{id:'call_01_N',name:'WebSearch',input:{query:'x'}}]};
+  const {transport,seen}=await fixture(t,[mixed,mixed],{decisionRetries:1});
+  const {raw,metrics}=await collect(transport);
+  assert.equal(metrics.attempts.length,2);assert.match(raw,/native_tool_blocked/);assert.match(raw,/WebSearch/);
+  assert.doesNotMatch(raw,/"tool_calls"/);assert.equal(seen.length,2);
+});
+
+test('an exhausted native tool correction reports the offending tool name',async t=>{
+  const builtin={raw:true,calls:[{id:'call_00_B',name:'Bash',input:{command:'ls'}}]};
+  const {transport,seen}=await fixture(t,[builtin,builtin],{decisionRetries:1});
+  const {raw}=await collect(transport);
+  assert.equal(seen.length,2);assert.match(raw,/native_tool_blocked/);assert.match(raw,/Bash/);
+  assert.match(raw,/which is not a host function/);assert.match(raw,/"automatic_retry":false/);
+});
+
+test('streamed tool arguments are counted as tool-argument activity, not text',async t=>{
+  const calls=[{id:'call_00_P',name:'read',input:{file_path:'a.txt'}},{id:'call_01_Q',name:'write',input:{file_path:'b.txt',content:'中文 "q"'}}];
+  const {transport}=await fixture(t,[{streamed:true,calls}]);
+  const {metrics}=await collect(transport);
+  const expected=calls.reduce((total,call)=>total+JSON.stringify(call.input).length,0);
+  assert.equal(metrics.attempts[0].observation.toolArgumentCharacters,expected);
+  assert.equal(metrics.toolArgumentCharacters,expected);
+});
+test('native host tool definitions never carry the top-level $schema marker',async()=>{
+  const draft={type:'function',function:{name:'fetch',description:'Fetch a page',parameters:{$schema:'https://json-schema.org/draft/2020-12/schema',type:'object',properties:{url:{type:'string'}},required:['url'],additionalProperties:false}}};
+  const server=hostServer([...tools,draft]).instance,[a,b]=InMemoryTransport.createLinkedPair();await server.connect(a);
+  const client=new Client({name:'test',version:'1.0.0'});await client.connect(b);
+  const listed=(await client.listTools()).tools;
+  assert.deepEqual(listed.map(t=>t.name),['read','write','fetch']);
+  assert.equal(Object.hasOwn(listed[2].inputSchema,'$schema'),false);
+  assert.deepEqual(listed[2].inputSchema,{type:'object',properties:{url:{type:'string'}},required:['url'],additionalProperties:false});
+  assert.equal(listed[2].description,'Fetch a page');assert.deepEqual(listed[0].inputSchema,tools[0].function.parameters);
+  assert.equal(draft.function.parameters.$schema,'https://json-schema.org/draft/2020-12/schema');
+  await client.close();
+});
+test('JSON mode fails a runtime built-in tool call immediately without a correction round',async t=>{
+  const {transport,seen}=await fixture(t,[{calls:[{id:'r',name:'Read',input:{file_path:'x'}}],servers:[]}],{toolMode:'json'});
+  const {raw}=await collect(transport);
+  assert.equal(seen.length,1);assert.match(raw,/native_tool_blocked/);assert.ok(!raw.includes('[DONE]'));
 });

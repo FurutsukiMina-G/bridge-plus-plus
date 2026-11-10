@@ -13,3 +13,8 @@ export async function kimiInstallFailure(userData,code,stderr){
  try{await mkdir(dir,{recursive:true,mode:0o700});const size=await stat(file).then(info=>info.size,()=>0);if(size+Buffer.byteLength(line)>64*1024)await writeFile(file,line,{mode:0o600});else await appendFile(file,line,{mode:0o600});}catch{return new Error(message+'；诊断日志无法写入');}
  return new Error(message);
 }
+export async function claudeInstallFailure(userData,code,stderr){
+ const details=environmentStderr(stderr),message=`Claude Code 安装或校验失败（退出码：${typeof code==='number'?code:'未知'}）；${details||'npm 未返回诊断输出'}；旧受管版本未切换`,dir=join(userData,'environments/logs'),file=join(dir,'claude-install.log'),line=JSON.stringify({at:new Date().toISOString(),code:typeof code==='number'?code:null,message})+'\n';
+ try{await mkdir(dir,{recursive:true,mode:0o700});const size=await stat(file).then(info=>info.size,()=>0);if(size+Buffer.byteLength(line)>64*1024)await writeFile(file,line,{mode:0o600});else await appendFile(file,line,{mode:0o600});}catch{return new Error(message+'；诊断日志无法写入');}
+ return new Error(message);
+}

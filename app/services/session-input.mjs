@@ -1,6 +1,6 @@
 import {mediaTurnLimits} from './media-capabilities.mjs';
 export function interjectCapability(session){
-  if(session.runtimeId==='dsh'||session.runtimeId==='codex'&&session.selection?.modelKey!=='native')return {steer:true,reason:null};
+  if(session.runtimeId==='dsh'||session.runtimeId==='claude'||session.runtimeId==='codex'&&session.selection?.modelKey!=='native')return {steer:true,reason:null};
   return {steer:false,reason:session.runtimeId==='kimi'?'Kimi ACP 未提供受支持的插话接口，消息可排队到本轮结束后发送。':session.runtimeId==='codex'?'原生 Codex exec 是一次性进程，消息可排队到本轮结束后发送。':'Antigravity 是一次性进程，消息可排队到本轮结束后发送。'};
 }
 export function queuedBatch(session,capabilities){

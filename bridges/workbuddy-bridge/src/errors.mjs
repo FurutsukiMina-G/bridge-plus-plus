@@ -19,7 +19,7 @@ export function publicError(error,{diagnostic}={}){
   if(typeof extra.request_id==='string')inherited.request_id=redactSecrets(extra.request_id).slice(0,200);
   if(extra.automatic_retry===false)inherited.automatic_retry=false;
   if(error instanceof BridgeError||limited)return {status:limited?429:error.status,body:{error:{type:'bridge_error',code:limited?'upstream_rate_limited':error.code,...inherited,...details,
-    ...(limited||['sessions_busy','invalid_decision','invalid_tool_arguments','required_tool_missing','tools_disabled','wrong_pinned_tool','ambiguous_decision','unfinished_turn','missing_native_output','output_budget'].includes(error.code)?{automatic_retry:false}:{})}}};
+    ...(limited||['sessions_busy','invalid_decision','invalid_tool_arguments','native_tool_blocked','required_tool_missing','tools_disabled','wrong_pinned_tool','ambiguous_decision','unfinished_turn','missing_native_output','output_budget'].includes(error.code)?{automatic_retry:false}:{})}}};
   if(error?.name==='TimeoutError')return publicError(new BridgeError(504,'timeout',details.message||'WorkBuddy request deadline exceeded'));
   if(error?.name==='AbortError')return publicError(new BridgeError(499,'cancelled',details.message||'Request cancelled'));
   return publicError(new BridgeError(502,'upstream_failure',details.message||'WorkBuddy 上游请求失败，未提供具体原因',details));

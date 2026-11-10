@@ -191,7 +191,7 @@ export class Telemetry {
       streamed_output_tokens: this.textDeltaCount+this.thinkingDeltaCount,
       streamed_reasoning_tokens: this.thinkingDeltaCount,
       reasoning_tokens: usage?.completion_tokens_details?.reasoning_tokens ?? null,
-      // Bridge-observed decode rate: output tokens over first-delta to last-delta time, like Harness tok/s.
+      // Bridge-observed decode rate: output tokens over first-delta to last-delta time, like client tok/s.
       output_tokens_per_second: usage && decodeMs && decodeMs > 0 && usage.completion_tokens > 1
         ? usage.completion_tokens / (decodeMs / 1000) : null,
       cache_usage_status: usage?.prompt_tokens_details ? 'reported' : 'not_reported_by_qoder',

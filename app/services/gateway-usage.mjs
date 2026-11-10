@@ -2,7 +2,7 @@ import {once} from 'node:events';
 import {cacheUsage} from './usage-view.mjs';
 const number=value=>typeof value==='number'&&Number.isFinite(value)&&value>=0?value:null;
 /** Observe provider usage once; publish it before terminal frames can end a native turn. */
-export async function relayCompletion(upstream,res,{signal,includeUsage,model,contextWindow,onUsage=async()=>{},onNotice=async()=>{},onFailure=async()=>{},onSuccess=async()=>{},sanitizeError=value=>value,started=performance.now()}){
+export async function relayCompletion(upstream,res,{signal,includeUsage,auxiliary=false,model,contextWindow,onUsage=async()=>{},onNotice=async()=>{},onFailure=async()=>{},onSuccess=async()=>{},sanitizeError=value=>value,started=performance.now()}){
   let usage=null,extra=null,firstToken=null,published=false,failurePublished=false,limited=false,limitPublished=false;const toolIndices=new Set();
   const failure=async frame=>{if(frame?.error){frame.error=sanitizeError(frame.error);if(!failurePublished){failurePublished=true;await onFailure(frame.error);}}};
   const observe=frame=>{
@@ -12,7 +12,7 @@ export async function relayCompletion(upstream,res,{signal,includeUsage,model,co
   const publish=async()=>{
     if(limited&&!limitPublished){limitPublished=true;await onNotice({type:'native-event',source:'gateway',name:'gateway/output-limit',data:{reason:'max_output_tokens'}});}
     if(published||!usage&&!extra?.accounting)return;published=true;
-    await onUsage({type:'usage',scope:'request',source:'gateway',data:{model,prompt_tokens:number(usage?.prompt_tokens),completion_tokens:number(usage?.completion_tokens),reasoning_tokens:number(usage?.completion_tokens_details?.reasoning_tokens),...cacheUsage(usage??{},extra),context_window:contextWindow??null,first_token_ms:firstToken,duration_ms:performance.now()-started,...(extra?.accounting?{usage_accounting:extra.accounting}:{}),...(Number.isInteger(extra?.correction_calls)?{correction_calls:extra.correction_calls}:{})}});
+    await onUsage({type:'usage',scope:'request',source:'gateway',data:{model,prompt_tokens:number(usage?.prompt_tokens),completion_tokens:number(usage?.completion_tokens),reasoning_tokens:number(usage?.completion_tokens_details?.reasoning_tokens),...cacheUsage(usage??{},extra),context_window:contextWindow??null,first_token_ms:firstToken,duration_ms:performance.now()-started,...(auxiliary?{auxiliary:true}:{}),...(extra?.accounting?{usage_accounting:extra.accounting}:{}),...(Number.isInteger(extra?.correction_calls)?{correction_calls:extra.correction_calls}:{})}});
   };
   const write=async text=>{signal.throwIfAborted();if(!res.write(text))await once(res,'drain',{signal});};
   if(!String(upstream.headers.get('content-type')).includes('text/event-stream')){

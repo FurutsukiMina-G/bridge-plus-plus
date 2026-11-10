@@ -36,6 +36,17 @@ test('each runtime selects its own system contract and preserves provider-specif
     }
   }
   assert.match(bridgePromptConfig('codex').qoder.system,/arguments.input/);
+  // Codex declares no apply_patch tool for gateway model ids, and its .bat shim truncates multi-line patches on Windows.
+  for(const text of [bridgePromptConfig('codex').qoder.system,...Object.values(bridgePromptConfig('codex').workbuddy.hostPrompts)])assert.match(text,/declares no apply_patch function, apply_patch is unavailable/);
+  // That sentence belongs to Codex only: no other runtime prompts the model to avoid apply_patch.
+  for(const id of ['dsh','kimi','claude']){
+    const prompts=bridgePromptConfig(id);
+    for(const text of [prompts.qoder.system,...Object.values(prompts.qoder.decisionContract),...Object.values(prompts.workbuddy.hostPrompts)])assert.doesNotMatch(text,/declares no apply_patch function, apply_patch is unavailable/);
+  }
+  const claude=bridgePromptConfig('claude');assert.equal(runtimeProfile('claude').name,'Claude Code');
+  for(const text of [claude.qoder.system,claude.qoder.decisionContract.full,...Object.values(claude.workbuddy.hostPrompts)]){
+    assert.match(text,/Read, Edit, Write, Glob, Grep, PowerShell, Agent, Skill, ToolSearch and AskUserQuestion/);assert.match(text,/there is no Bash tool/i);assert.match(text,/ToolSearch/);assert.match(text,/DeferredToolPlaceholder/);assert.match(text,/Preserve every tool_use id/);
+  }
   assert.ok(runtimeProfile('antigravity').nativeOnly);
   for(const id of [undefined,'unknown','__proto__','antigravity'])assert.throws(()=>bridgePromptConfig(id));
 });

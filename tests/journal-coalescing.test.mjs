@@ -22,3 +22,31 @@ test('one-second idle bound, byte bound and orderly abnormal shutdown flush pend
   await f.event({type:'thinking',text:'close-on-failure'});await f.store.close();assert.match(await readFile(f.file,'utf8'),/close-on-failure/);
   const reopened=await new Store(f.root).open();try{assert.equal(reopened.session('synthetic-session').status,'interrupted');assert.equal((await reopened.events('synthetic-session')).length,3);}finally{await reopened.close();}
 });
+test('ten thousand text-only tool output chunks merge into few rows with identical text',async t=>{
+  const f=await fixture(t,{streamFlushMs:60000,streamFlushBytes:4096}),live=[],parts=[];
+  f.store.on('event',e=>live.push(e));
+  for(let i=0;i<10000;i++){const text='chunk-'+String(i).padStart(5,'0');parts.push(text);await f.event({type:'tool-output',text,toolId:'call-one',attemptId:'a',turnId:'t'});}
+  assert.equal(live.length,10000);assert.equal(new Set(live.map(e=>e.id)).size,10000);
+  const rows=await f.store.events('synthetic-session');
+  assert.ok(rows.length<200,'merged rows: '+rows.length);assert.ok(rows.every(row=>row.type==='tool-output'&&row.toolId==='call-one'));
+  assert.equal(rows.map(row=>row.text).join(''),parts.join(''));assert.equal(rows[0].id,live[0].id);
+});
+test('alternating output of two tools flushes in arrival order and never mixes tools',async t=>{
+  const f=await fixture(t,{streamFlushMs:60000,streamFlushBytes:1e6}),sent=[];
+  for(const round of [0,1,2])for(const toolId of ['call-a','call-b']){const text=round+':'+toolId;sent.push([toolId,text]);await f.event({type:'tool-output',text,toolId});}
+  const rows=await f.store.events('synthetic-session');assert.deepEqual(rows.map(row=>[row.toolId,row.text]),sent);
+});
+test('tool output carrying native data keeps one record per chunk',async t=>{
+  const f=await fixture(t,{streamFlushMs:60000,streamFlushBytes:1e6});
+  for(const text of ['native-a','native-b','native-c'])await f.event({type:'tool-output',text,toolId:'call-native',data:{update:text}});
+  const rows=await f.store.events('synthetic-session');
+  assert.deepEqual(rows.map(row=>row.text),['native-a','native-b','native-c']);assert.deepEqual(rows.map(row=>row.data.update),['native-a','native-b','native-c']);
+});
+test('buffered tool output lands before a following tool-end and other event types',async t=>{
+  const f=await fixture(t,{streamFlushMs:60000,streamFlushBytes:1e6});
+  await f.event({type:'tool-start',toolId:'call-z'});
+  for(const text of ['out-a','out-b'])await f.event({type:'tool-output',text,toolId:'call-z'});
+  await f.event({type:'tool-end',toolId:'call-z',status:'completed'});
+  const rows=(await readFile(f.file,'utf8')).trim().split('\n').map(line=>JSON.parse(line));
+  assert.deepEqual(rows.map(row=>row.type==='tool-output'?row.text:row.type),['tool-start','out-aout-b','tool-end']);
+});

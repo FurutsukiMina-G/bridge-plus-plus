@@ -1134,11 +1134,17 @@ function compactSchema(value: unknown): unknown {
     key === 'description' && typeof item === 'string' ? shorten(item, 160) : compactSchema(item),
   ]));
 }
+/** `$schema` only selects a validator dialect; it is noise and tokens for the model. */
+function withoutTopSchema<T>(value: T): T {
+  if (!value || typeof value !== 'object' || Array.isArray(value) || !Object.hasOwn(value, '$schema')) return value;
+  const { $schema, ...rest } = value as Record<string, unknown>;
+  return rest as T;
+}
 export function toolDefinitions(request: ChatRequest, full = false) {
   return (request.tools ?? []).map(t => ({ name: t.function.name,
     description: full ? t.function.description ?? '' : shorten(t.function.description ?? '', 320),
-    parameters: full ? t.function.parameters ?? { type: 'object' } :
-      compactSchema(t.function.parameters ?? { type: 'object' }) }));
+    parameters: withoutTopSchema(full ? t.function.parameters ?? { type: 'object' } :
+      compactSchema(t.function.parameters ?? { type: 'object' }) as unknown) }));
 }
 export function conversationPrompt(request: ChatRequest, options: {
   omitUnchangedTools?: boolean; historyMode?: 'full' | 'delta'; fullToolDetails?: boolean;
@@ -1167,8 +1173,8 @@ export function conversationPrompt(request: ChatRequest, options: {
   const contract = options.decisionContract
     ? (options.historyMode === 'delta' ? options.decisionContract.continuation : options.decisionContract.full)
     : options.historyMode === 'delta'
-    ? 'Continue the same Harness task under the existing decision contract. Return exactly one JSON decision; host tools and approvals remain with Harness.\n'
-    : `You are the model decision layer for DeepSeek Harness. The Harness itself owns and executes all tools.\n` +
+    ? 'Continue the same host task under the existing decision contract. Return exactly one JSON decision; host tools and approvals remain with the host.\n'
+    : `You are the model decision layer for an external host. The host itself owns and executes all tools.\n` +
     `Return exactly one JSON object, with no markdown:\n` +
     `{"kind":"final","content":"your response"}\n` +
     `or {"kind":"tool_call","name":"provided tool name","arguments":{...}}\n` +

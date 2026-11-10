@@ -3,12 +3,19 @@ import assert from 'node:assert/strict';
 import {mkdtemp,rm} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
-import {ContextPool} from '../src/context.mjs';
+import {ContextPool,stripAcp} from '../src/context.mjs';
 import {SdkTransport} from '../src/sdk-transport.mjs';
 const credential={uid:'synthetic',domain:'synthetic',accessToken:'synthetic'};
 const call=id=>({role:'assistant',content:null,tool_calls:[{id,type:'function',function:{name:'read',arguments:'{}'}}]});
 const messages=[{role:'system',content:'Synthetic system'},{role:'user',content:'Synthetic task'},call('a'),{role:'tool',tool_call_id:'a',content:'PRIVATE_OLD_A'},{role:'assistant',content:'Synthetic progress'},call('b'),{role:'tool',tool_call_id:'b',content:'PRIVATE_OLD_B'}];
 const assistant={role:'assistant',content:'Synthetic answer'};
+// A host-specific envelope tag must never hide ordinary text from history comparison.
+test('only the exact host block tag is ignored when comparing history',()=>{
+  assert.equal(stripAcp('<acp tokens="x" type="text">m00001</acp>\nSynthetic task'),'Synthetic task');
+  assert.equal(stripAcp('<acp tokens="x" type="text">m00001</acp><acp tokens="y" type="text">m00002</acp>Plain'),'Plain');
+  assert.equal(stripAcp('<acp tokens="x" type="text">m00001</acp> trailing prose'),' trailing prose');
+  for(const text of ['Synthetic <acp> mention','<acp> is not a block','<acp tokens="x" type="text">m00001</ACP>','<acp tokens="x" type="text">note</acp>'])assert.equal(stripAcp(text),text);
+});
 async function fixture(t,cfg={}){const runtime=await mkdtemp(join(tmpdir(),'wb-prune-')),pool=new ContextPool({runtime,...cfg});t.after(async()=>{await pool.close();await rm(runtime,{recursive:true,force:true});});return pool;}
 for(const scoped of [true,false])test(`WorkBuddy pruned prefix resumes the exact native conversation, scoped=${scoped}`,async t=>{
   const pool=await fixture(t),body={model:'synthetic',prompt_cache_key:'client',...scoped?{bridge_scope:'app'}:{},messages};
@@ -23,7 +30,7 @@ test('native pruned history reuse keeps the host-received echo before retained r
   first.commit({},nativeAssistant,{echo:'native'});first.release();
   const next=await pool.acquire({...body,messages:[...messages.filter((_,i)=>i!==3),nativeAssistant,{role:'tool',tool_call_id:'native-c',content:'RETAINED_RESULT'}]},credential,new AbortController().signal);
   assert.equal(next.record.id,first.record.id);assert.equal(next.reused,true);assert.ok(next.metrics.pruned_history_reuse);
-  assert.deepEqual(next.messages[0].host_received_calls,[{id:'native-c',name:'read',arguments:{file_path:'new.ts'}}]);assert.equal(next.messages[1].tool_call_id,'native-c');
+  assert.deepEqual(next.messages[0].host_received_calls,[{id:'native-c',name:'read',received_input:{file_path:'new.ts'}}]);assert.equal(next.messages[1].tool_call_id,'native-c');
   assert.deepEqual(next.metrics.nativeEcho,{calls:1,characters:JSON.stringify(next.messages[0]).length,truncated:false});next.release();
 });
 for(const [ratio,threshold,reason]of [[0.6,0.6,'context_usage_high'],[null,0.6,'context_usage_unknown'],[0.2,0,'disabled']])test(`WorkBuddy rejects unsafe pruning ${ratio}/${threshold} with content-free reset diagnostics`,async t=>{

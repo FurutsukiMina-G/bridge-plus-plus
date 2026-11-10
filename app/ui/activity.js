@@ -17,7 +17,7 @@ export function toolSummary(event){
   const command=Array.isArray(v.command)?v.command.join(' '):v.command??v.commandline;
   // A search reads best as what it looks for, then where.
   const text=x=>typeof x==='string'&&x.trim(),wanted=[v.pattern,v.query].find(text),place=[v.path,v.searchpath,v.directorypath].find(text);
-  const first=[command,wanted&&place?`${wanted} · ${place}`:null,v.file_path,v.path,v.absolutepath,v.targetfile,v.directorypath,v.searchpath,v.pattern,v.query,Array.isArray(v.queries)?v.queries.join(', '):null,v.url,v.description,v.prompt,v.text,d.title,d.tool_name].find(x=>typeof x==='string'&&x.trim());
+  const first=[command,wanted&&place?`${wanted} · ${place}`:null,v.file_path,v.path,v.absolutepath,v.targetfile,v.directorypath,v.searchpath,v.pattern,v.query,Array.isArray(v.queries)?v.queries.join(', '):null,v.url,v.skill,v.description,v.prompt,v.text,Array.isArray(v.questions)?v.questions[0]?.question:null,d.title,d.tool_name].find(x=>typeof x==='string'&&x.trim());
   if(first)return first.replace(/\s+/g,' ').slice(0,160);
   if(Array.isArray(v.changes))return v.changes.map(c=>c.path).filter(Boolean).join(', ').slice(0,160);
   if(Array.isArray(d.locations))return d.locations.map(l=>l.path).filter(Boolean).join(', ').slice(0,160);
@@ -26,6 +26,16 @@ export function toolSummary(event){
 
 /** Tool names differ per runtime (Codex item types, DSH/Antigravity tool names, Kimi titles); order matters. */
 const TOOL_KINDS=[
+  // Claude Code's own tools whose names the generic patterns below would misread.
+  [/^toolsearch$/i,'加载工具','正在加载工具定义'],
+  [/^skill$/i,'使用技能','正在使用技能'],
+  [/^askuserquestion$/i,'提问','正在等你回答'],
+  [/^(enter|exit)planmode$/i,'计划模式','正在切换计划模式'],
+  [/^(enter|exit)worktree$/i,'切换工作树','正在切换工作树'],
+  [/^(taskstop|sendmessage|listagents)$/i,'子代理','正在管理子代理'],
+  [/^(cron(create|delete|list)|schedulewakeup)$/i,'定时任务','正在设置定时任务'],
+  [/^workflow$/i,'工作流','正在运行工作流'],
+  [/^reportfindings$/i,'提交结论','正在提交审查结论'],
   [/mcp/i,'MCP 工具','正在调用 MCP 工具'],
   [/web_?search|search_?web/i,'联网搜索','正在联网搜索'],
   [/fetch|url|browser|http|web/i,'读取网页','正在读取网页'],

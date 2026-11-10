@@ -54,6 +54,7 @@ export async function inspectRuntimeMedia(runtime,{readArchive=readExternalAsar}
       const block=/async initialize\(params\)\s*\{[\s\S]{0,1800}?promptCapabilities:\s*\{([^}]+)\}/.exec(s);
       if(pkg.name==='@moonshot-ai/kimi-code'&&block)return {image:/image:\s*true/.test(block[1]),audio:/audio:\s*true/.test(block[1]),video:false,version:pkg.version,source:'installed ACP initialize implementation'};
     }
+    if(runtime.id==='claude')return {image:true,audio:false,video:false,version:runtime.version??null,source:'stream-json Anthropic base64 image blocks',reason:'Claude Code 仅支持图片附件'};
     if(runtime.id==='dsh'){
       const s=await readArchive(join(dirname(runtime.executable),'resources/app.asar'));
       const image=s.includes("readonly type: 'image'; readonly mediaType: ImageMediaType; readonly data: string;")&&s.includes('SessionPromptRequest');

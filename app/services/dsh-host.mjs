@@ -24,6 +24,20 @@ export async function configureDshSearch(home,{baseURL,key}){
  if(ops.length)await files.rpc('settings/mutate',{ns:row.ns,expectedRevision:row.revision,ops});await files.rpc('credentials/set',{ref:'BRIDGEPP_SEARCH_KEY',value:key});
 }
 export function dshEfforts(efforts){const supported=['off','minimal','low','medium','high','xhigh','max'];const result={};for(const effort of efforts){const key=effort==='none'?'off':supported.includes(effort)?effort:supported.find(k=>!(k==='off'&&efforts.includes('none'))&&!Object.hasOwn(result,k)&&!efforts.includes(k));if(!key)throw new Error('DSH cannot represent every native effort for this model');result[key]=effort;}return result;}
+export function dshQuestionAnswers(questions,answer={}){
+  // The raw-JSON dialog sends the native answers array itself, without items.
+  if(Array.isArray(answer?.answers)&&!Array.isArray(answer?.items))return answer.answers;
+  const items=Array.isArray(answer.items)?answer.items:[],list=Array.isArray(questions)?questions:[];
+  return list.map((question,index)=>{
+    const id=question.id??question.question??String(index),item=items.find(row=>(row.id??row.question)===id)??items[index];
+    const labels=(question.options??[]).map(option=>option?.label).filter(label=>typeof label==='string');
+    const raw=Array.isArray(item?.selected)?item.selected:[],selected=raw.filter(label=>labels.includes(label)),invalid=raw.filter(label=>!labels.includes(label));
+    const custom=[typeof item?.custom==='string'?item.custom:null,...invalid].filter(value=>value!=null&&value!=='').join('，');
+    // A single-choice question: typed text replaces the picked option.
+    return {id,selected:question.multiSelect!==true&&custom?[]:selected,...custom?{custom}:{}};
+  });
+}
+export function dshQuestionRejection(){return {kind:'rejected',error:{name:'UserQuestionError',code:'ASK_CANCELLED',message:'the user cancelled ask_user_question'}};}
 export class DshHost extends EventEmitter {
   constructor(store,runtime,{gateway}={}){super();this.store=store;this.runtime=runtime;this.gateway=gateway;this.settingsQueue=Promise.resolve();this.closed=false;}
   async configureSearch(){if(this.gateway)await configureDshSearch(join(this.store.root,'engines/dsh'),await this.gateway.searchEndpoint());}
@@ -53,20 +67,36 @@ export class DshHost extends EventEmitter {
   }
   nativeUrl(sessionId){if(!this.origin)throw new Error('DSH Host 未运行');return `${this.origin}/?token=${this.token}${sessionId?`&sessionId=${encodeURIComponent(sessionId)}`:''}`;}
   async followApprovals(sessionId,onApproval,onResolved,onError){
-    await this.ready();const socket=new WebSocket(this.origin.replace('http:','ws:')+'/api/remote.mux',{headers:{cookie:this.cookie},origin:this.origin,maxPayload:1024*1024}),streamId=randomUUID();let clientId,active=true;const pending=new Map();
+    await this.ready();const socket=new WebSocket(this.origin.replace('http:','ws:')+'/api/remote.mux',{headers:{cookie:this.cookie},origin:this.origin,maxPayload:8*1024*1024}),streamId=randomUUID();let clientId,active=true;const pending=new Map();
     const stop=()=>{active=false;pending.clear();socket.close();};
     await new Promise((resolve,reject)=>{const timer=setTimeout(()=>{stop();reject(new Error('DSH approval stream timed out'));},10000);
       socket.on('open',()=>socket.send(JSON.stringify({type:'open',streamId,endpoint:'$events',payload:{args:{}}})));
       socket.on('message',bytes=>{void(async()=>{const m=JSON.parse(bytes.toString());if(m.streamId!==streamId)return;if(m.type==='error')throw new Error(m.error?.message??'DSH approval stream failed');if(m.type!=='item')return;const f=m.value;
         if(f.type==='ready'){clientId=f.clientId;clearTimeout(timer);resolve();return;}
-        if(f.type==='cancel'){const id=`dsh:remote:${f.eventId}`;if(pending.delete(id))await onResolved(id);return;}
+        if(f.type==='cancel'){for(const prefix of ['dsh:remote:','dsh:question:']){const id=prefix+f.eventId;if(pending.delete(id))await onResolved(id,'expired');}return;}
         if(f.type!=='waterfall')return;
-        if(f.event!=='approval/request'||f.agentId!==sessionId){await this.rpc('$events/result',{clientId,eventId:f.eventId,outcome:{kind:'next'}});return;}
-        const id=`dsh:remote:${f.eventId}`;pending.set(id,f.eventId);await onApproval({type:'approval',approvalId:id,name:f.request.toolName,data:f.request,choices:['approve','reject']});
+        const question=f.event==='user-questions/request';
+        if((question||f.event==='approval/request')&&f.agentId===sessionId){
+          const id=(question?'dsh:question:':'dsh:remote:')+f.eventId,row={eventId:f.eventId,kind:question?'question':'approval',...(question?{questions:f.request?.questions??[]}:{})};pending.set(id,row);
+          if(question){try{await onApproval({type:'question',approvalId:id,name:'ask_user_question',data:f.request});}catch(error){pending.delete(id);await this.rpc('$events/result',{clientId,eventId:f.eventId,outcome:dshQuestionRejection()}).catch(()=>{});}}
+          else await onApproval({type:'approval',approvalId:id,name:f.request.toolName,data:f.request,choices:['approve','reject']});
+          return;
+        }
+        await this.rpc('$events/result',{clientId,eventId:f.eventId,outcome:{kind:'next'}});
       })().catch(error=>{clearTimeout(timer);if(!clientId){stop();reject(error);}else if(active)onError(error);});});
       socket.on('error',error=>{clearTimeout(timer);if(!clientId)reject(error);else if(active)onError(error);});socket.on('close',()=>{clearTimeout(timer);pending.clear();if(!clientId)reject(new Error('DSH approval stream closed'));else if(active)onError(new Error('DSH approval stream closed'));});
     });
-    return {stop,approve:async(id,choice)=>{const eventId=pending.get(id);if(!active||!eventId)throw new Error('DSH 授权已过期');if(!['approve','reject'].includes(choice))throw new Error('DSH 仅支持允许一次或拒绝');await this.rpc('$events/result',{clientId,eventId,outcome:{kind:'result',value:choice==='approve'?'allowed-once':'rejected'}});pending.delete(id);}};
+    return {stop,approve:async(id,choice,answer)=>{
+      const row=pending.get(id);if(!active||!row)throw new Error('DSH 授权已过期');
+      if(row.kind==='question'){
+        const rejected=String(choice).startsWith('reject');
+        if(!rejected&&choice!=='approve')throw new Error('DSH 问题仅支持回答或拒绝');
+        let outcome;try{outcome=rejected?dshQuestionRejection():{kind:'result',value:{answers:dshQuestionAnswers(row.questions,answer)}};}catch(error){outcome=dshQuestionRejection();}
+        await this.rpc('$events/result',{clientId,eventId:row.eventId,outcome});pending.delete(id);return;
+      }
+      if(!['approve','reject'].includes(choice))throw new Error('DSH 仅支持允许一次或拒绝');
+      await this.rpc('$events/result',{clientId,eventId:row.eventId,outcome:{kind:'result',value:choice==='approve'?'allowed-once':'rejected'}});pending.delete(id);
+    }};
   }
   async follow(sessionId,onFrame,onError){
     await this.ready();const socket=new WebSocket(this.origin.replace('http:','ws:')+'/api/remote.mux',{headers:{cookie:this.cookie},origin:this.origin,maxPayload:8*1024*1024});const streamId=randomUUID();let chain=Promise.resolve(),active=true;

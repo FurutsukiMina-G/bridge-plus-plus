@@ -37,6 +37,8 @@ export interface Config extends Selection {
   isolationRuntimeIdentity?:{version:string;fingerprint:string};
   blankWarmLimit?:number;
   blankWarmTtlMs?:number;
+  /** Calling host's display name for failure text; absent means a generic client. */
+  hostName?:string;
 }
 export function baseOptions(config: Config, controller: AbortController): Options {
   return {

@@ -31,7 +31,55 @@ export function kimiStopReason(result={}){
  if(result.stopReason==='cancelled')return {kind:'cancelled',message:'Kimi 原生任务已取消。'};
  return runtimeReason(result.error??`Kimi 本轮结束原因：${failureText(result.stopReason)||'未提供 stopReason'}。`);
 }
-export class KimiAcpAdapter extends RuntimeLifecycle {
+export function kimiElicitationQuestions(params={}){
+  const properties=params.requestedSchema?.properties??{},lines=String(params.message??'').split('\n');
+  return Object.entries(properties).map(([id,property],index)=>{
+    const variants=Array.isArray(property?.oneOf)?property.oneOf:Array.isArray(property?.anyOf)?property.anyOf:Array.isArray(property?.items?.anyOf)?property.items.anyOf:[];
+    const options=variants.map(variant=>({label:variant?.const??variant?.title,...variant?.description?{description:variant.description}:{}})).filter(option=>typeof option.label==='string');
+    const question=lines[index]?.trim()||property?.title||id;
+    // Without an enum there is nothing to pick, so the form has to accept typed text instead.
+    return {id,question,...property?.title?{header:property.title}:{},...property?.description?{detail:property.description}:{},...options.length?{options}:{},multiSelect:property?.type==='array'&&options.length>0,allowCustom:!options.length};
+  });
+}
+function kimiFreeTextValue(type,text){
+  const value=String(text??'').trim();if(!value)return undefined;
+  if(type==='number'){const number=Number(value);return Number.isFinite(number)?number:undefined;}
+  if(type==='integer'){const number=Number(value);return Number.isInteger(number)?number:undefined;}
+  if(type==='boolean')return value==='true'||value==='是'?true:value==='false'||value==='否'?false:value;
+  return value;
+}
+export function kimiPermissionQuestion(params={}){
+  if(params.toolCall?.title!=='AskUserQuestion')return null;
+  // Never fall back to a generic card here: its "allow" always picks the first option and answers wrong.
+  const options=(params.options??[]).filter(option=>option?.optionId!=='q0_skip'&&!['reject_once','reject_always'].includes(option?.kind)&&typeof option?.name==='string').map(option=>({label:option.name,...option.description?{description:option.description}:{}}));
+  const text=(params.toolCall?.content??[]).map(part=>part?.content?.text??part?.text??'').filter(Boolean).join('\n').trim();
+  return {questions:[{id:'q0',question:text||'Agent 提问',options,allowCustom:false}]};
+}
+export function kimiElicitationResult(questions,choice,answer={},properties={}){
+  if(String(choice).startsWith('reject')||!Array.isArray(questions)||!questions.length)return {action:'decline'};
+  const items=Array.isArray(answer?.items)?answer.items:[],native=answer?.items===undefined&&answer?.content&&typeof answer.content==='object'&&!Array.isArray(answer.content)?answer.content:null,content={};
+  // The raw-JSON dialog sends the native content object itself, without items.
+  if(!items.length&&native)return Object.keys(native).length?{action:'accept',content:{...native}}:{action:'decline'};
+  for(const question of questions){
+    const item=items.find(row=>row.id===question.id||row.question===question.question),labels=(question.options??[]).map(option=>option?.label).filter(label=>typeof label==='string');
+    if(labels.length){
+      const selected=(item?.selected??[]).filter(label=>labels.includes(label));
+      if(selected.length)content[question.id]=question.multiSelect?selected:selected[0];
+      continue;
+    }
+    const value=kimiFreeTextValue(properties?.[question.id]?.type,item?.custom);
+    if(value!==undefined)content[question.id]=value;
+  }
+  // Unanswered properties are omitted from content; one answered property is enough to accept.
+  return Object.keys(content).length?{action:'accept',content}:{action:'decline'};
+}
+export function kimiPermissionQuestionResult(params,choice,answer={}){
+  const options=params.options??[],skip=options.find(option=>option.optionId==='q0_skip')??options.find(option=>['reject_once','reject_always'].includes(option?.kind));
+  if(String(choice).startsWith('reject'))return {outcome:skip?{outcome:'selected',optionId:skip.optionId}:{outcome:'cancelled'}};
+  const label=Array.isArray(answer?.items)?answer.items[0]?.selected?.[0]:undefined;
+  const chosen=options.find(option=>option!==skip&&typeof option?.name==='string'&&option.name===label);
+  return {outcome:chosen?{outcome:'selected',optionId:chosen.optionId}:{outcome:'cancelled'}};
+}export class KimiAcpAdapter extends RuntimeLifecycle {
   constructor(options){super(options);this.requests=new Map();this.nativeTurn=0;}
   async start(){
     const env={};if(this.endpoint){const home=join(this.dir,'kimi-home');await mkdir(home,{recursive:true});const original=process.env.KIMI_CODE_HOME??join(homedir(),'.kimi-code');let base={};try{base=parse(await readFile(join(original,'config.toml'),'utf8'));}catch(e){if(e.code!=='ENOENT')throw new Error('原生 Kimi 配置不可读取，请先在原生程序中修复。');}await writeFile(join(home,'config.toml'),stringify(mergeKimiConfig(base,parse(kimiAcpConfig(this)),original)),{mode:0o600});env.KIMI_CODE_HOME=home;env.AWB_GATEWAY_KEY=this.endpoint.key;
@@ -40,7 +88,7 @@ export class KimiAcpAdapter extends RuntimeLifecycle {
     }
     this.checkOpen();let command=this.runtime.executable,args=['acp'];if(/\.[cm]?js$/i.test(command)){const node=nativeNode();args=[...node.args,command,...args];command=node.command;Object.assign(env,node.env);}
     this.rpc=new RpcProcess((this.launchProcess??launch)(command,args,{cwd:this.project.path,env}),{jsonrpc:true,timeoutMs:180000,maxEventBytes:72*1024*1024});this.rpc.on('message',m=>{void this.enqueue(()=>this.closed?undefined:this.message(m));});this.rpc.on('closed',e=>{void this.enqueue(async()=>{if(!this.closed&&this.running){this.running=false;await this.emit({type:'error',text:e.message});await this.emit({type:'turn-end',status:'failed'});}});});
-    const result=await this.rpc.request('initialize',{protocolVersion:1,clientInfo:{name:'agent-workbench',title:'Bridge++',version:'0.1.13'},clientCapabilities:{}});
+    const result=await this.rpc.request('initialize',{protocolVersion:1,clientInfo:{name:'agent-workbench',title:'Bridge++',version:'0.1.13'},clientCapabilities:{elicitation:{form:{}}}});
     this.promptCapabilities=result.agentCapabilities?.promptCapabilities??{};
     this.checkOpen();await this.emit({type:'notice',text:`${result.agentInfo?.name??'Kimi Code'} ${result.agentInfo?.version??''} · ACP 已连接。`});
     const created=await this.rpc.request(this.session.nativeId?'session/resume':'session/new',{cwd:this.project.path,mcpServers:[],...(this.session.nativeId?{sessionId:this.session.nativeId}:{})});this.nativeId=created.sessionId??this.session.nativeId;await this.saveNative(this.nativeId);
@@ -53,14 +101,26 @@ export class KimiAcpAdapter extends RuntimeLifecycle {
   }
   async message(m){if(m.method==='session/update'){if(!this.loading)await this.emit(kimiAcpEvent(m.params.update));return;}
     // JSON-RPC IDs restart with the native process; persisted approval IDs cannot.
+    if(m.id!==undefined&&m.method==='elicitation/create'){
+      if(this.permissionMode==='readonly'){this.rpc.respond(m.id,{action:'decline'});await this.emit({type:'error',source:'native-permission',code:'permission_denied',text:'只读模式下已自动放弃 Kimi 提问；本轮不自动续作。'});return;}
+      const id=`kimi:${randomUUID()}`;this.requests.set(id,m);await this.emit({type:'question',approvalId:id,name:'ask_user_question',data:{questions:kimiElicitationQuestions(m.params)}});return;
+    }
     if(m.id!==undefined&&m.method==='session/request_permission'){
       if(this.permissionMode==='readonly'){const reject=m.params?.options?.find(o=>o.kind==='reject_once');this.rpc.respond(m.id,{outcome:reject?{outcome:'selected',optionId:reject.optionId}:{outcome:'cancelled'}});await this.emit({type:'error',source:'native-permission',code:'permission_denied',text:'只读规划模式已拒绝 Kimi 原生工具执行请求；本轮不自动续作。'});return;}
+      const question=kimiPermissionQuestion(m.params);
+      if(question){
+        // Nothing the Bridge++ form could show: skip natively instead of a card whose "allow" picks the first option.
+        if(!question.questions[0].options.length){this.rpc.respond(m.id,kimiPermissionQuestionResult(m.params,'reject'));await this.emit({type:'notice',text:'Kimi 发来的提问无法在 Bridge++ 里显示，已按跳过处理。'});return;}
+        const id=`kimi:${randomUUID()}`;this.requests.set(id,m);await this.emit({type:'question',approvalId:id,name:'ask_user_question',data:question});return;
+      }
       const id=`kimi:${randomUUID()}`;this.requests.set(id,m);await this.emit({type:'approval',approvalId:id,name:m.params?.toolCall?.title??'Kimi 工具操作',data:m.params,choices:kimiPermissionChoices(m.params.options)});return;
     }
     if(m.id!==undefined&&m.method){this.rpc.reject(m.id,'Use the native Kimi interface for this operation');await this.emit({type:'notice',text:`原生交互 ${m.method} 可在完整工具界面中处理。`});}
   }
   async prompt(text,attachments=[]){await this.ensureStarted();this.checkOpen();const prompt=[...(text?[{type:'text',text}]:[]),...await Promise.all(attachments.map(async a=>{if(!['image','audio'].includes(a.kind)||this.promptCapabilities?.[a.kind]!==true)throw new Error('Kimi ACP 握手未声明此附件能力');return {type:a.kind,mimeType:a.mime,data:(await readFile(a.path)).toString('base64')};}))];this.running=true;const nativeTurn=++this.nativeTurn;void this.rpc.request('session/prompt',{sessionId:this.nativeId,prompt},0).then(result=>this.enqueue(async()=>{if(this.closed||nativeTurn!==this.nativeTurn)return;this.running=false;this.requests.clear();const reason=kimiStopReason(result);if(['max_tokens','max_turn_requests','refusal'].includes(result.stopReason))await this.emit({type:'notice',text:reason.message});await this.emit({type:'turn-end',status:result.error?'failed':kimiStopStatus(result.stopReason),retainAdapter:['max_tokens','max_turn_requests'].includes(result.stopReason),data:failureValue(result),...reason?{reason}:{},nativeTurn});}),e=>this.enqueue(async()=>{if(this.closed||!this.running||nativeTurn!==this.nativeTurn)return;this.running=false;const reason=runtimeReason(e);await this.emit({type:'error',text:reason.message});await this.emit({type:'turn-end',status:'failed',reason,nativeTurn});}));}
-  async approve(id,choice){const m=this.requests.get(id);if(!m)throw new Error('授权已过期');const kinds={approve:'allow_once','approve-session':'allow_always',reject:'reject_once','reject-session':'reject_always'},chosen=(m.params.options??[]).find(o=>o.kind===kinds[choice]);if(!chosen)throw new Error('此操作未提供所选授权范围，请在 Kimi 原生窗口中处理');this.rpc.respond(m.id,{outcome:{outcome:'selected',optionId:chosen.optionId}});this.requests.delete(id);}
+  async approve(id,choice,answer){const m=this.requests.get(id);if(!m)throw new Error('授权已过期');    if(m.method==='elicitation/create'){this.rpc.respond(m.id,kimiElicitationResult(kimiElicitationQuestions(m.params),choice,answer,m.params?.requestedSchema?.properties));this.requests.delete(id);return;}
+    if(m.method==='session/request_permission'&&m.params?.toolCall?.title==='AskUserQuestion'){this.rpc.respond(m.id,kimiPermissionQuestionResult(m.params,choice,answer));this.requests.delete(id);return;}
+const kinds={approve:'allow_once','approve-session':'allow_always',reject:'reject_once','reject-session':'reject_always'},chosen=(m.params.options??[]).find(o=>o.kind===kinds[choice]);if(!chosen)throw new Error('此操作未提供所选授权范围，请在 Kimi 原生窗口中处理');this.rpc.respond(m.id,{outcome:{outcome:'selected',optionId:chosen.optionId}});this.requests.delete(id);}
   async cancel(){this.rpc?.notify('session/cancel',{sessionId:this.nativeId});}
   async close(){this.closed=true;this.running=false;this.ready=false;this.requests.clear();await this.rpc?.close();}
 }

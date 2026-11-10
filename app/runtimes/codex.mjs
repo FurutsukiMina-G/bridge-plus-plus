@@ -15,9 +15,34 @@ export function codexLaunchSettings({endpoint,variant,model,session,permissionMo
   return {args,env};
 }
 
+export function codexUserInputQuestions(params={}){
+  const questions=Array.isArray(params.questions)?params.questions:[];
+  return questions.map(question=>{
+    const options=Array.isArray(question.options)?question.options.map(option=>({label:option?.label,...option?.description?{description:option.description}:{}})).filter(option=>typeof option.label==='string'):undefined;
+    // A question without options is free text: it must accept a typed answer.
+    return {id:question.id,question:question.question,...question.header?{header:question.header}:{},...(options?.length?{options}:{}),allowCustom:question.isOther===true||!options?.length,...question.isSecret?{secret:true}:{}};
+  });
+}
+export function codexUserInputResult(params,choice,answer={}){
+  const questions=Array.isArray(params?.questions)?params.questions:[],items=Array.isArray(answer?.items)?answer.items:[],answers={};
+  if(choice!=='approve'&&choice!=='approve-session')return {answers};
+  // The raw-JSON dialog sends the native answers object itself, without items: pass it through.
+  if(!items.length&&answer&&typeof answer==='object'&&!Array.isArray(answer)){
+    const native=answer.answers;
+    if(native&&typeof native==='object'&&!Array.isArray(native))return {answers:native};
+    if(native===undefined)return {answers:answer};
+  }
+  for(const [index,question] of questions.entries()){
+    const labels=(question.options??[]).map(option=>option?.label).filter(label=>typeof label==='string');
+    const item=items.find(row=>(row.id??row.question)===(question.id??question.question))??items[index];
+    const selected=Array.isArray(item?.selected)?item.selected.filter(label=>labels.includes(label)):[],custom=typeof item?.custom==='string'&&item.custom!==''?[item.custom]:[];
+    answers[question.id??question.question??String(index)]={answers:[...selected,...custom]};
+  }
+  return {answers};
+}
 export function codexApprovalResult(message,choice,answer){
   const approved=choice==='approve'||choice==='approve-session';
-  if(['item/tool/requestUserInput','tool/requestUserInput'].includes(message.method))return {answers:answer??{}};
+  if(['item/tool/requestUserInput','tool/requestUserInput'].includes(message.method))return codexUserInputResult(message.params,choice,answer);
   if(message.method==='item/permissions/requestApproval')return {permissions:approved?structuredClone(message.params?.permissions??{}):{},scope:choice==='approve-session'?'session':'turn'};
   if(['item/commandExecution/requestApproval','item/fileChange/requestApproval'].includes(message.method))return {decision:choice==='approve-session'?'acceptForSession':approved?'accept':'decline'};
   throw new Error('此审批类型需在原生 Codex 界面处理');
@@ -63,7 +88,7 @@ export class CodexAppServerAdapter extends RuntimeLifecycle {
         if(this.permissionMode==='readonly'){this.rpc.respond(message.id,codexApprovalResult(message,'reject'));await this.emit({type:'error',source:'native-permission',code:'permission_denied',text:'只读模式已拒绝原生 Codex 写入/权限升级请求；本轮不自动续作。'});return;}
         const approvalId=`codex:${randomUUID()}`;this.requests.set(approvalId,message);await this.emit({type:'approval',approvalId,name:message.method,data:message.params,choices:['approve','approve-session','reject']});return;
       }
-      if(['item/tool/requestUserInput','tool/requestUserInput'].includes(message.method)){const approvalId=`codex:${randomUUID()}`;this.requests.set(approvalId,message);await this.emit({type:'question',approvalId,data:message.params});return;}
+      if(['item/tool/requestUserInput','tool/requestUserInput'].includes(message.method)){const approvalId=`codex:${randomUUID()}`;this.requests.set(approvalId,message);await this.emit({type:'question',approvalId,name:'ask_user_question',data:{...message.params,questions:codexUserInputQuestions(message.params)}});return;}
       this.rpc.reject(message.id,'Open the native Codex CLI to use this client interaction');await this.emit({type:'notice',text:`原生交互 ${message.method} 请使用原生窗口。`});return;
     }
     if(message.method==='turn/started')this.turnId=message.params?.turn?.id??this.turnId;

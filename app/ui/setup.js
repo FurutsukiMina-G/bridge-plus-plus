@@ -8,7 +8,7 @@ import {resetText,upstreamText} from './upstream.js';
  * snapshot reports and never guess a status the backend did not give. */
 
 const esc=value=>String(value??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'})[c]);
-const tiles={dsh:'DS',kimi:'Ki',codex:'Cx',antigravity:'AG'};
+const tiles={dsh:'DS',kimi:'Ki',codex:'Cx',antigravity:'AG',claude:'CC'};
 const tile=r=>`<span class="rt-tile rt-${esc(r?.id??'none')}">${esc(tiles[r?.id]??'?')}</span>`;
 
 /** A runtime the workbench may use: the backend's status when it reports one, otherwise whether it was found. */
@@ -17,6 +17,9 @@ export const usable=r=>!!r&&(r.status?r.status==='ready':!!r.installed);
 const permissionWarnings={dsh:{
   auto:{title:'确认启用完全权限？',text:'这一档没有沙箱，也不再询问：Agent 可以直接改文件、运行外部命令，包括敏感操作。只在你信任当前任务时使用。',confirm:'启用完全权限'},
   'auto-review':{title:'确认启用自动审查？',text:'这一档没有沙箱。每次工具调用前由当前模型审查，审查拒绝的调用再由你决定。这是 DSH 的实验功能，可能误放行或误拒绝，也会多消耗 token。',confirm:'启用自动审查'},
+},claude:{
+  // Native bypassPermissions: Claude Code has no OS sandbox of its own on Windows.
+  auto:{title:'确认跳过所有权限询问？',text:'这一档对应 Claude Code 原生的 bypassPermissions：不再询问，Agent 可以直接改文件、运行任何命令，包括删除和联网操作。Claude Code 在 Windows 上没有沙箱。只在你信任当前任务时使用。',confirm:'跳过所有询问'},
 }};
 export const permissionWarning=(runtimeId,mode)=>permissionWarnings[runtimeId]?.[mode]??null;
 export const statusOf=r=>r?.status??(r?.installed?'ready':'missing');
@@ -29,7 +32,11 @@ export function unusableReason(r){
   return{missing:`${r.name} 尚未安装`,'needs-setup':`${r.name} 还需要完成设置`,error:`${r.name} 检测失败`}[statusOf(r)]??'';
 }
 // Codex and Antigravity sign in to services that some networks cannot reach; say so where it matters.
-const networkNotes={codex:'需要能访问 OpenAI 的网络与账号',antigravity:'需要能访问 Google 的网络与账号'};
+const networkNotes={codex:'需要能访问 OpenAI 的网络与账号',antigravity:'需要能访问 Google 的网络与账号',claude:'由 Bridge++ 从 npm 仓库下载安装（约 345 MB），不需要 Anthropic 账号'};
+/** Runtimes Bridge++ runs only as a tool executor, without a native window to open. */
+const executorOnly=new Set(['claude']);
+// Claude Code: what keeps it apart from the Claude desktop app and from Anthropic, shown on its card.
+const isolationNotes={claude:'独立的配置目录，不登录、不带任何 Anthropic 凭据；只连 Bridge++ 本地网关，用 Qoder CN / WorkBuddy 模型。不读写本机 Claude 桌面版的数据。'};
 const kindNames={managed:'由 Bridge++ 管理',bundled:'随 Bridge++ 附带',system:'系统安装'};
 const jobVerbs={install:'安装',update:'更新'};
 const ago=date=>{
@@ -75,7 +82,7 @@ function environmentActions(env,r,{canOpenNative}){
   if(!busy&&a.check)list.push(`<button class="btn sm" data-env-check="${esc(r.id)}">${icon('refresh')}检查更新</button>`);
   if(env?.page)list.push(`<button class="btn sm" data-env-page="${esc(r.id)}">${icon('external')}官方页面</button>`);
   list.push(`<button class="btn sm" data-configure-runtime="${esc(r.id)}">指定路径</button>`);
-  if(usable(r))list.push(`<button class="btn sm" data-open-runtime="${esc(r.id)}" ${canOpenNative?'':'disabled'}>${icon('external')}原生程序</button><button class="link-btn" data-use-runtime="${esc(r.id)}">用于新会话</button>`);
+  if(usable(r))list.push(`${executorOnly.has(r.id)?'':`<button class="btn sm" data-open-runtime="${esc(r.id)}" ${canOpenNative?'':'disabled'}>${icon('external')}原生程序</button>`}<button class="link-btn" data-use-runtime="${esc(r.id)}">用于新会话</button>`);
   return`<div class="card-actions">${list.join('')}</div>`;
 }
 /** One card on Settings › 运行环境; `env` is the backend's environment entry, when it has one. */
@@ -83,7 +90,7 @@ export function environmentCardHtml(r,env,{permissions='',canOpenNative=false}={
   const status=statusOf(r),busy=running(env?.job),scanning=!!r.checking&&!busy;
   const label=busy?`正在${jobVerbs[env.job.action]??'处理'}`:scanning?statusNames.checking:statusNames[status]??status;
   const reason=status!=='ready'&&!scanning?unusableReason(r):'';
-  const note=status!=='ready'&&!scanning&&networkNotes[r.id]?`<div class="env-note">${icon('info')}<span>${networkNotes[r.id]}</span></div>`:'';
+  const note=(status!=='ready'&&!scanning&&networkNotes[r.id]?`<div class="env-note">${icon('info')}<span>${networkNotes[r.id]}</span></div>`:'')+(isolationNotes[r.id]?`<div class="env-note">${icon('lock')}<span>${isolationNotes[r.id]}</span></div>`:'');
   return`<article class="runtime-card env-${esc(status)}"><div class="card-top">${tile(r)}<span class="card-status ${busy||scanning?'busy':status==='ready'?'ready':status==='missing'?'none':status==='error'?'error':'warn'}">${busy||scanning?'<span class="spinner"></span>':'<span class="status-dot"></span>'}${esc(label)}</span></div>
     <h3>${esc(r.name)}<span class="proto">${esc(r.protocol)}</span></h3><p>${esc(r.description)}</p>
     ${versionLine(env,r)}${reason?`<div class="env-reason">${icon('alert')}<span>${esc(reason)}</span></div>`:''}${r.warning?`<div class="env-reason">${icon('alert')}<span>${esc(r.warning)}</span></div>`:''}${note}${jobHtml(env?.job)}

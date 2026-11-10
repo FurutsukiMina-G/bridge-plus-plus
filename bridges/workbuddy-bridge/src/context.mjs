@@ -16,9 +16,9 @@ export function evictionCandidate(records,scope){
   for(const r of rows)if(r.bridgeScope!==undefined&&!seen.has(r.scope)){seen.add(r.scope);roots.add(r);}
   return rows.filter(r=>!r.busy&&!roots.has(r)).sort((a,b)=>Number(b.scope===scope)-Number(a.scope===scope)||a.touched-b.touched)[0];
 }
-// DSH tags stored message blocks with <acp tokens="..." type="text">m00001</acp> on later turns.
-// Ignore only that host bookkeeping tag when checking whether prior history is unchanged.
-const stripAcp=text=>String(text).replace(/^(?:<acp\b[^>]*>m\d+<\/acp>\r?\n?)+/,'');
+// A host may tag stored message blocks with <acp tokens="..." type="text">m00001</acp> on later turns.
+// Only that exact bookkeeping form at the start of a message is ignored; ordinary text is untouched.
+export const stripAcp=text=>String(text).replace(/^(?:<acp\b[^>]*>m\d+<\/acp>\r?\n?)+/,'');
 const historyDigest=m=>digest(typeof m?.content==='string'?{...m,content:stripAcp(m.content)}:m);
 const historyEntry=m=>({key:historyDigest(m),role:m.role,...m.tool_call_id?{toolId:m.tool_call_id}:{},callIds:(m.tool_calls??[]).flatMap(c=>typeof c?.id==='string'?[c.id]:[])});
 export function textContent(content){
@@ -141,8 +141,8 @@ export class ContextPool {
         };
         // The bridge serialized these arguments itself; a parse failure still must not fail the request.
         const args=text=>{try{return shorten(JSON.parse(text));}catch{return shorten(String(text));}};
-        const calls=record.message.tool_calls.map(c=>({id:c.id,name:c.function.name,arguments:args(c.function.arguments)}));
-        const content='These are all calls from your preceding reply that the host actually received and executed. The runtime transcript may show only some of them, with different IDs, followed by Max turns (1) exceeded; that is only a host-handoff marker, not a limit on you. The tool results below correspond to these calls by ID. If you intended more calls that are absent here, the host did not receive them; resend them now if needed, keeping independent calls in the same reply.';
+        const calls=record.message.tool_calls.map(c=>({id:c.id,name:c.function.name,received_input:args(c.function.arguments)}));
+        const content='These are all calls from your preceding reply that the host actually received and executed. The runtime transcript may show only some of them, with different IDs, followed by Max turns (1) exceeded; that is only a host-handoff marker, not a limit on you. The tool results below correspond to these calls by ID. received_input is the host\'s receipt of each call, not the call format: write arguments directly as the tool schema\'s fields, never inside a wrapper key. If you intended more calls that are absent here, the host did not receive them; resend them now if needed, keeping independent calls in the same reply.';
         const render=detailed=>({role:'assistant',host_received_calls:calls.map((call,index)=>index<detailed?call:{id:call.id,name:call.name}),content});
         let detailed=calls.length;echo=render(detailed);
         while(JSON.stringify(echo).length>6000&&detailed>0){truncated=true;echo=render(--detailed);}

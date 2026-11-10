@@ -56,11 +56,33 @@ export async function findManagedKimi(userData,{verify}={}){
     return {executable,version:entry.name,warning:null};
   }catch{}return null;
 }
+const claudePlatform=arch=>`@anthropic-ai/claude-code-win32-${arch==='arm64'?'arm64':'x64'}`;
+export function claudeExecutable(directory,arch=process.arch){return join(directory,'node_modules',claudePlatform(arch),'claude.exe');}
+async function claudePackage(executable,arch=process.arch){
+  if(typeof executable!=='string'||!executable)return null;const platformDir=dirname(executable),wrapperPath=join(platformDir,'../claude-code/package.json'),platformPath=join(platformDir,'package.json');
+  try{const [wrapper,platform,info]=await Promise.all([readFile(wrapperPath,'utf8').then(JSON.parse),readFile(platformPath,'utf8').then(JSON.parse),stat(executable)]),name=claudePlatform(arch);if(!info.isFile()||wrapper.name!=='@anthropic-ai/claude-code'||platform.name!==name||wrapper.version!==platform.version)return null;return {executable,version:wrapper.version,wrapperPath,platformPath};}catch{return null;}
+}
+export async function findManagedClaude(userData,{verify,arch=process.arch}={}){
+  if(!userData)return null;const root=join(userData,'environments/claude-code'),dirs=(await list(root)).filter(e=>e.isDirectory()&&/^\d+\.\d+\.\d+(?:-[\w.-]+)?$/.test(e.name)).sort((a,b)=>compareRuntimeVersions(b.name,a.name));
+  for(const entry of dirs)try{
+    const dir=join(root,entry.name),receiptPath=join(dir,'bridgepp-install.json'),receipt=JSON.parse(await readFile(receiptPath,'utf8')),executable=claudeExecutable(dir,arch),found=await claudePackage(executable,arch);
+    if(receipt.verified!==true||receipt.version!==entry.name||!found||found.version!==entry.name)continue;
+    const [mainInfo,packageInfo,platformInfo]=await Promise.all([stat(executable),stat(found.wrapperPath),stat(found.platformPath)]),verifiedFiles={main:{size:mainInfo.size,mtimeMs:mainInfo.mtimeMs},package:{size:packageInfo.size,mtimeMs:packageInfo.mtimeMs},platform:{size:platformInfo.size,mtimeMs:platformInfo.mtimeMs}},cached=receipt.verifiedFiles;
+    if(verify&&JSON.stringify(cached)!==JSON.stringify(verifiedFiles)){
+      const result=await verify(executable,entry.name),ok=result===true||result?.ok===true,warning=typeof result==='object'?result.warning??null:null;
+      if(!ok)return {executable:null,version:null,warning:warning??'托管 Claude Code 校验未通过，已停用此版本'};
+      if(!warning)await writeFile(receiptPath,JSON.stringify({...receipt,verifiedFiles}),{mode:0o600}).catch(()=>{});
+      return {executable,version:entry.name,warning};
+    }
+    return {executable,version:entry.name,warning:null};
+  }catch{}return null;
+}
 export function hideQaRuntimes(runtimes,env=process.env,{isPackaged=false}={}){if(isPackaged)return runtimes;const hidden=new Set(String(env.AWB_HIDE_RUNTIMES??'').split(',').map(s=>s.trim()));return runtimes.map(r=>hidden.has(r.id)?{...r,executable:null,desktop:null,installed:false,status:'missing',reason:'源码测试模拟：此环境未安装'}:r);}
 const descriptions=[
   {id:'dsh',name:'DeepSeek Harness',short:'DSH',protocol:'native-web',mode:'integrated',tools:'完整原生工具 / Skills / MCP / 子代理',description:'原生 Harness 会话与完整界面'},
   {id:'kimi',name:'Kimi Code',short:'Kimi',protocol:'acp',mode:'integrated',tools:'完整原生工具 / Skills / MCP / 子代理',description:'ACP 双向会话与原生审批'},
   {id:'codex',name:'Codex CLI',short:'Codex',protocol:'exec-json / app-server',mode:'integrated',tools:'完整原生工具 / Skills / MCP / 子代理',description:'原生 exec JSONL；第三方模型使用 app-server'},
+  {id:'claude',name:'Claude Code',short:'CC',protocol:'stream-json',mode:'integrated',tools:'完整原生工具 / Skills / MCP / 子代理',description:'私有配置、非登录；使用 Qoder CN / WorkBuddy 模型'},
   {id:'antigravity',name:'Antigravity',short:'AG',protocol:'stream-json',mode:'native',tools:'完整原生工具 / Skills / MCP / 子代理',description:'独立 Gemini 模型源 · 原生 CLI / 桌面'}
 ];
 export function runtimePlaceholders(){return descriptions.map(r=>({...r,executable:null,desktop:null,installed:false,status:'checking',reason:'正在检测运行环境，请稍候',kind:'system',version:null,warning:null}));}
@@ -71,10 +93,11 @@ export async function discoverRuntimes(preferences={},options={}){
   const managed=await findManagedKimi(options.userData,{verify:options.verifyManagedKimi});
   const preferred=preferences.kimi?.executable,rel=options.userData&&typeof preferred==='string'?relative(join(options.userData,'environments/kimi-code'),preferred):null,managedPreference=rel!==null&&!isAbsolute(rel)&&!rel.split(/[\\/]/).includes('..');
   const kimi=await first([managedPreference?managed?.executable:preferred,managed?.executable,resolve(import.meta.dirname,'../../node_modules/@moonshot-ai/kimi-code/dist/main.mjs'),resolve(import.meta.dirname,'../../.runtime/kimi-code/node_modules/@moonshot-ai/kimi-code/dist/main.mjs'),join(home,'.local/bin/kimi.exe'),join(home,'.cargo/bin/kimi.exe')])??await inPath(['kimi.exe','kimi']);
+  const managedClaude=await findManagedClaude(options.userData,{verify:options.verifyManagedClaude}),claudePreference=preferences.claude?.executable,claudeRel=options.userData&&typeof claudePreference==='string'?relative(join(options.userData,'environments/claude-code'),claudePreference):null,claudeManagedPreference=claudeRel!==null&&!isAbsolute(claudeRel)&&!claudeRel.split(/[\\/]/).includes('..'),customClaude=claudeManagedPreference?null:await claudePackage(claudePreference),claude=customClaude??(managedClaude?.executable?managedClaude:null);
   const agy=await first([preferences.antigravity?.executable,join(home,'.antigravity/antigravity.exe'),join(home,'.local/bin/agy.exe')])??await inPath(['agy.exe','antigravity.exe']);
   const agyDesktop=await first([preferences.antigravity?.desktop,join(programs,'antigravity/Antigravity.exe')]);
-  const paths={dsh,kimi,codex,antigravity:agy};
-  return hideQaRuntimes(descriptions.map(r=>{const executable=paths[r.id],desktop=r.id==='dsh'?dsh:r.id==='antigravity'?agyDesktop:null;return {...r,executable,desktop,installed:r.id==='antigravity'?!!(agy||agyDesktop):!!executable,mode:r.id==='antigravity'&&agy?'integrated':r.mode};}).map(r=>({...r,status:r.installed?'ready':'missing',reason:r.installed?null:'尚未安装，请到设置 → 开发环境安装或配置',kind:r.id==='kimi'?(managed?.executable&&r.executable===managed.executable?'managed':r.executable?.includes('node_modules/@moonshot-ai')||r.executable?.includes('node_modules\\@moonshot-ai')?'bundled':'system'):'system',version:r.id==='kimi'&&managed?.executable&&r.executable===managed.executable?managed.version:null,warning:r.id==='kimi'?managed?.warning??null:null})),options.env??process.env,{isPackaged:options.isPackaged});
+  const paths={dsh,kimi,codex,claude:claude?.executable??null,antigravity:agy};
+  return hideQaRuntimes(descriptions.map(r=>{const executable=paths[r.id],desktop=r.id==='dsh'?dsh:r.id==='antigravity'?agyDesktop:null;return {...r,executable,desktop,installed:r.id==='antigravity'?!!(agy||agyDesktop):!!executable,mode:r.id==='antigravity'&&agy?'integrated':r.mode};}).map(r=>({...r,status:r.installed?'ready':'missing',reason:r.installed?null:'尚未安装，请到设置 → 开发环境安装或配置',kind:r.id==='claude'?'managed':r.id==='kimi'?(managed?.executable&&r.executable===managed.executable?'managed':r.executable?.includes('node_modules/@moonshot-ai')||r.executable?.includes('node_modules\\@moonshot-ai')?'bundled':'system'):'system',version:r.id==='claude'?claude?.version??null:r.id==='kimi'&&managed?.executable&&r.executable===managed.executable?managed.version:null,warning:r.id==='claude'?managedClaude?.warning??null:r.id==='kimi'?managed?.warning??null:null})),options.env??process.env,{isPackaged:options.isPackaged});
 }
 export function nativeNode(){
   if(process.versions.electron){const bundled=join(process.resourcesPath,'runtime/node.exe');if(existsSync(bundled))return {command:bundled,args:[],env:{}};const dev=resolve(import.meta.dirname,'../../assets/runtime/node.exe');if(existsSync(dev))return {command:dev,args:[],env:{}};return {command:process.execPath,args:[],env:{ELECTRON_RUN_AS_NODE:'1'}};}

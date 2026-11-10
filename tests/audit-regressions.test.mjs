@@ -56,7 +56,7 @@ test('explicit same-model reconfirmation preserves native identity and journal; 
   model=normalizeWorkbuddy({...raw,name:'Updated name'});assert.match(manager.selectionIssue(session),/身份/);
   await assert.rejects(manager.prompt(session.id,'Must not be recorded'),/身份/);assert.equal((await store.events(session.id)).length,1);
   await assert.rejects(manager.rebind(session.id,{...select(model),modelKey:'workbuddy:other'}),/同一模型/);
-  manager.runs.set(session.id,{});await assert.rejects(manager.rebind(session.id,select(model)),/停止/);manager.runs.delete(session.id);
+  manager.runs.set(session.id,{});assert.deepEqual(await manager.rebind(session.id,select(model)),{queued:true});assert.ok(session.selectionNext);assert.equal(await manager.cancelRebind(session.id),true);manager.runs.delete(session.id);
   await manager.rebind(session.id,select(model));assert.equal(instances[0].closed,true);assert.equal(session.nativeId,'native-existing');assert.equal(session.runtimeId,'codex');assert.equal(manager.selectionIssue(session),null);
   assert.equal((await store.events(session.id))[0].text,'Saved history');await manager.adapter(session);assert.equal(instances.length,2);assert.equal(instances[1].session.nativeId,'native-existing');
 });

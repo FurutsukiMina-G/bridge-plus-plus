@@ -43,15 +43,15 @@ export function monitorSignals(records: MonitorSession[], previous: MonitorState
       if (count >= 3) alerts.push(`Repeated new model errors in ${row.sessionId}: ${count}`);
     }
     if (row.pendingApprovalSeq && row.pendingApprovalSeq !== old?.pendingApprovalSeq)
-      alerts.push(`Harness approval required: ${row.sessionId} at event ${row.pendingApprovalSeq}`);
+      alerts.push(`Host approval required: ${row.sessionId} at event ${row.pendingApprovalSeq}`);
   }
   if (!options.bridgeHealthy && (!previous || previous.bridgeHealthy)) alerts.push('QoderBridge unavailable');
   if (previous?.bridgePort && previous.bridgePort !== options.bridgePort)
-    changes.push(`Harness provider switched from port ${previous.bridgePort} to ${options.bridgePort}`);
+    changes.push(`Host provider switched from port ${previous.bridgePort} to ${options.bridgePort}`);
   const wasStopped = previous?.sessions.some(row => row.sessionId === options.rootId) && previous.sessions.every(row => !row.running);
   if (allStopped && previous && !wasStopped) alerts.push('Root and tracked children stopped; inspect turn/end and delivery');
   if (previous && !progress && running.length && !waiting && options.now - Date.parse(previous.lastProgressAt) >= 15 * 60_000)
-    alerts.push('No new DSH event sequence for at least 15 minutes');
+    alerts.push('No new host event sequence for at least 15 minutes');
   const outcome = !root ? 'missing_root' : allStopped ? root.lastModelStatus === 'error' ? 'stopped_after_model_error' : 'stopped_needs_review'
     : waiting ? 'waiting_for_approval' : 'running';
   return { changes, alerts, allStopped, outcome, lastProgressAt: progress ? new Date(options.now).toISOString() : previous!.lastProgressAt };

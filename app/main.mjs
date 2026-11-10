@@ -45,7 +45,7 @@ if(timing)diagnostics.subscribe('child_process',({process:child})=>{const row={s
 async function step(name,task){if(!timing)return task();const start=ms();timing.current=name;try{return await task();}finally{timing.steps.push({step:name,start,ms:ms()-start});}}
 async function writeTiming(label){if(timing)await writeFile(join(app.getPath('userData'),'startup-timing.json'),JSON.stringify({label,version:app.getVersion(),at:new Date().toISOString(),...timing},null,1)).catch(error=>console.error('写入启动计时失败：'+error.message));}
 let window,store,providers,gateway,sessions,runtimes,media,modelServices,environments,sourceComponents,closing=false,dirtyEditors=false,exitCode=0;const terminals=new Terminals(),nativeWindows=new Set(),nativeMediaCatalog=new NativeMediaCatalog(),boot=new BootState();
-const environmentMethods=new Set(['session:create','session:prompt','session:rebind','session:permission','runtime:refresh','runtime:permission','runtime:configure','native:models','native:open','environment:check','environment:install','environment:update','environment:configure','provider:refresh']);
+const environmentMethods=new Set(['session:create','session:prompt','session:rebind','session:rebind-cancel','session:permission','runtime:refresh','runtime:permission','runtime:configure','native:models','native:open','environment:check','environment:install','environment:update','environment:configure','provider:refresh']);
 const attachmentCapabilityService=new AttachmentCapabilities({runtimes:()=>runtimes,sessions:()=>sessions,providers:()=>providers,cwd:()=>store.root,catalog:nativeMediaCatalog});
 const attachmentCapabilities=(runtimeId,selection)=>attachmentCapabilityService.forSelection(runtimeId,selection);
 const send=(name,data)=>{if(window&&!window.isDestroyed())window.webContents.send(name,data);};
@@ -110,10 +110,12 @@ const methods={
   async 'session:cancel'({sessionId}){await sessions.cancel(id(sessionId));},
   async 'session:rename'({sessionId,title}){await sessions.rename(id(sessionId),title);},
   async 'session:rebind'({sessionId,selection}){return sessions.rebind(id(sessionId),selection);},
+  async 'session:rebind-cancel'({sessionId}){return sessions.cancelRebind(id(sessionId));},
   async 'session:permission'({sessionId,mode}){return sessions.setPermission(id(sessionId),mode);},
   async 'session:approve'({sessionId,approvalId,choice,answer}){if(!['approve','approve-session','reject','reject-session'].includes(choice))throw new Error('Invalid approval');await sessions.approve(id(sessionId),id(approvalId),choice,answer);},
   async 'session:archive'({sessionId}){const session=store.session(id(sessionId));if(['running','starting','waiting'].includes(session.status))throw new Error('请先停止运行中的会话');await store.mutate(()=>{session.archived=true;});},
   async 'native:open'({runtimeId,projectId,sessionId}){
+    if(runtimeId==='claude')throw new Error('Claude Code 在 Bridge++ 里只作为工具执行器运行，不提供原生界面。');
     const runtime=runtimes.find(r=>r.id===runtimeId);if(!runtime?.installed)throw new Error('运行程序未安装');const project=store.project(id(projectId));const session=sessionId?store.session(id(sessionId)):null;if(session&&(session.projectId!==projectId||session.runtimeId!==runtimeId))throw new Error('Session runtime/project mismatch');
     if(session)await sessions.refreshNative(session.id);
     if(session&&sessions.runs.has(session.id)&&runtimeId!=='dsh')throw new Error('请先停止当前任务，再在完整工具界面中继续');

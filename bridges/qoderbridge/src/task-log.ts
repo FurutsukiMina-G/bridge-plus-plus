@@ -95,7 +95,7 @@ export function taskLogEntry(args: { request: ChatRequest; turn?: Turn; decision
       local_response_replay: turn?.local_response_replay ?? false,
       usage: turn?.normalized_usage ?? null, usage_source: turn?.normalized_usage_source ?? 'unavailable',
       usage_accounting:turn?.usage_accounting??null,
-      // Exactly what the Harness received; may carry the opt-in cache estimate that `usage` never does.
+      // Exactly what the client received; may carry the opt-in cache estimate that `usage` never does.
       client_usage: turn?.client_usage ?? null, client_cache_usage: turn?.client_cache_usage ?? 'omitted',
       reasoning_tokens: turn?.reasoning_tokens ?? null, output_tokens_per_second: turn?.output_tokens_per_second ?? null,
       context_usage_ratio: turn?.context_usage_ratio ?? null,

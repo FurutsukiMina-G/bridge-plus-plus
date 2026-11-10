@@ -3,11 +3,11 @@ import {mkdir,readFile} from 'node:fs/promises';
 import {randomBytes,randomUUID} from 'node:crypto';
 import {pathToFileURL} from 'node:url';
 import {ROOT} from './providers.mjs';
-import {bridgePromptConfig} from './runtime-prompts.mjs';
+import {bridgePromptConfig,runtimeProfile} from './runtime-prompts.mjs';
 import {CatalogVerifier} from './catalog-verifier.mjs';
 import {workbuddyEnvironment} from './provider-environment.mjs';
 import {registerSourcePackage} from './source-loader.mjs';
-const source=process.argv[2],runtimeId=process.argv[3],prompts=bridgePromptConfig(runtimeId),dir=process.env.AWB_PROVIDER_DIR;await mkdir(dir,{recursive:true});process.chdir(dir);
+const source=process.argv[2],runtimeId=process.argv[3],prompts=bridgePromptConfig(runtimeId),hostName=runtimeProfile(runtimeId).name,dir=process.env.AWB_PROVIDER_DIR;await mkdir(dir,{recursive:true});process.chdir(dir);
 let text='';for await(const data of process.stdin)text+=data;const key=randomBytes(32).toString('hex');
 let handle,registerModels;
 try{
@@ -17,7 +17,7 @@ try{
   if(source==='qoder'){
     const base=join(ROOT,'bridges/qoderbridge/dist/src');const {registerBridgeModels}=await import(pathToFileURL(join(base,'model.js')));const {createBridgeServer}=await import(pathToFileURL(join(base,'server.js')));const {findQoderCli}=await import('./runtime-paths.mjs');
     registerModels=rows=>registerBridgeModels(rows.map(({model,variant})=>({id:variant.id,runtimeId:model.id,name:model.name,images:model.images===true,contextWindow:variant.contextWindow,maxTokens:variant.maxTokens,efforts:variant.efforts,expectedModelName:model.name})));registerModels(models);
-    handle={server:await createBridgeServer({auth:'auto',timeout:300000,...prompts.qoder,strategy:'permission',cliPath:await findQoderCli()??undefined,isolationCacheDir:dir,sessionSettings:await readFile(join(ROOT,'bridges/qoderbridge/config/thin-cn.json'),'utf8'),cacheUsage:'none',decisionRetries:1,reasoningGuardTokens:0},{port:0,key,reportDir:join(dir,'reports'),prewarmModel:models[0].variant.id,telemetry:process.env.AWB_METADATA_ONLY!=='1'})};
+    handle={server:await createBridgeServer({auth:'auto',timeout:300000,...prompts.qoder,strategy:'permission',cliPath:await findQoderCli()??undefined,isolationCacheDir:dir,sessionSettings:await readFile(join(ROOT,'bridges/qoderbridge/config/thin-cn.json'),'utf8'),cacheUsage:'none',decisionRetries:1,reasoningGuardTokens:0},{port:0,key,reportDir:join(dir,'reports'),prewarmModel:models[0].variant.id,hostName,telemetry:process.env.AWB_METADATA_ONLY!=='1'})};
   }else{
     const base=join(ROOT,'bridges/workbuddy-bridge');const {config}=await import(pathToFileURL(join(base,'src/config.mjs')));const {AuthManager}=await import(pathToFileURL(join(base,'src/auth.mjs')));const {SdkTransport}=await import(pathToFileURL(join(base,'src/sdk-transport.mjs')));const {createBridge}=await import(pathToFileURL(join(base,'src/server.mjs')));const {F:Client}=await import(pathToFileURL(join(base,'vendor/workbuddy-connect-4.13.0.mjs')));
     const cfg={...config(workbuddyEnvironment(dir)),...prompts.workbuddy,root:base,decisionRetries:1};const client=new Client(),auth=new AuthManager({...cfg,refresh:c=>client.refreshToken(c)}),transport=new SdkTransport(cfg,auth);

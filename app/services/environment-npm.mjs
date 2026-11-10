@@ -12,7 +12,7 @@ export async function findNpmCli({root=resolve(import.meta.dirname,'../..'),reso
 }
 // npm resolves/extracts dependencies locally; every remote byte goes through
 // Electron net.fetch, including redirected tarballs, so the system proxy works.
-export async function npmRegistryProxy({registry,fetchImpl,signal,onProgress=()=>{},idleTimeoutMs=60000,qoderRuntime=false}){
+export async function npmRegistryProxy({registry,fetchImpl,signal,onProgress=()=>{},idleTimeoutMs=60000,qoderRuntime=false,maxDownloadBytes=150*1024*1024}){
  const origin=httpsUrl(registry).origin,token=randomBytes(24).toString('hex'),active=new Set();let received=0,lastFailure=null;
  const rewrite=(value,base)=>{if(Array.isArray(value))return value.map(v=>rewrite(v,base));if(value&&typeof value==='object'){const result={...value};if(result.dist?.tarball){const target=httpsUrl(result.dist.tarball).href;result.dist={...result.dist,tarball:base+'tarball/'+encodeURIComponent(target)};}for(const key of Object.keys(result))if(key!=='dist')result[key]=rewrite(result[key],base);return result;}return value;};
  const server=createServer((req,res)=>{const controller=new AbortController();active.add(controller);let remote;const downloadSignal=signal?AbortSignal.any([signal,controller.signal]):controller.signal;res.on('close',()=>{if(!res.writableEnded)controller.abort();});void(async()=>{if(req.method!=='GET'||req.headers.origin!==undefined||!/^127\.0\.0\.1:\d+$/.test(req.headers.host??'')||!req.url?.startsWith('/'+token+'/')){res.writeHead(403);res.end();return;}const path=req.url.slice(token.length+2);const tar=path.startsWith('tarball/'),target=tar?httpsUrl(decodeURIComponent(path.slice(8))).href:origin+'/'+path;
@@ -22,7 +22,7 @@ export async function npmRegistryProxy({registry,fetchImpl,signal,onProgress=()=
    remote=worker?'https://static.qoder.com.cn/qoder-cli-cn/'+path.slice('qoder-runtime/'.length):target;
    if(tar||worker){
      await withIdleResponse(fetchImpl,remote,{signal:downloadSignal,idleTimeoutMs},async(response,chunks,upstreamSignal)=>{
-       const limit=150*1024*1024;if(Number(response.headers.get('content-length'))>limit)throw new Error('下载内容超过允许大小');
+       const limit=maxDownloadBytes;if(Number(response.headers.get('content-length'))>limit)throw new Error('下载内容超过允许大小');
        res.setHeader('content-type','application/octet-stream');let size=0;
        for await(const chunk of chunks){size+=chunk.length;if(size>limit)throw new Error('下载内容超过允许大小');received+=chunk.length;onProgress(received,null);
          if(!res.write(chunk))await once(res,'drain',{signal:upstreamSignal});
@@ -38,11 +38,11 @@ export async function npmRegistryProxy({registry,fetchImpl,signal,onProgress=()=
    if(!res.headersSent){res.writeHead(502,{'content-type':'text/plain; charset=utf-8'});res.end(lastFailure);}else res.destroy();
  }).finally(()=>active.delete(controller));});const knownTarballs=new Set();await new Promise((r,j)=>{server.once('error',j);server.listen(0,'127.0.0.1',r);});const base='http://127.0.0.1:'+server.address().port+'/'+token+'/';return {base,lastFailure:()=>lastFailure,allowTarball(target){knownTarballs.add(httpsUrl(target).href);},async close(){for(const controller of active)controller.abort();server.closeAllConnections();await new Promise(r=>server.close(r));}};
 }
-export async function installPackageNpm({directory,package:packageName,version,registry,node,npm,fetchImpl,execute,signal,onProgress,scripts=false,qoderRuntime=false,lock}){
+export async function installPackageNpm({directory,package:packageName,version,registry,node,npm,fetchImpl,execute,signal,onProgress,scripts=false,optional=false,maxDownloadBytes,qoderRuntime=false,lock}){
  const locked=lock?JSON.parse(await readFile(lock,'utf8')):null,dependencies=locked?.packages?.['']?.dependencies;if(locked&&dependencies?.[packageName]!==version)throw new Error('组件锁定文件与需要的包版本不一致');
  if(!/^(@[a-z0-9_.-]+\/)?[a-z0-9_.-]+$/.test(packageName)||!/^\d+\.\d+\.\d+(?:-[\w.-]+)?$/.test(version))throw new Error('无效的受管 npm 包或版本');
  await mkdir(directory,{recursive:true});const userRc=join(directory,'user.npmrc'),globalRc=join(directory,'global.npmrc');await writeFile(userRc,'',{mode:0o600});await writeFile(globalRc,'',{mode:0o600});await writeFile(join(directory,'package.json'),JSON.stringify({private:true,...locked?{dependencies}:{}}));await writeFile(join(directory,'.npmrc'),'');
- const proxy=await npmRegistryProxy({registry,fetchImpl,signal,onProgress,qoderRuntime});
+ const proxy=await npmRegistryProxy({registry,fetchImpl,signal,onProgress,qoderRuntime,maxDownloadBytes});
  const executeDownload=async(...args)=>{const result=await execute(...args);return result.code!==0&&proxy.lastFailure()?{...result,stderr:[proxy.lastFailure(),result.stderr].filter(Boolean).join('\n')}:result;};
  // Qoder's official postinstall downloads its Worker outside the registry. Its
  // supported mirror override routes that archive and checksum through net.fetch too.
@@ -53,7 +53,8 @@ export async function installPackageNpm({directory,package:packageName,version,r
    const result=await executeDownload(node.command,[...node.args,npm.cli,'ci','--prefix',directory,'--registry',proxy.base,'--userconfig',userRc,'--globalconfig',globalRc,'--cache',join(directory,'.npm-cache'),'--noproxy=127.0.0.1,localhost','--ignore-scripts','--engine-strict','--no-audit','--no-fund','--fetch-timeout=0'],{cwd:directory,signal,timeoutMs:0,env:{...env,npm_config_ignore_scripts:'true'}});if(result.code!==0||!qoderRuntime)return result;
    return await executeDownload(node.command,[...node.args,npm.cli,'rebuild',packageName,'--prefix',directory,'--registry',proxy.base,'--userconfig',userRc,'--globalconfig',globalRc,'--cache',join(directory,'.npm-cache'),'--noproxy=127.0.0.1,localhost','--ignore-scripts=false','--foreground-scripts','--engine-strict','--no-audit','--no-fund'],{cwd:directory,signal,timeoutMs:0,env:{...env,npm_config_ignore_scripts:'false'}});
   }
-  return await executeDownload(node.command,[...node.args,npm.cli,'install','--prefix',directory,'--registry',proxy.base,'--userconfig',userRc,'--globalconfig',globalRc,'--cache',join(directory,'.npm-cache'),'--noproxy=127.0.0.1,localhost',scripts?'--ignore-scripts=false':'--ignore-scripts',...(scripts?['--foreground-scripts']:['--omit=optional']),'--engine-strict','--no-audit','--no-fund','--no-save','--no-package-lock','--fetch-timeout=0',`${packageName}@${version}`],{cwd:directory,signal,timeoutMs:0,env});
+  return await executeDownload(node.command,[...node.args,npm.cli,'install','--prefix',directory,'--registry',proxy.base,'--userconfig',userRc,'--globalconfig',globalRc,'--cache',join(directory,'.npm-cache'),'--noproxy=127.0.0.1,localhost',scripts?'--ignore-scripts=false':'--ignore-scripts',...(scripts?['--foreground-scripts']:optional?[]:['--omit=optional']),'--engine-strict','--no-audit','--no-fund','--no-save','--no-package-lock','--fetch-timeout=0',`${packageName}@${version}`],{cwd:directory,signal,timeoutMs:0,env});
  }finally{await proxy.close();}
 }
 export function installKimiNpm(options){return installPackageNpm({...options,package:'@moonshot-ai/kimi-code',scripts:false});}
+export function installClaudeNpm(options){return installPackageNpm({...options,package:'@anthropic-ai/claude-code',scripts:false,optional:true,maxDownloadBytes:512*1024*1024});}

@@ -6,7 +6,8 @@ export const MIN_FOLD=3;
 
 export function toolFailed(end){
   const d=end?.data??{};
-  return d.isError===true||d.message?.isError===true||d.status==='failed'||d.item?.status==='failed'||(Number.isInteger(d.item?.exitCode)&&d.item.exitCode!==0)||!!d.error;
+  // is_error: Claude Code's tool_result block, passed through as it arrives.
+  return d.isError===true||d.is_error===true||d.message?.isError===true||d.status==='failed'||d.item?.status==='failed'||(Number.isInteger(d.item?.exitCode)&&d.item.exitCode!==0)||!!d.error;
 }
 export const toolStatus=(t,running)=>t.end?toolFailed(t.end)?'failed':'done':running?'running':'stopped';
 

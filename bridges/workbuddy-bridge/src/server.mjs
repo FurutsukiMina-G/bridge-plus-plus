@@ -21,7 +21,7 @@ export function createBridge({cfg,provider,key,instanceId,log}){
   server.headersTimeout=15000;server.requestTimeout=30000;server.keepAliveTimeout=5000;server.maxRequestsPerSocket=1000;
   async function handle(req,res){
     const started=Date.now(),requestId=randomUUID();res.setHeader('x-request-id',requestId);
-    // No browser origins are needed by DSH. Reject browser requests and DNS rebinding.
+    // No browser origins are needed by a loopback bridge client. Reject browser requests and DNS rebinding.
     if(!/^127\.0\.0\.1:\d+$/.test(req.headers.host??'')||req.headers.origin){json(res,403,{error:{code:'origin_not_allowed',message:'Only direct loopback API clients are allowed'}});return;}
     if(!authorize(req.headers.authorization,key)){json(res,401,{error:{code:'unauthorized',message:'Local Bearer key required'}});return;}
     if(req.method==='GET'&&req.url==='/health'){
@@ -35,9 +35,15 @@ export function createBridge({cfg,provider,key,instanceId,log}){
     if(shuttingDown){json(res,503,{error:{code:'shutting_down',message:'Bridge is shutting down'}});return;}
     if(!/^application\/json(?:;|$)/i.test(req.headers['content-type']??'')){json(res,415,{error:{code:'content_type',message:'Use application/json'}});return;}
     const controller=new AbortController();controllers.add(controller);
-    const deadline=setTimeout(()=>controller.abort(new DOMException('Deadline exceeded','TimeoutError')),cfg.timeoutMs);deadline.unref();
+    // Idle silence is counted from the moment the model request goes out. Queueing and runtime
+    // boot happen before provider.chat() returns and stay on the total deadline.
+    const idleTimeoutMs=cfg.idleTimeoutMs??180000;
+    // Any runtime message or stream delta counts as activity and proves the model is really answering.
+    const activity={started:false,seen:false,at:Date.now()},markActivity=()=>{activity.at=Date.now();activity.started=true;activity.seen=true;};
+    // The total deadline stays the hard cap: it trips however busy the output is.
+    const deadline=setTimeout(()=>controller.abort(new BridgeError(504,'timeout',`Deadline exceeded after ${Math.round(cfg.timeoutMs/1000)} s ${activity.seen?'of continuous output':'without any model output'}`)),cfg.timeoutMs);deadline.unref();
     const disconnect=()=>{if(!res.writableEnded)controller.abort(new DOMException('Disconnected','AbortError'));};res.on('close',disconnect);req.on('aborted',disconnect);
-    let release,heartbeat,completion,selected,upstream,outcome='failed',errorCode=null,firstEventMs=null,firstTextMs=null,firstThinkingMs=null,transportMetrics=null,queueMs=null,usageSent=false;
+    let release,heartbeat,idle,completion,selected,upstream,outcome='failed',errorCode=null,firstEventMs=null,firstTextMs=null,firstThinkingMs=null,transportMetrics=null,queueMs=null,usageSent=false;
     stats.requests++;
     try{
       const body=await readBody(req,cfg.bodyLimit,controller.signal);
@@ -48,8 +54,16 @@ export function createBridge({cfg,provider,key,instanceId,log}){
       const queuedAt=Date.now();
       release=await queue.acquire(controller.signal);
       queueMs=Date.now()-queuedAt;
-      const response=await provider.chat(upstream,controller.signal,{requestId});
+      const response=await provider.chat(upstream,controller.signal,{requestId,onActivity:markActivity});
+      // The model request is in flight: from here on, silence is a stalled upstream.
+      activity.started=true;activity.at=Date.now();
       transportMetrics=response.bridgeMetrics??null;
+      // A stalled upstream is reported as such, not as a user-visible deadline.
+      const tick=Math.min(1000,Math.max(20,Math.floor(idleTimeoutMs/4)));
+      idle=setInterval(()=>{
+        if(!activity.started)return;const silent=Date.now()-activity.at;
+        if(silent>=idleTimeoutMs)controller.abort(new BridgeError(504,'upstream_stalled',`No model activity for ${Math.round(silent/1000)} s; the upstream stalled mid-request`));
+      },tick);idle.unref();
       const pending=[];
       for await(const data of sseEvents(response.body,{signal:controller.signal})){
         const chunk=completion.accept(data,info.id);
@@ -81,8 +95,9 @@ export function createBridge({cfg,provider,key,instanceId,log}){
         if((knownUsage||bridgeUsage)&&!usageSent)res.write(`data: ${JSON.stringify({id:completion?.id,created:completion?.created,model:selected?.id,object:'chat.completion.chunk',choices:[],usage:knownUsage,...(bridgeUsage?{bridge_usage:bridgeUsage}:{})})}\n\n`);
         res.write(`data: ${JSON.stringify(p.body)}\n\n`);res.end();}}
     }finally{
-      clearTimeout(deadline);clearInterval(heartbeat);res.removeListener('close',disconnect);req.removeListener('aborted',disconnect);controller.abort();controllers.delete(controller);release?.();
+      clearTimeout(deadline);clearInterval(heartbeat);clearInterval(idle);res.removeListener('close',disconnect);req.removeListener('aborted',disconnect);controller.abort();controllers.delete(controller);release?.();
       const row={at:new Date().toISOString(),requestId,model:selected?.id??null,upstream:upstream?.model??null,outcome,errorCode,wallMs:Date.now()-started,
+        lastActivityMs:activity.started?Date.now()-activity.at:null,
         firstEventMs,firstTextMs,firstThinkingMs,queueMs,usage:completion?.usage??null,context:transportMetrics,
         contextPressure:transportMetrics?.lastPromptTokens?{native:transportMetrics.lastPromptTokens/(provider.model?.contextWindow??1000000),selectedBudget:transportMetrics.lastPromptTokens/selected.contextWindow}:null};
       recent.push(row);if(recent.length>1000)recent.shift();await record(row).catch(()=>{});

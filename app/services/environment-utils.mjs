@@ -4,7 +4,7 @@ import {mkdir,open,rm,realpath,stat,readFile,rename} from 'node:fs/promises';
 import {resolve,relative,isAbsolute,join} from 'node:path';
 import {withIdleResponse,httpsUrl} from './download-stream.mjs';
 export {httpsUrl};
-export const ENVIRONMENT_IDS=['dsh','kimi','codex','antigravity'];
+export const ENVIRONMENT_IDS=['dsh','kimi','codex','claude','antigravity'];
 export const DSH_FEED='https://download.deepseek.com/dsh-desk/feeds/win-x64/';
 export const NPM_REGISTRIES=['https://registry.npmmirror.com','https://registry.npmjs.org'];
 export const DAY_MS=24*60*60*1000;
