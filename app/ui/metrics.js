@@ -111,17 +111,22 @@ export class SessionMetrics{
         return{value:tokens/(span/1000),estimated:true,live:true};
       }
     }
+    // Like the ring, prefer the main conversation: a title or review request finishing last must not set the speed.
+    let side=null;
     for(let i=this.requests.length-1;i>=0;i--){
       const r=this.requests[i];
-      if(r.rate)return{value:r.rate,estimated:r.rateEstimated,live:false};
+      if(!r.rate)continue;
+      if(!r.auxiliary)return{value:r.rate,estimated:r.rateEstimated,live:false};
+      side??={value:r.rate,estimated:r.rateEstimated,live:false};
     }
-    return null;
+    return side;
   }
   turn(turnId){
     const rows=this.requests.filter(r=>r.turnId===turnId);
     if(!rows.length)return null;
     const sum=key=>rows.every(r=>r[key]!==null)?rows.reduce((n,r)=>n+r[key],0):null;
-    const cachedRows=rows.filter(r=>r.cached!==null&&r.input>0);
+    // Cost counts every request of the turn; the cache ratio describes the main conversation when it has any.
+    const known=rows.filter(r=>r.cached!==null&&r.input>0),mainKnown=known.filter(r=>!r.auxiliary),cachedRows=mainKnown.length?mainKnown:known;
     return{requests:rows.length,input:sum('input'),output:sum('output'),
       cacheRatio:cachedRows.length?cachedRows.reduce((n,r)=>n+r.cached,0)/cachedRows.reduce((n,r)=>n+r.input,0):null,
       cacheStatus:cachedRows.some(r=>r.cacheStatus==='estimated')?'estimated':cachedRows.length?'reported':'not_reported'};

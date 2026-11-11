@@ -27,6 +27,17 @@ export function sumUsage(items){
   if(known.every(u=>valid(u.cache_creation_input_tokens)))out.cache_creation_input_tokens=known.reduce((n,u)=>n+u.cache_creation_input_tokens,0);
   return out;
 }
+/** Client-facing subtotal for one request: context from the last known attempt, output summed across attempts. */
+export function requestUsage(items){
+  const known=items.filter(Boolean);if(!known.length)return null;
+  const last=known.at(-1),out={prompt_tokens:last.prompt_tokens,completion_tokens:0,total_tokens:0,bridge_usage_source:'workbuddy-official-sdk',bridge_credits:null,
+    bridge_usage_complete:known.length===items.length,bridge_usage_attempts:known.length,bridge_cache_status:last.bridge_cache_status};
+  for(const u of known)out.completion_tokens+=u.completion_tokens??0;
+  out.total_tokens=out.prompt_tokens+out.completion_tokens;
+  if(valid(last.prompt_tokens_details?.cached_tokens))out.prompt_tokens_details={cached_tokens:last.prompt_tokens_details.cached_tokens};
+  if(valid(last.cache_creation_input_tokens))out.cache_creation_input_tokens=last.cache_creation_input_tokens;
+  return out;
+}
 /** Advance the cumulative Result.usage baseline by a turn that ended without a Result. */
 export function addSdkUsage(base,turn){
   const out={};

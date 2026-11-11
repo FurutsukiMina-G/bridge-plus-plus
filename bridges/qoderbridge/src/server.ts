@@ -47,6 +47,8 @@ export async function createBridgeServer(config: Config, options: {
   port?: number; key?: string; infer?: typeof runProbe; reportDir?: string; prewarm?: boolean; prewarmModel?: string; telemetry?: boolean;
   /** Display name of the calling host; failure text falls back to a generic client. */
   hostName?: string;
+  /** Test-only SDK startup injection; production uses the official SDK default. */
+  startRuntime?: ConstructorParameters<typeof QoderPool>[1];
 } = {}) {
   const bridgePort = options.port ?? 8646;
   decisionRetryLimit(config.decisionRetries);
@@ -67,7 +69,7 @@ export async function createBridgeServer(config: Config, options: {
   const poolFor = (model: string) => {
     if (options.infer) return null;
     let selected = pools.get(model);
-    if (!selected) { selected = new QoderPool(requestConfig(model)); pools.set(model, selected); }
+    if (!selected) { selected = new QoderPool(requestConfig(model), options.startRuntime); pools.set(model, selected); }
     return selected;
   };
   // Independent pools prevent a model switch from carrying Qoder history or replay/cache state across models.
@@ -146,6 +148,8 @@ export async function createBridgeServer(config: Config, options: {
         activeRequests: slots.active, queuedRequests: slots.queued, pool: pool?.stats() ?? null,
         pools: Object.fromEntries([...pools].map(([model, value]) => [model, value.stats()])),
         capabilities: { finalTextStreaming: true, thinkingStreaming: true, validatedTools: true,
+          toolMode:config.toolMode??'json',nativeTools:{resultCharLimit:config.nativeResultCharLimit??40000,
+            mcpOutputTokens:config.nativeMcpOutputTokens??1000000,warmLimit:config.nativeWarmLimit??1},
           // `dsh_request` stays listed for reports written by earlier versions; new rows use `client_request`.
           errorDiagnostics: { version: 1, origins: ['account','bridge','model_output','upstream','client_request','dsh_request','connection','unknown'],
             visibleMessage: true, sdkErrorCode: true, requestId: true },
@@ -199,15 +203,16 @@ export async function createBridgeServer(config: Config, options: {
         controller.signal.throwIfAborted();
         failurePhase = 'upstream';
         const selectedPool = poolFor(request.model);
+        const native=selectedPool?.isNative(request)??false;let nativeStreamed='';
         const pooled = selectedPool ? await selectedPool.infer(request, { signal: controller.signal, reasoningEffort,
-          onText: request.stream && !request.response_format ? text => projector.push(text) : undefined,
+          onText: request.stream && !request.response_format ? text => {if(native){firstClientTextMs ??= Date.now() - startedAt;nativeStreamed+=text;emit({content:text});}else projector.push(text);} : undefined,
           onThinking: request.stream ? text => {
             firstClientThinkingMs ??= Date.now() - startedAt;
             emit({ reasoning_content: text });
           } : undefined,
-          validateDecision: request.stream ? decision => projector.validate(decision) : undefined,
-          onCorrection:request.stream?correcting:undefined,
-          prepareDecisionRetry:request.stream?()=>projector.resetUncommitted():undefined,
+          validateDecision: !native&&request.stream ? decision => projector.validate(decision) : undefined,
+          onCorrection:!native&&request.stream?correcting:undefined,
+          prepareDecisionRetry:!native&&request.stream?()=>projector.resetUncommitted():undefined,
           onStatus: request.stream ? status : undefined,
         }) : null;
         const direct=pooled?null:await recoverDecision({request,prompt:conversationPrompt(request,{decisionContract:config.decisionContract,fullToolDetails:config.fullToolDetails}),
@@ -218,12 +223,13 @@ export async function createBridgeServer(config: Config, options: {
           validateDecision:request.stream?decision=>projector.validate(decision):undefined,
           invoke:async prompt=>infer({...requestConfig(request.model),...(reasoningEffort?{reasoning:reasoningEffort}:{})},prompt,undefined,
             request.stream&&!request.response_format?text=>projector.push(text):()=>{})});
-        decisionRecovery=pooled?.recovery??direct?.recovery;
+        const nativeReply=native?pooled?.reply:null;
+        decisionRecovery=native?undefined:pooled?.recovery??direct?.recovery;
         const turn=pooled?pooled.report:{...direct!.turn,decision_recovery:direct!.recovery};
         failureTurn = turn;
-        const decisionError=pooled?.decisionError??direct?.decisionError;
+        const decisionError=native?null:pooled?.decisionError??direct?.decisionError;
         upstreamFailure=turn.error?publicUpstreamFailure(turn.sdk_errors,turn.api_error_categories,turn.sdk_error_code):null;
-        failurePhase = turn.error ? 'upstream' : 'decision';
+        failurePhase = turn.error ? native&&['native_invalid_calls','native_protocol_text'].includes(turn.stage)?'decision':'upstream' : 'decision';
         const failure = turn.error || decisionError ? bridgeFailure({ requestId: bridgeRequestId,
           phase: failurePhase, accepted: true, turn, recovery: decisionRecovery, abort: abortKind,
           hostName: options.hostName }) : null;
@@ -238,11 +244,16 @@ export async function createBridgeServer(config: Config, options: {
         failurePhase = turnPhase;
         if (turn.error) throw new Error(`Qoder inference failed at ${turn.stage}: ${turn.error}`);
         if (decisionError) throw new Error(decisionError);
-        const decision = pooled?.decision ?? direct?.decision ?? parseDecision(turn.response, request);
-        if (request.stream) projector.validate(decision);
+        if(native&&!nativeReply)throw new Error('Native inference returned no reply');
+        const decision = native ? nativeReply.kind==='final'?{kind:'final' as const,content:nativeReply.content}:
+          {kind:'tool_calls' as const,calls:nativeReply.calls.map((call:{name:string;arguments:string})=>({name:call.name,arguments:call.arguments}))}
+          : pooled?.decision ?? direct?.decision ?? parseDecision(turn.response, request);
+        if (request.stream&&!native) projector.validate(decision);
         failurePhase = 'delivery';
-        const answer = completion(request, decision,pooled?.completionId);
-        const limited='finish_reason' in turn&&turn.finish_reason==='length';
+        const answer = native ? {id:streamBase.id,object:'chat.completion',created:streamBase.created,model:request.model,choices:[{index:0,
+          message:{role:'assistant',content:nativeReply.content||null,...(nativeReply.kind==='tool_calls'?{tool_calls:nativeReply.calls.map((call:{id:string;name:string;arguments:string})=>({id:call.id,type:'function',function:{name:call.name,arguments:call.arguments}}))}:{})},
+          finish_reason:nativeReply.kind==='tool_calls'?'tool_calls':nativeReply.finish}]} : completion(request, decision,pooled?.completionId);
+        const limited=native?nativeReply.kind==='final'&&nativeReply.finish==='length':'finish_reason' in turn&&turn.finish_reason==='length';
         if(limited)answer.choices[0]!.finish_reason='length';
         const usage = ('client_usage' in turn ? turn.client_usage as OpenAIUsage | null : null) ??
           ('normalized_usage' in turn ? turn.normalized_usage as OpenAIUsage | null : null);
@@ -260,19 +271,21 @@ export async function createBridgeServer(config: Config, options: {
         }
         if (!request.stream) send(res, 200, { ...answer, ...(usage ? { usage,bridge_usage:bridgeUsage } : {}) });
         else {
-          projector.finish(decision);
+          if(!native)projector.finish(decision);
+          // A local replay (or text the gate never released) has not reached the client yet; send whatever is missing.
+          else if(nativeReply.content&&nativeReply.content.startsWith(nativeStreamed)&&nativeReply.content.length>nativeStreamed.length)emit({content:nativeReply.content.slice(nativeStreamed.length)});
           if (decision.kind !== 'final') {
             const calls = answer.choices[0]!.message.tool_calls ?? [];
-            calls.forEach((call, index) => emit({ tool_calls: [{ ...call, index }] }));
+            calls.forEach((call:any, index:number) => emit({ tool_calls: [{ ...call, index }] }));
           }
           emit({}, limited?'length':decision.kind === 'final' ? 'stop' : 'tool_calls');
           if (usage && (request.stream_options as { include_usage?: boolean } | undefined)?.include_usage)
             res.write(`data: ${JSON.stringify({ ...streamBase, choices: [], usage,bridge_usage:bridgeUsage })}\n\n`);
           res.end('data: [DONE]\n\n');
         }
-        taskTurn.first_client_text_ms = firstClientTextMs;
-        taskTurn.first_client_thinking_ms = firstClientThinkingMs;
-        taskTurn.stream_chunks = streamChunks;
+        taskTurn!.first_client_text_ms = firstClientTextMs;
+        taskTurn!.first_client_thinking_ms = firstClientThinkingMs;
+        taskTurn!.stream_chunks = streamChunks;
         await writeTaskLog(decision);
       } finally { release(); }
     } catch (cause) {

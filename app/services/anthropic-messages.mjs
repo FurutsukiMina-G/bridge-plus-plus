@@ -125,7 +125,10 @@ export function anthropicError(status,error,secrets=[]){
   const detail=failureDetails(error,status,secrets),prefix=status===429?'上游请求受到频率限制：':status>=500?'上游或网关请求失败：':'请求失败：';
   return {type:'error',error:{type:anthropicErrorType(status),message:prefix+detail.message+(detail.reset_at?`；重置时间：${detail.reset_at}`:'')}};
 }
-const anthropicUsage=usage=>{const cached=Number.isFinite(usage?.prompt_tokens_details?.cached_tokens)?usage.prompt_tokens_details.cached_tokens:0;return {input_tokens:Math.max((usage?.prompt_tokens??0)-cached,0),output_tokens:usage?.completion_tokens??0,cache_read_input_tokens:cached,cache_creation_input_tokens:0};};
+const known=n=>Number.isFinite(n)&&n>=0?n:undefined;
+const anthropicUsage=usage=>{const prompt=known(usage?.prompt_tokens),read=known(usage?.prompt_tokens_details?.cached_tokens),write=known(usage?.cache_creation_input_tokens);
+  const creation=write!==undefined&&prompt!==undefined&&((read??0)+write<=prompt)?write:undefined;
+  return {input_tokens:Math.max((prompt??0)-(read??0)-(creation??0),0),output_tokens:usage?.completion_tokens??0,...read!==undefined?{cache_read_input_tokens:read}:{},...creation!==undefined?{cache_creation_input_tokens:creation}:{}};};
 export const anthropicStopReason=(reason,tools=false)=>reason==='stop'?'end_turn':reason==='tool_calls'?'tool_use':reason==='length'?'max_tokens':reason==='content_filter'?'refusal':tools?'tool_use':'end_turn';
 export class AnthropicProjection {
   constructor(model,emit=()=>{}){this.model=model;this.emit=emit;this.messageId=id('msg_');this.blocks=[];this.tools=new Map();this.active=null;this.usage=anthropicUsage();this.started=false;}

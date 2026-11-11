@@ -117,6 +117,7 @@ export class ClaudeAdapter extends RuntimeLifecycle {
         if(!this.running){void this.control('interrupt',{cancel_queued:true},10000).catch(()=>{});await this.emit({type:'notice',text:'Claude Code 自行开始了新的一轮，Bridge++ 已停止它。'});return;}
       }
       if(['task_started','task_notification'].includes(m.subtype)&&m.tool_use_id){await this.emit({type:'tool-output',toolId:m.tool_use_id,name:m.subtype,data:m});return;}
+      if(m.subtype==='thinking_tokens')return;
       await this.emit({type:'native-event',name:m.subtype??'system',data:m});return;
     }
     if(m.type==='result'){await this.result(m);return;}

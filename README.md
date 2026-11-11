@@ -1,13 +1,14 @@
 # Bridge++
 
-Windows 桌面 Agent 开发工作台。把 Qoder CN、WorkBuddy 等模型源接到 DeepSeek Harness（DSH）、Kimi Code、Codex CLI 等开发环境里，在一个窗口里管理项目、会话和模型。
+Windows 桌面 Agent 开发工作台。把 Qoder CN、WorkBuddy 等模型源接到 DeepSeek Harness（DSH）、Kimi Code、Codex CLI、Claude Code 等开发环境里，在一个窗口里管理项目、会话和模型。
 
 > 这是个人维护的非官方项目，与 Qoder、腾讯、DeepSeek、月之暗面、OpenAI、Google 没有关联。
 
 ## 功能
 
-- **一个窗口用多个环境**：DSH、Kimi Code、Codex CLI、Antigravity，会话按文件夹分组，工具、技能、MCP 和子代理都留在各环境自己的原生流程里。
-- **模型和环境自由搭配**：Qoder CN、WorkBuddy 的模型可以在 DSH、Kimi Code、Codex CLI 里用，上下文窗口和思考强度按来源声明的能力选择。
+- **一个窗口用多个环境**：DSH、Kimi Code、Codex CLI、Claude Code、Antigravity，会话按文件夹分组，工具、技能、MCP 和子代理都留在各环境自己的原生流程里。
+- **模型和环境自由搭配**：Qoder CN、WorkBuddy 的模型可以在 DSH、Kimi Code、Codex CLI、Claude Code 里用，上下文窗口和思考强度按来源声明的能力选择。Qoder CN 的模型走上游的原生函数调用，工具参数由上游结构化给出，长参数和一次多个调用不会被写坏。
+- **Claude Code 只当工具执行器**：只用上面这些模型源的模型，不登录、不连接 Anthropic，也不读写你本机 Claude 的配置和数据。
 - **运行中插话**：任务运行时可以直接发消息。DSH 和网关模型的 Codex 会把消息插进正在运行的这一轮，其他环境排队到本轮结束后自动发出。
 - **对外接口**：把模型源变成本机 OpenAI 兼容接口，一键接入 DSH、Kimi Code、Codex CLI，也可以给其他 Agent 用，支持开机在后台运行。
 - **环境管理**：首次启动有引导，之后可以在设置里检查更新和更新环境。没配置好的环境不会出现在可选项里，只要有一个能用就能开始。

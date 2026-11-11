@@ -6,7 +6,7 @@ import {join} from 'node:path';
 import {SdkTransport} from '../src/sdk-transport.mjs';
 import {Completion,sseEvents} from '../src/protocol.mjs';
 import {FinalTextProjector} from '../src/streaming.mjs';
-import {normalizedUsage,sumUsage} from '../src/usage.mjs';
+import {normalizedUsage,sumUsage,requestUsage} from '../src/usage.mjs';
 import {summarize} from '../src/metrics.mjs';
 const model='deepseek-v4.1-flash';
 const credential={uid:'fixture',domain:'www.workbuddy.cn',accessToken:'fake-token',refreshToken:'fake-refresh'};
@@ -81,7 +81,8 @@ test('concurrent duplicate requests single-flight; cancelling the waiter preserv
 });
 test('bounded format correction resumes the same model and sums every attempt once',async t=>{
   let calls=0;const transport=await fixture(t,async function*(input){calls++;if(calls===2)assert.equal(input.options.resume,'fixture-session');yield* events(calls===1?'bad decision':'{"action":"final","content":"recovered"}');});
-  const result=await collect(transport,{...body,tools});assert.equal(calls,2);assert.equal(result.result.choices[0].message.content,'recovered');assert.equal(result.result.usage.prompt_tokens,10000);
+  const result=await collect(transport,{...body,tools});assert.equal(calls,2);assert.equal(result.result.choices[0].message.content,'recovered');assert.equal(result.result.usage.prompt_tokens,5000);
+  assert.equal(result.result.usage.bridge_usage_attempts,2);assert.equal(result.result.bridge_usage.accounting.known_prompt_tokens,10000);
   assert.equal(result.metrics.attempts.length,2);assert.equal(transport.metrics.recoveredRequests,1);
 });
 test('repeated invalid output stops correction early without publishing an executable call',async t=>{
@@ -125,6 +126,18 @@ test('missing cache data stays unknown; invalid counts never become claimed cach
   const summary=summarize([{outcome:'failed',usage:sum},{outcome:'completed',usage:{prompt_tokens:0,completion_tokens:0,total_tokens:0,bridge_usage_source:'local-response-replay'}}]);
   assert.equal(summary.tokens.prompt,10);assert.equal(summary.localReplays,1);assert.equal(summary.tokens.cacheRead,null);assert.equal(summary.credits,null);
 });
+test('one request sums output across attempts but keeps the last attempt context',()=>{
+  const attempt=(prompt,completion,cached,creation)=>normalizedUsage({usage:{input_tokens:prompt,output_tokens:completion,cache_read_input_tokens:cached,...(creation!==undefined?{cache_creation_input_tokens:creation}:{})}});
+  const attempts=[attempt(1000,50,800,100),attempt(1100,60,900,150)];
+  const one=requestUsage(attempts);
+  assert.equal(one.prompt_tokens,1100);assert.equal(one.completion_tokens,110);assert.equal(one.total_tokens,1210);
+  assert.equal(one.prompt_tokens_details.cached_tokens,900);assert.equal(one.cache_creation_input_tokens,150);
+  assert.equal(one.bridge_usage_attempts,2);assert.equal(one.bridge_usage_complete,true);assert.equal(one.bridge_cache_status,'reported');
+  assert.equal(sumUsage(attempts).prompt_tokens,2100);
+  const partial=requestUsage([attempt(1000,50,800),null]);
+  assert.equal(partial.bridge_usage_complete,false);assert.equal(partial.bridge_usage_attempts,1);assert.equal(partial.prompt_tokens,1000);
+  assert.equal(requestUsage([null,null]),null);
+});
 test('validated large tool arguments are fragmented below SSE event limits and preserve Unicode exactly',async t=>{
   const text='中文 😀 '.repeat(400000);const transport=await fixture(t,async function*(){yield* events(JSON.stringify({action:'tool_calls',calls:[{name:'write',arguments:{text}}]}));});
   const result=await collect(transport,{...body,tools});assert.equal(JSON.parse(result.result.choices[0].message.tool_calls[0].function.arguments).text,text);
@@ -141,7 +154,7 @@ test('a paid schema correction retains the deadline/model and carries the precis
     calls++;if(calls===2){assert.equal(input.options.resume,'fixture-session');assert.equal(input.options.model,model);assert.match(input.prompt,/missingProperty/);assert.match(input.prompt,/"text"/);assert.ok(!input.prompt.includes('unrelated-schema'));}
     yield* events(JSON.stringify({action:'tool_calls',calls:[{name:'write',arguments:calls===1?{}:{text:'fixed'}}]}));
   });
-  const result=await collect(transport,{...body,tools:[...tools,other]});assert.equal(calls,2);assert.equal(result.result.usage.prompt_tokens,10000);
+  const result=await collect(transport,{...body,tools:[...tools,other]});assert.equal(calls,2);assert.equal(result.result.usage.prompt_tokens,5000);assert.equal(result.result.bridge_usage.accounting.known_prompt_tokens,10000);
   assert.equal(result.metrics.attempts[0].rejection.validationKeywords[0],'required');assert.deepEqual(result.metrics.attempts[0].correction.tools,['write']);
   const evidence=JSON.parse(await readFile(result.metrics.attempts[0].rejection.evidenceFile,'utf8'));assert.equal(evidence.errorCode,'invalid_tool_arguments');assert.equal(evidence.attempt,1);
 });

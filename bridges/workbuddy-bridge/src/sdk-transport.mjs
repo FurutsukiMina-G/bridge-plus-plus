@@ -10,7 +10,7 @@ import {BridgeError,publicError} from './errors.mjs';
 import {runtimePath} from './contain.mjs';
 import {ContextPool,digest,abortable} from './context.mjs';
 import {FinalTextProjector} from './streaming.mjs';
-import {normalizedUsage,sumUsage,replayUsage,addSdkUsage,usageAccounting} from './usage.mjs';
+import {normalizedUsage,requestUsage,replayUsage,addSdkUsage,usageAccounting} from './usage.mjs';
 import {correctionInput} from './recovery.mjs';
 import {rejectedEvidence,decisionErrorEvidence,redactSecrets} from './rejection-evidence.mjs';
 import {HOST,PREFIX,FORWARDED,NATIVE_INSTRUCTIONS,nativeSupported,hostTools,hostServer,nativeInput,nativeCorrection,nativeDecision,NativeTextGate,structuredResponse} from './native.mjs';
@@ -147,7 +147,7 @@ export class SdkTransport {
           const onActivity=typeof context.onActivity==='function'?context.onActivity:()=>{};
           const snapshotUsage=()=>{
             const current=usageRecorded?[]:[normalizedUsage({usage:output.usage(attemptPriorUsage,{resumed:attemptResumed})})];
-            const usage=sumUsage([...usages,...current]);
+            const usage=requestUsage([...usages,...current]);
             metrics.usageAccounting=usageAccounting([...usages,...current]);
             metrics.knownUsage=usage&&!usageRecorded?{...usage,bridge_usage_complete:false}:usage;
             return metrics.knownUsage;
@@ -315,7 +315,7 @@ export class SdkTransport {
                 // Retries stay in the same native transcript, model, deadline and budget.
               }
             }
-            const baseUsage=sumUsage(usages);
+            const baseUsage=requestUsage(usages);
             const usage=baseUsage?{...baseUsage,bridge_decision_source:source,bridge_decision_format:format}:null;
             if(format==='dsml'||format==='native-text')this.metrics.decodedDsml++;
             if(repairs.length){this.metrics.localDecisionRepairs+=repairs.length;metrics.localDecisionRepairs=repairs;}
@@ -370,7 +370,7 @@ export class SdkTransport {
               this.failures.set(failureKey,{at:Date.now(),body:safe.body});
             }
             if(!usageRecorded){usages.push(normalizedUsage({usage:output.usage(attemptPriorUsage,{resumed:attemptResumed})}));metrics.attempts.push({attempt:usages.length,usage:usages.at(-1),usageBasis:output.usageBasis,errorCode:safe.body.error.code});}
-            const usage=sumUsage(usages);
+            const usage=requestUsage(usages);
             metrics.knownUsage=usage;
             metrics.usageAccounting=usageAccounting(usages);
             send({id,created,model:body.model,object:'chat.completion.chunk',choices:[],usage,bridge_usage:{accounting:metrics.usageAccounting,correction_calls:metrics.correctionCalls??0}});

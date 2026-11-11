@@ -33,7 +33,7 @@ for(const stream of [false,true])for(const mode of ['recovered','failed','unknow
   }else if(mode==='unknown'){
     assert.equal(accounting.prompt_tokens,null);assert.equal(accounting.known_prompt_tokens,100);assert.equal(accounting.unknown_prompt_attempts,1);
     assert.equal(data.prompt_tokens,100);
-  }else{assert.equal(accounting.prompt_tokens,200);assert.equal(accounting.unknown_prompt_attempts,0);assert.equal(data.prompt_tokens,200);}
+  }else{assert.equal(accounting.prompt_tokens,200);assert.equal(accounting.unknown_prompt_attempts,0);assert.equal(data.prompt_tokens,100);assert.equal(data.completion_tokens,20);}
   if(mode==='recovered'){assert.equal(failures.length,0);assert.match(wire.join(''),/Complete fixture answer/);}
   else{assert.equal(failures.length,1);assert.doesNotMatch(wire.join(''),/Max turns|\[DONE\]/);}
   if(stream)assert.equal(notices.filter(e=>e.name==='llm/retry-started').length,1);

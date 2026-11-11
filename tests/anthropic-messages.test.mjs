@@ -44,11 +44,19 @@ test('chat completions responses project reasoning, text, tools, usage and stop 
   const message=anthropicFromChat({model:'fixture'},{choices:[{message:{reasoning_content:'Think',content:'Answer',tool_calls:[{id:'call_1',type:'function',function:{name:'Read',arguments:'{"path":"a"}'}}]},finish_reason:'tool_calls'}],usage:{prompt_tokens:11,completion_tokens:7,prompt_tokens_details:{cached_tokens:5}}});
   assert.equal(message.type,'message');assert.equal(message.role,'assistant');assert.equal(message.stop_reason,'tool_use');
   assert.deepEqual(message.content,[{type:'thinking',thinking:'Think',signature:'bridgepp-thinking-signature'},{type:'text',text:'Answer'},{type:'tool_use',id:'call_1',name:'Read',input:{path:'a'}}]);
-  assert.deepEqual(message.usage,{input_tokens:6,output_tokens:7,cache_read_input_tokens:5,cache_creation_input_tokens:0});
+  assert.deepEqual(message.usage,{input_tokens:6,output_tokens:7,cache_read_input_tokens:5});
   for(const [reason,expected]of [['stop','end_turn'],['tool_calls','tool_use'],['length','max_tokens'],['content_filter','refusal'],[undefined,'end_turn']])assert.equal(anthropicStopReason(reason),expected);
   assert.equal(anthropicStopReason(undefined,true),'tool_use');
 });
 
+test('unreported cache categories stay unknown instead of being claimed as zero',()=>{
+  const project=usage=>anthropicFromChat({model:'fixture'},{choices:[{message:{content:'Answer'},finish_reason:'stop'}],usage}).usage;
+  assert.deepEqual(project({prompt_tokens:1000,completion_tokens:10}),{input_tokens:1000,output_tokens:10});
+  assert.deepEqual(project({prompt_tokens:1000,completion_tokens:10,prompt_tokens_details:{cached_tokens:600},cache_creation_input_tokens:100}),{input_tokens:300,output_tokens:10,cache_read_input_tokens:600,cache_creation_input_tokens:100});
+  assert.deepEqual(project({prompt_tokens:1000,completion_tokens:10,prompt_tokens_details:{cached_tokens:600},cache_creation_input_tokens:500}),{input_tokens:400,output_tokens:10,cache_read_input_tokens:600});
+  assert.deepEqual(project({prompt_tokens:1000,completion_tokens:10,prompt_tokens_details:{cached_tokens:1600}}),{input_tokens:0,output_tokens:10,cache_read_input_tokens:1600});
+  assert.deepEqual(project(undefined),{input_tokens:0,output_tokens:0});
+});
 test('streaming projection joins multiple tool indices and signs reasoning',()=>{
   const events=[],projection=new AnthropicProjection('fixture',event=>events.push(event));
   const accept=(delta,finish_reason=null,usage)=>projection.accept({...usage?{usage}:{},choices:[{delta,finish_reason}]});
@@ -132,8 +140,8 @@ test('Gateway Claude route handles auth, model validation, both response modes, 
   const completeJson=await complete.json();assert.equal(completeJson.content[0].text,'Complete');assert.equal(completeJson.stop_reason,'end_turn');assert.equal(captured[0].messages[0].content,'Rules');assert.equal(captured[0].temperature,undefined);
   mode='stream';const streamed=await request('/messages?beta=true',{...base,stream:true});assert.equal(streamed.status,200);assert.match(streamed.headers.get('content-type'),/text\/event-stream/);const events=parseEvents(await streamed.text());
   assert.deepEqual(events.slice(0,2).map(e=>e.event),['message_start','content_block_start']);assert.ok(events.some(e=>e.data.delta?.type==='thinking_delta'));assert.ok(events.some(e=>e.data.delta?.type==='text_delta'));assert.equal(events.at(-1).event,'message_stop');
-  assert.deepEqual(events[0].data.message.usage,{input_tokens:0,output_tokens:0,cache_read_input_tokens:0,cache_creation_input_tokens:0});
-  assert.deepEqual(events.find(e=>e.event==='message_delta').data.usage,{input_tokens:5,output_tokens:2,cache_read_input_tokens:4,cache_creation_input_tokens:0});
+  assert.deepEqual(events[0].data.message.usage,{input_tokens:0,output_tokens:0});
+  assert.deepEqual(events.find(e=>e.event==='message_delta').data.usage,{input_tokens:5,output_tokens:2,cache_read_input_tokens:4});
   assert.equal(captured.at(-1).stream_options?.include_usage,true);
   globalThis.fetch=(url,options)=>String(url)===endpoint.baseURL+'/chat/completions'?Promise.resolve(new Response('data: '+JSON.stringify({choices:[{delta:{content:'Partial'}}]})+'\n\ndata: '+JSON.stringify({error:{message:'stream quota exhausted',upstream_status:429,reset_at:'2026-11-10T01:02:03Z'}})+'\n\n',{headers:{'content-type':'text/event-stream'}})):originalFetch(url,options);
   const streamFailure=await request('/messages',{...base,stream:true}),failureEvents=parseEvents(await streamFailure.text());assert.equal(streamFailure.status,200);assert.equal(failureEvents.at(-1).event,'error');assert.equal(failureEvents.at(-1).data.error.type,'rate_limit_error');assert.match(failureEvents.at(-1).data.error.message,/stream quota exhausted/);

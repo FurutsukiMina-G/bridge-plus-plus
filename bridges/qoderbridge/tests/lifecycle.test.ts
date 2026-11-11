@@ -170,7 +170,9 @@ test('measured usage reaches the client; cached tokens are sent only when the es
   assert.equal(continued.report.client_cache_usage, 'session_prefix_estimate');
   const replay = await estimated.pool.infer(next('Again'));
   assert.equal(replay.report.local_response_replay, true);
-  assert.deepEqual(replay.report.client_usage, { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 });
+  // A replay sends no usage frame: zero would read as an empty context in the client's context ring.
+  assert.equal(replay.report.client_usage, null);
+  assert.equal(replay.report.credits_delta, 0);
   estimated.pool.closeAll();
 });
 test('a diverged history for the same client key closes the unreachable Qoder session', async () => {

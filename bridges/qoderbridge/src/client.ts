@@ -39,6 +39,12 @@ export interface Config extends Selection {
   blankWarmTtlMs?:number;
   /** Calling host's display name for failure text; absent means a generic client. */
   hostName?:string;
+  toolMode?:'native'|'json';
+  nativeResultCharLimit?:number;
+  nativeMcpOutputTokens?:number;
+  nativeMaxTurns?:number;
+  nativeWarmLimit?:number;
+  nativeInvalidRounds?:number;
 }
 export function baseOptions(config: Config, controller: AbortController): Options {
   return {

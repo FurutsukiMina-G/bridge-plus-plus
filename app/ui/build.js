@@ -3689,17 +3689,20 @@ var SessionMetrics = class {
         return { value: tokens / (span / 1e3), estimated: true, live: true };
       }
     }
+    let side = null;
     for (let i2 = this.requests.length - 1; i2 >= 0; i2--) {
       const r = this.requests[i2];
-      if (r.rate) return { value: r.rate, estimated: r.rateEstimated, live: false };
+      if (!r.rate) continue;
+      if (!r.auxiliary) return { value: r.rate, estimated: r.rateEstimated, live: false };
+      side ??= { value: r.rate, estimated: r.rateEstimated, live: false };
     }
-    return null;
+    return side;
   }
   turn(turnId) {
     const rows = this.requests.filter((r) => r.turnId === turnId);
     if (!rows.length) return null;
     const sum = (key) => rows.every((r) => r[key] !== null) ? rows.reduce((n, r) => n + r[key], 0) : null;
-    const cachedRows = rows.filter((r) => r.cached !== null && r.input > 0);
+    const known = rows.filter((r) => r.cached !== null && r.input > 0), mainKnown = known.filter((r) => !r.auxiliary), cachedRows = mainKnown.length ? mainKnown : known;
     return {
       requests: rows.length,
       input: sum("input"),

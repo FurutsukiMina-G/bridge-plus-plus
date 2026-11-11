@@ -16,6 +16,9 @@ import {sdkMediaPrompt} from './media-input.js';
 import {IsolationCache} from './isolation-cache.js';
 import {startupTransport,runtimeMemory,DISABLED_RUNTIME_MEMORY,type StartupAttempt} from './startup-phases.js';
 import {hasUsableTools} from './final-answer.js';
+import {NativeLane,nativeEligible} from './native-lane.js';
+import {NATIVE_SYSTEM} from './native-prompt.js';
+import type {HostBinding,HostToolTable} from './native-tools.js';
 
 export type InferHooks = { signal?: AbortSignal; onText?: (text: string) => void;
   onCorrection?: (retry:number,error:string)=>void;
@@ -75,11 +78,18 @@ export class QoderPool {
   private reasoningGuardTrips = 0;
   private disabledPlugins = new Set<string>();
   private disabledSkills = new Set<string>();
+  private readonly native:NativeLane;
   // Idle SDK runtimes are otherwise released only when another session is opened.
   private sweeper = setInterval(() => this.sweepIdle(), SWEEP_MS);
   constructor(readonly config: Config, private readonly startRuntime: typeof startup = startup) {
     this.sweeper.unref();
+    this.native=new NativeLane(config,(binding,table,names)=>this.open('native',{binding,table,names}),record=>this.close(record as unknown as RecordSession),scope=>this.sweep(scope));
     if(!Number.isSafeInteger(config.blankWarmLimit??2)||(config.blankWarmLimit??2)<0||(config.blankWarmLimit??2)>4||!Number.isSafeInteger(config.blankWarmTtlMs??120000)||(config.blankWarmTtlMs??120000)<1){clearInterval(this.sweeper);throw new Error('Invalid Qoder blank runtime limit or TTL');}
+    // The runtime cuts any function result above 50,000 characters to a preview; the receipt path must trigger below it.
+    const nativeRange=(value:number|undefined,min:number,max:number)=>value===undefined||Number.isSafeInteger(value)&&value>=min&&value<=max;
+    if(!nativeRange(config.nativeResultCharLimit,1,49000)||!nativeRange(config.nativeWarmLimit,0,2)||!nativeRange(config.nativeInvalidRounds,1,10)||
+      !nativeRange(config.nativeMaxTurns,10,1_000_000)||!nativeRange(config.nativeMcpOutputTokens,25_000,2_000_000_000)){
+      clearInterval(this.sweeper);throw new Error('Invalid Qoder native tool settings');}
     try{pruningThreshold(config.prunedHistoryReuseRatio);}catch(error){clearInterval(this.sweeper);throw error;}
     try { decisionRetryLimit(config.decisionRetries); }
     catch(error) { clearInterval(this.sweeper); throw error; }
@@ -124,7 +134,9 @@ export class QoderPool {
       cache.plugins.forEach(id=>this.disabledPlugins.add(id));cache.skills.forEach(id=>this.disabledSkills.add(id));this.cacheInfo={enabled:true,hit:cache.hit,status:'ready',cli_version:cache.observedCliVersion,declared_cli_version:cache.declaredCliVersion};return cache;
     }).catch(()=>{this.cacheInfo={enabled:true,hit:false,status:'unavailable',cli_version:null,declared_cli_version:null};return null;});return this.cacheReady;
   }
-  private async open(): Promise<RecordSession> {
+  private open(kind?:'json'):Promise<RecordSession>;
+  private open(kind:'native',native:{binding:HostBinding;table?:HostToolTable;names:string[]}):Promise<import('./native-lane.js').NativeRuntime>;
+  private async open(kind:'json'|'native'='json',native?:{binding:HostBinding;table?:HostToolTable;names:string[]}):Promise<RecordSession|import('./native-lane.js').NativeRuntime> {
     const openingAt=performance.now(),attempts:StartupAttempt[]=[];
     await mkdir('.runtime', { recursive: true });
     const cache=await this.cache();
@@ -152,6 +164,13 @@ export class QoderPool {
       settings = { ...settings, enabledPlugins: { ...settings.enabledPlugins as object, ...Object.fromEntries([...this.disabledPlugins].map(id => [id, false])) },
         skillOverrides: { ...settings.skillOverrides as object, ...Object.fromEntries([...this.disabledSkills].map(name => [name, 'off'])) } };
       options.settings = JSON.stringify(settings);
+      if(kind==='native'&&native){
+        options.mcpServers={host:native.binding.config(native.names)};
+        options.systemPrompt=NATIVE_SYSTEM(this.config.hostName);options.maxTurns=this.config.nativeMaxTurns??100000;
+        options.env={...options.env,QODERCN_CLI_MAX_MCP_OUTPUT_TOKENS:String(this.config.nativeMcpOutputTokens??1000000)};
+        options.hooks={PreToolUse:[{hooks:[(input:any)=>Promise.resolve(this.native.preToolUse(native.binding,input))]}],PostToolUse:[{hooks:[(input:any)=>Promise.resolve(this.native.postToolUse(native.binding,input))]}]};
+        options.canUseTool=(name,input)=>Promise.resolve(this.native.canUseTool(native.binding,name,input));
+      }
       const appliedPlugins=new Set(this.disabledPlugins),appliedSkills=new Set(this.disabledSkills),pid=startupTransport(options,phase);
       options.resolveModel = context => {
         const selected = selectModel(context.availableModels,
@@ -165,6 +184,12 @@ export class QoderPool {
       controller.signal.throwIfAborted();
       const q = warm.query(queue);
       mark=performance.now();const init=await q.initializationResult();phase.initialization_result_ms=performance.now()-mark;
+      if(kind==='native'&&native){
+        const statuses=await q.mcpServerStatus();const host=statuses.find(row=>row.name==='host') as unknown as {tools?:unknown[]}|undefined;
+        const initTools=(init as unknown as {tools?:unknown[]}).tools;
+        const count=Array.isArray(initTools)?initTools.length:host?.tools?.length;
+        if(count!==native.names.length){queue.close();warm.close();controller.abort();if(attempt===0)continue;throw new Error('native_tools_unavailable');}
+      }
       mark=performance.now();const isolation = await isolateSession(q,init);phase.isolate_ms=performance.now()-mark;
       const plugins = isolation.remaining_plugins, skills = (isolation.context_skills.items??[]).map(item => item.name);
       const observedPlugins=[...new Set([...isolation.initial_plugins,...plugins])],observedSkills=[...new Set([...isolation.initial_skills,...skills])];
@@ -199,14 +224,17 @@ export class QoderPool {
   }
   private sweepIdle() {
     for (const record of this.sessions.values()) if (!record.busy && Date.now() - record.touched > (record.nativeReleased ? 120_000 : this.config.sessionIdleMs ?? IDLE_MS)) this.close(record);
+    this.native.sweepIdle();
     // A failed startup prewarm (e.g. network not ready at logon) retries until the runtime is reachable.
     if (this.prewarmError && !this.nextWarm) this.replenish();
   }
   private sweep(scope?:string) {
     this.sweepIdle();
     const active=[...this.sessions.values()].filter(r=>!r.nativeReleased);
-    if (active.length+this.pendingSlots < MAX_SESSIONS) return;
+    if (active.length+this.native.stats().sessions+this.pendingSlots < MAX_SESSIONS) return;
     for(const r of this.sessions.values())if(r.nativeReleased&&!r.busy)this.close(r);
+    this.native.closeIdleForCapacity();
+    if([...this.sessions.values()].filter(r=>!r.nativeReleased).length+this.native.stats().sessions+this.pendingSlots<MAX_SESSIONS)return;
     const oldest = evictionCandidate([...this.sessions.values()].filter(r=>!r.nativeReleased),scope);
     if (oldest) this.close(oldest);
     else throw new Error('All QoderBridge conversation slots are active');
@@ -270,16 +298,20 @@ export class QoderPool {
     return record;
     }finally{this.pendingSlots--;}
   }
-  bindTool(id: string, record: RecordSession) { this.byToolId.set(id, record.id); }
+  bindTool(id: string, record: {id:string}) { if(this.native.bindTool(id))return;this.byToolId.set(id, record.id); }
+  isNative(request:ChatRequest){return nativeEligible(request,this.config);}
   stats() { return { sessions: [...this.sessions.values()].filter(row => !row.nativeReleased).length, busy: [...this.sessions.values()].filter(row => row.busy > 0).length,
     opening: this.openingByClient.size, prewarmed: this.nextWarm !== null, prewarm_error: this.prewarmError,
     blank_runtimes:{target:Math.min(this.warmTarget,this.config.blankWarmLimit??2),limit:this.config.blankWarmLimit??2,ready:this.warmReady.size,pending:Number(!!this.nextWarm)+this.extraWarm.length-this.warmReady.size,ttl_ms:this.config.blankWarmTtlMs??120000},
+    native:this.native.stats(),
     decision_recovery:{max_correction_calls:decisionRetryLimit(this.config.decisionRetries),
       recovered_requests:this.recoveredRequests,exhausted_requests:this.exhaustedRequests},
     reasoning_guard:{max_reasoning_tokens:this.guardTokens(),trips:this.reasoningGuardTrips},
     billing_calendar_overrides:sharedTierCalendar.learnedDates() }; }
   private guardTokens() { return this.config.reasoningGuardTokens ?? DEFAULT_REASONING_GUARD_TOKENS; }
-  async infer(request: ChatRequest, hooks: InferHooks = {}) {
+  async infer(request: ChatRequest, hooks: InferHooks = {}):Promise<any> {
+    // Native traffic is demand too: it keeps the blank JSON runtimes (auxiliary tool-less requests) replenished.
+    if(this.isNative(request)){this.lastDemand=Date.now();return this.native.infer(request,hooks);}
     const start = performance.now();
     this.lastDemand=Date.now();if(this.oneShot(request))this.warmTarget=Math.min(2,this.config.blankWarmLimit??2);
     const requestHash = createHash('sha256').update(JSON.stringify({ model: request.model,
@@ -338,7 +370,7 @@ export class QoderPool {
             tool_detail_mode:'reused',history_mode:'delta',sent_message_count:0,model_policy_calls:[],
             client_session_key_present:Boolean(request.prompt_cache_key),client_session_key_hash:request.prompt_cache_key?createHash('sha256').update(request.prompt_cache_key).digest('hex').slice(0,12):null,
             credits_delta:0,total_session_credits:record.lastCredits,model_requests:0,
-            local_response_replay:true,normalized_usage_source:'local_replay',client_usage:{...ZERO_USAGE} as OpenAIUsage|null,
+            local_response_replay:true,normalized_usage_source:'local_replay',client_usage:null as OpenAIUsage|null,
             client_cache_usage:'omitted',cache_estimate_tokens:null as number|null,cache_estimate_ratio:null as number|null,
             decision_recovery:localRecovery,
           }};
@@ -357,7 +389,8 @@ export class QoderPool {
             model_policy_calls: [], history_mode: 'delta', sent_message_count: 0,
             credits_delta: 0, total_session_credits: record.lastCredits, model_requests: 0, local_response_replay: true,
             // No model call ran, so zero is the exact usage of this replay.
-            normalized_usage_source: 'local_replay', client_usage: { ...ZERO_USAGE } as OpenAIUsage | null,
+            // No usage frame: a replay costs nothing, and a zero prompt would read as an empty context to clients.
+            normalized_usage_source: 'local_replay', client_usage: null as OpenAIUsage | null,
             client_cache_usage: 'omitted', cache_estimate_tokens: null as number | null,
             cache_estimate_ratio: null as number | null } };
       }
@@ -552,7 +585,7 @@ export class QoderPool {
     }
   }
   closeAll() {
-    this.closed=true;clearTimeout(this.warmTimer);
+    this.closed=true;this.native.closeAll();clearTimeout(this.warmTimer);
     clearInterval(this.sweeper);
     for(const controller of this.openingControllers)controller.abort();this.openingControllers.clear();
     for(const timer of this.warmTimers.values())clearTimeout(timer);this.warmTimers.clear();this.warmReady.clear();

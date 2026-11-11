@@ -60,3 +60,16 @@ test('the context ring and the latest cache figure follow the main conversation,
   const only=new SessionMetrics();only.feed({type:'usage',at,data:{prompt_tokens:5000,completion_tokens:20,auxiliary:true}});
   assert.equal(only.context(200000).used,5020);
 });
+
+test('speed and the turn cache ratio follow the main conversation too, falling back to auxiliary requests only when alone',()=>{
+  const m=new SessionMetrics(),at='2026-11-11T00:00:00.000Z';
+  const usage=(prompt,cached,extra={})=>m.feed({type:'usage',at,turnId:'t1',data:{prompt_tokens:prompt,completion_tokens:1000,cached_tokens:cached,cache_status:'reported',context_window:200000,...extra}});
+  usage(80000,72000,{first_token_ms:1000,duration_ms:11000});usage(6000,0,{auxiliary:true,first_token_ms:100,duration_ms:600});
+  assert.equal(m.rate().value,100);
+  assert.equal(m.turn('t1').cacheRatio,0.9);
+  assert.equal(m.turn('t1').requests,2);
+  assert.equal(m.turn('t1').input,86000);
+  const only=new SessionMetrics();only.feed({type:'usage',at,turnId:'t9',data:{prompt_tokens:6000,completion_tokens:1000,cached_tokens:3000,cache_status:'reported',auxiliary:true,first_token_ms:100,duration_ms:600}});
+  assert.equal(only.rate().value,2000);
+  assert.equal(only.turn('t9').cacheRatio,0.5);
+});

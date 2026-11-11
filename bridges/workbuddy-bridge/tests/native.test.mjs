@@ -317,7 +317,7 @@ test('a thinking-only Max turns stop gets one correction in the same SDK session
   assert.equal(metrics.attempts[0].errorCode,'missing_native_output');
   assert.deepEqual(metrics.attempts[0].observation,{thinkingCharacters:27,textCharacters:0,toolArgumentCharacters:0,stopReasons:['end_turn'],deniedToolCount:2,deniedTools:['mcp__host__read']});
   assert.doesNotMatch(JSON.stringify(metrics.attempts[0].observation),/synthetic private/);
-  assert.equal(result.usage.prompt_tokens,10000);assert.equal(result.bridge_usage.correction_calls,1);
+  assert.equal(result.usage.prompt_tokens,5000);assert.equal(result.usage.bridge_usage_attempts,2);assert.equal(result.bridge_usage.correction_calls,1);
   assert.equal(result.bridge_usage.accounting.attempts,2);assert.equal(result.bridge_usage.accounting.known_prompt_tokens,10000);
 });
 
@@ -325,7 +325,7 @@ test('repeated empty native stops fail clearly after one correction and identica
   const {transport,seen}=await fixture(t,[{thinkingOnly:true},{thinkingOnly:true}],{decisionRetries:8});
   const {raw,metrics}=await collect(transport);
   assert.equal(seen.length,2);assert.match(raw,/模型这一步没有给出工具调用或答复/);assert.match(raw,/"automatic_retry":false/);assert.doesNotMatch(raw,/Max turns|\[DONE\]/);
-  assert.equal(metrics.attempts.length,2);assert.equal(metrics.knownUsage.prompt_tokens,10000);
+  assert.equal(metrics.attempts.length,2);assert.equal(metrics.knownUsage.prompt_tokens,5000);assert.equal(metrics.knownUsage.bridge_usage_attempts,2);
   assert.deepEqual(metrics.attempts[0].observation.deniedTools,[]);assert.equal(metrics.attempts[0].observation.deniedToolCount,0);
   const event=raw.split('\n').filter(s=>s.startsWith('{')).map(s=>JSON.parse(s)).find(e=>e.bridge_usage);
   assert.equal(event.bridge_usage.correction_calls,1);assert.equal(event.bridge_usage.accounting.attempts,2);

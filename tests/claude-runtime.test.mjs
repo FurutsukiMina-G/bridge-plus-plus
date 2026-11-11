@@ -53,6 +53,17 @@ test('Claude maps streaming, tools, subagent summaries, task progress and result
   for(const [subtype,status]of [['error_during_execution','interrupted'],['error_max_turns','interrupted'],['error_api','failed']]){const rows=[],a=new ClaudeAdapter({emit:async e=>rows.push(e)});await a.message({type:'result',subtype,is_error:true,result:'synthetic raw failure',error:{code:'synthetic',message:'raw'}});const end=rows.find(e=>e.type==='turn-end');assert.equal(end.status,status);assert.equal(end.data.result,'synthetic raw failure');if(status==='failed')assert.equal(end.reason.message,'raw');if(subtype==='error_max_turns')assert.ok(rows.some(e=>e.type==='notice'));}
 });
 
+test('Claude drops thinking_tokens system events so adjacent thinking deltas stay mergeable',async()=>{
+  const events=[],adapter=new ClaudeAdapter({emit:async e=>events.push(e)});
+  for(const token of ['甲','乙','丙']){
+    await adapter.message({type:'stream_event',event:{type:'content_block_delta',index:0,delta:{type:'thinking_delta',thinking:token}}});
+    await adapter.message({type:'system',subtype:'thinking_tokens',tokens:token.length,session_id:'synthetic'});
+  }
+  await adapter.message({type:'system',subtype:'status',status:'idle'});
+  assert.deepEqual(events.filter(e=>e.type==='thinking').map(e=>e.text),['甲','乙','丙']);
+  assert.equal(events.some(e=>e.type==='native-event'&&e.name==='thinking_tokens'),false);
+  assert.equal(events.some(e=>e.type==='native-event'&&e.name==='status'),true);
+});
 test('Claude approvals allow once, rewrite session permissions, deny and reject unknown interactions',async()=>{
   for(const choice of ['approve','approve-session','reject']){
     const {adapter,events,writes}=controlAdapter(),request={subtype:'can_use_tool',tool_name:'Write',display_name:'Write synthetic',input:{file_path:'x'},permission_suggestions:[{type:'setMode',mode:'acceptEdits',destination:'projectSettings'},{type:'addRules',destination:'userSettings'}]};await adapter.message({type:'control_request',request_id:'req-1',request});const approval=events.find(e=>e.type==='approval');assert.equal(approval.name,'Write synthetic');assert.deepEqual(approval.choices,['approve','approve-session','reject']);await adapter.approve(approval.approvalId,choice);const response=writes[0].response.response;
