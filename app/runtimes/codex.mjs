@@ -5,8 +5,10 @@ import {codexPermissionSettings} from '../services/runtime-permissions.mjs';
 import {recordCodexRuntime,readCodexBaseInstructions,writeCodexModelCatalog,markCodexCatalogUnsupported,codexCatalogUnsupported,codexVersionNumber,codexWorkspaceRoot} from '../services/codex-config.mjs';
 import {CodexExecAdapter} from './codex-exec.mjs';
 import {runtimeReason,failureText,failureValue} from '../services/failure-details.mjs';
+import {codexSessionHome,prepareCodexHome} from '../services/codex-config.mjs';
+import {CodexRolloutMedia} from '../services/codex-rollout-media.mjs';
 
-export function codexLaunchSettings({endpoint,variant,model,session,permissionMode=session?.permissionMode,runtime,catalogPath}){
+export function codexLaunchSettings({endpoint,variant,model,session,permissionMode=session?.permissionMode,runtime,catalogPath,nativeHome}){
   const selection=session.selection,args=[],env={};
   const config=endpoint?{model_provider:'agentworkbench',model:variant.id,'model_providers.agentworkbench.name':'Bridge++','model_providers.agentworkbench.base_url':endpoint.baseURL,'model_providers.agentworkbench.env_key':'AWB_GATEWAY_KEY','model_providers.agentworkbench.wire_api':'responses','model_providers.agentworkbench.requires_openai_auth':false,'model_providers.agentworkbench.supports_websockets':false,model_context_window:selection.contextBudget??selection.contextTokens??model.defaultContextTokens??model.contextMaximum}:{model:selection.nativeModel};
   if(selection.reasoning)config.model_reasoning_effort=selection.reasoning;
@@ -14,6 +16,7 @@ export function codexLaunchSettings({endpoint,variant,model,session,permissionMo
   for(const [key,value]of Object.entries(config))if(value!==null&&value!==undefined&&value!=='')args.push('-c',`${key}=${JSON.stringify(value)}`);
   if(endpoint&&catalogPath)args.push('-c',`model_catalog_json=${JSON.stringify(catalogPath)}`);
   if(endpoint)env.AWB_GATEWAY_KEY=endpoint.key;
+  if(endpoint&&nativeHome){env.CODEX_HOME=nativeHome;args.push('-c','windows.sandbox="unelevated"');}
   return {args,env};
 }
 
@@ -99,11 +102,20 @@ export class CodexAppServerAdapter extends RuntimeLifecycle {
   }
   async open(catalogPath){
     this.catalogPath=catalogPath??null;
+    const root=codexWorkspaceRoot(this.dir);
+    this.nativeHome=root?codexSessionHome(this.session,root):null;
+    if(this.nativeHome){
+      const rules=await this.agentRules?.injection();
+      const prepared=await prepareCodexHome(root,{...this.codexHomeOptions,rulesText:rules?.text??''});
+      if(prepared.notice)await this.emit({type:'notice',source:'codex-home',text:prepared.notice});
+      this.rulesVersion=rules?.version??null;
+    }
+    this.rolloutMedia=new CodexRolloutMedia(this.nativeHome??undefined);
     const settings=codexLaunchSettings(this);const child=(this.launchProcess??launch)(this.runtime.executable,['app-server','--listen','stdio://',...settings.args],{cwd:this.project.path,env:settings.env});this.rpc=new RpcProcess(child,{timeoutMs:180000,maxEventBytes:16*1024*1024});this.rpc.on('message',m=>{void this.enqueue(()=>this.closed?undefined:this.message(m));});this.rpc.on('closed',e=>{void this.enqueue(async()=>{if(!this.closed&&this.running){this.running=false;await this.emit({type:'error',text:e.message});await this.emit({type:'turn-end',status:'failed'});}});});this.rpc.on('log',()=>{});
     this.checkOpen();await this.rpc.request('initialize',{clientInfo:{name:'agent_workbench',title:'Bridge++',version:'0.1.15'},capabilities:{experimentalApi:false}});this.checkOpen();this.rpc.notify('initialized');
     const permissions=codexPermissionSettings(this.permissionMode);if(!this.runtime.permissions?.observed?.autoReview)delete permissions.approvalsReviewer;
     const threadSettings={cwd:this.project.path,...permissions,...(this.endpoint?{model:this.variant.id,modelProvider:'agentworkbench'}:this.session.selection.nativeModel?{model:this.session.selection.nativeModel}:{})};
-    const result=await this.rpc.request(this.session.nativeId?'thread/resume':'thread/start',this.session.nativeId?{...threadSettings,threadId:this.session.nativeId}:threadSettings);this.threadId=result.thread.id;await this.saveNative(this.threadId);
+    const result=await this.rpc.request(this.session.nativeId?'thread/resume':'thread/start',this.session.nativeId?{...threadSettings,threadId:this.session.nativeId}:threadSettings);this.threadId=result.thread.id;await this.saveNative(this.threadId,this.nativeHome?{nativeHome:'bridge',rulesVersion:this.rulesVersion}:{});
     if(!codexPermissionResultMatches(this.permissionMode,result,{autoReview:!!this.runtime.permissions?.observed?.autoReview}))throw new Error('原生 Codex 未应用所选授权/沙箱设置，已停止，未发送任务。');
     this.checkOpen();this.ready=true;
   }
@@ -111,7 +123,7 @@ export class CodexAppServerAdapter extends RuntimeLifecycle {
     const image=message.params?.item;
     if(message.method==='item/completed'&&image?.type==='imageGeneration'){
       if(image.result)await this.emit({type:'media-output',data:image.result,mime:'image/png',origin:{runtimeId:'codex',itemId:image.id,tool:'imageGeneration'}});
-      else if(image.savedPath)await this.emit({type:'media-output',path:image.savedPath,origin:{runtimeId:'codex',itemId:image.id,tool:'imageGeneration'}});
+      else if(image.savedPath)await this.rolloutMedia.project(this.threadId,{...image,status:image.status??'completed'},this.emit);
       else if(image.fileId)await this.emit({type:'notice',text:'Codex 返回了图片存储标识，但未提供本地文件或内联数据，暂无法显示。'});
     }
     if(message.id!==undefined&&message.method){

@@ -60,7 +60,7 @@ function fixture(t,{root,version=VERSION,rejectCatalog=false,dirName='adapter-se
   const dir=join(root,'sessions',dirName),calls=[],events=[];
   const session={id:dirName,selection:{modelKey:'workbuddy:fixture'}};
   const runtime={id:'codex',executable:process.execPath,permissions:{observed:{version}}};
-  const adapter=new CodexAppServerAdapter({runtime,session,project:{path:root},dir,model:{},variant:{id:'awb-model',name:'Awb Model'},endpoint:{baseURL:'http://127.0.0.1:1',key:'fixture'},permissionMode:null,emit:async event=>{events.push(event);},saveNative:async id=>{session.nativeId=id;},launchProcess:(command,args,options)=>{
+  const adapter=new CodexAppServerAdapter({runtime,session,project:{path:root},dir,model:{},variant:{id:'awb-model',name:'Awb Model'},endpoint:{baseURL:'http://127.0.0.1:1',key:'fixture'},codexHomeOptions:{sourceHome:join(root,'missing-home')},permissionMode:null,emit:async event=>{events.push(event);},saveNative:async id=>{session.nativeId=id;},launchProcess:(command,args,options)=>{
     calls.push(args);
     if(rejectCatalog&&args.some(arg=>arg.startsWith('model_catalog_json=')))throw new Error('failed to parse model_catalog_json path as JSON: unknown field `apply_patch_tool_type`');
     return launch(process.execPath,[peer,...args],{...options,env:{...options.env}});

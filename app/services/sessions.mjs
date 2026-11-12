@@ -16,15 +16,17 @@ import {redactMedia,MediaClaimError} from './media.mjs';
 import {assertRuntimeReady} from './runtime-availability.mjs';
 import {failureText,failureValue,runtimeReason} from './failure-details.mjs';
 import {interjectCapability,queuedBatch} from './session-input.mjs';
+import {AgentRules,rulesPrefix} from './agent-rules.mjs';
 
 const defaults={dsh:DshAdapter,kimi:KimiAcpAdapter,codex:CodexAdapter,claude:ClaudeAdapter,antigravity:AntigravityAdapter};
 export class Sessions {
   constructor(store,providers,gateway,runtimes,{constructors=defaults,identifyProcess=processIdentity,media,capabilities,runtimeReady,now=Date.now,adapterIdleMs=600000,adapterMaxIdle=4,adapterSweepMs=60000}={}){
     this.media=media;this.capabilities=capabilities;this.runtimeReady=runtimeReady;this.now=now;this.adapterIdleMs=adapterIdleMs;this.adapterMaxIdle=adapterMaxIdle;
+    this.agentRules=new AgentRules(store,{providers,gateway});
     this.inputLocks=new Map();this.sendingQueue=new Set();this.draining=new Set();
     Object.assign(this,{store,providers,gateway,runtimes,constructors,identifyProcess});this.adapters=new Map();this.adapterUsed=new Map();this.runs=new Map();this.rebinding=new Set();this.permissionChanging=new Set();this.external=new Map();this.closed=false;this.adapterTimer=setInterval(()=>{void this.recycleAdapters().catch(()=>{});},adapterSweepMs);this.adapterTimer.unref();
     for(const session of store.state?.sessions??[])if(Number.isSafeInteger(session.nativeClientPid)&&session.nativeClientPid>0){try{process.kill(session.nativeClientPid,0);this.external.set(session.id,{restoredPid:session.nativeClientPid});}catch(error){if(error.code!=='ESRCH')this.external.set(session.id,{restoredPid:session.nativeClientPid});}}
-    if(gateway){gateway.requestContext=id=>this.runs.get(id)?.id;gateway.onUsage=(id,event,turnId)=>{const run=this.runs.get(id);if(!run||run.id!==turnId)return Promise.resolve();return this.receive(this.store.session(id),run.adapter,event);};gateway.onSuccess=(id,turnId)=>gateway.onUsage(id,{type:'native-event',source:'gateway',name:'gateway/request-completed'},turnId);}
+    if(gateway){gateway.requestContext=id=>this.runs.get(id)?.id;gateway.onUsage=async(id,event,turnId)=>{if(await this.agentRules.acceptUsage(id,event))return;const run=this.runs.get(id);if(!run||run.id!==turnId)return;return this.receive(this.store.session(id),run.adapter,event);};gateway.onSuccess=(id,turnId)=>gateway.onUsage(id,{type:'native-event',source:'gateway',name:'gateway/request-completed'},turnId);}
   }
   touchAdapter(id){if(this.adapters.has(id))this.adapterUsed.set(id,this.now());}
   async recycleAdapters(){if(this.closed)return;const candidates=[];for(const [id,adapter]of this.adapters){const session=this.store.session(id),run=this.runs.get(id);if(session.runtimeId==='dsh'||session.runtimeId==='codex'&&session.selection.modelKey==='native'||run||this.external.has(id)||run?.approvals.size||adapter.requests?.size)continue;candidates.push({id,adapter,used:this.adapterUsed.get(id)??0});}candidates.sort((a,b)=>a.used-b.used);const remove=new Set(candidates.filter(row=>this.now()-row.used>this.adapterIdleMs).map(row=>row.id));for(const row of candidates){if(candidates.length-remove.size<=this.adapterMaxIdle)break;remove.add(row.id);}for(const row of candidates)if(remove.has(row.id)&&this.adapters.get(row.id)===row.adapter){this.adapters.delete(row.id);this.adapterUsed.delete(row.id);await row.adapter.close().catch(()=>{});}}
@@ -41,7 +43,7 @@ export class Sessions {
     if(model.tools===false)throw new Error('此模型源明确不支持工具调用，无法用于 agent 会话');
     return model.source==='antigravity'?{...selected,nativeModel:model.id,modelSource:'antigravity'}:selected;
   }
-  async create({projectId,runtimeId,selection,title}){
+  async create({projectId,runtimeId,selection,title,recordRules}){
     if(this.closed)throw new Error('工作区正在关闭');this.store.project(projectId);
     const runtime=this.runtimes.find(r=>r.id===runtimeId);if(!runtime)throw new Error('请选择开发工具环境');
     this.ensureReady(runtimeId);
@@ -52,6 +54,7 @@ export class Sessions {
     const permissionMode=validatePermissionMode(runtime,resolved.mode,selection);
     const session={id:randomUUID(),projectId,runtimeId,selection,permissionMode,title:typeof title==='string'&&title.trim()?title.trim().slice(0,100):'新会话',status:'idle',createdAt:new Date().toISOString(),updatedAt:new Date().toISOString(),nativeId:null};
     if(resolved.migration)session.permissionMigration=resolved.migration;
+    if(recordRules===false)session.recordRules=false;
     await this.store.mutate(s=>{s.sessions.unshift(session);});return session;
   }
   async adapter(session,run){
@@ -70,10 +73,10 @@ export class Sessions {
     if(run?.cancelled||this.closed)throw new CancelledError();
     let adapter;
     const emit=event=>this.receive(session,adapter,event);
-    const saveNative=async nativeId=>{await this.store.mutate(()=>{session.nativeId=nativeId;});};
+    const saveNative=async(nativeId,metadata={})=>{await this.store.mutate(()=>{session.nativeId=nativeId;for(const key of ['nativeHome','rulesVersion'])if(Object.hasOwn(metadata,key))session[key]=metadata[key];});};
     const resolved=migratePermissionMode(runtime,session.selection,session.permissionMode),permissionMode=validatePermissionMode(runtime,resolved.mode,session.selection);
     if(resolved.migration){await this.store.mutate(()=>{session.permissionMode=permissionMode;session.permissionMigration=resolved.migration;});await this.store.event(session.id,{type:'notice',source:'permissions',text:resolved.migration.reason});}
-    const options={runtime,project,session,dir,mediaDir:join(this.store.root,'media/sessions',session.id),model,variant,endpoint,selection:session.selection,permissionMode,emit,saveNative};
+    const options={runtime,project,session,dir,mediaDir:join(this.store.root,'media/sessions',session.id),model,variant,endpoint,selection:session.selection,permissionMode,emit,saveNative,agentRules:this.agentRules};
     if(session.runtimeId==='claude')options.configDir=join(this.store.root,'engines/claude-code/config');
     if(session.runtimeId==='dsh'){
       if(!model)throw new Error('DSH 统一会话需选择 Qoder CN 或 WorkBuddy 模型；原生模型可在完整界面使用。');
@@ -268,6 +271,7 @@ export class Sessions {
     try{
       await this.store.mutate(()=>{session.pendingSteers??=[];session.pendingSteers.push(row);session.mediaAttachments??=[];session.mediaAttachments.push(...row.attachments);});
       await this.store.event(session.id,{type:'user',text,attachments:row.attachments,delivery:'steer',steerId:row.id,turnId:run.id});
+      this.agentRules.observe(session,text);
       if(run.terminal||run.cancelled||!run.adapter.running)throw new Error('原生轮次已经结束，插话未发送');
       const result=await run.adapter.steer(text,attachments,row.id);
       if(result?.delivered){await this.store.event(session.id,{type:'steer-state',steerId:row.id,state:'delivered',turnId:run.id});await this.store.mutate(()=>{session.pendingSteers=session.pendingSteers.filter(r=>r.id!==row.id);});}
@@ -306,10 +310,15 @@ export class Sessions {
         if(resolved.migration)await this.store.event(session.id,{type:'notice',source:'permissions',text:resolved.migration.reason});
       }
       const history=await this.store.taskContext(id);
+      let runtimeText=text;
+      const globalRules=session.runtimeId==='claude'||session.runtimeId==='codex'&&session.selection.modelKey!=='native'&&(!session.nativeId||session.nativeHome==='bridge');
+      if(!globalRules&&!history.users.length&&!session.nativeId&&!fromQueue){const rules=await this.agentRules.injection();if(rules.text){runtimeText=rulesPrefix(rules.text)+text;await this.store.mutate(()=>{session.rulesVersion=rules.version;});}}
       run.intent=taskIntent([...history.users,text]);
       if(run.intent.continuation)run.plan=planEntries(history.plan);
       await this.store.mutate(()=>{session.status='starting';session.updatedAt=new Date().toISOString();if(session.title==='新会话')session.title=text.trim().slice(0,45)||attachments[0]?.name||'新会话';session.mediaAttachments??=[];session.mediaAttachments.push(...attachments.map(a=>this.media.public(a)));});
       await this.store.event(id,{type:'user',text,attachments:attachments.map(a=>this.media.public(a)),...(fromQueue?{fromQueue}:{}),turnId:run.id});
+      if(fromQueue){for(const queueId of fromQueue){const row=session.queue?.find(row=>row.id===queueId);if(row)this.agentRules.observe(session,row.text);}}
+      else this.agentRules.observe(session,text);
       prepared();
       if(run.cancelled)throw new CancelledError();
       run.adapter=await this.adapter(session,run);
@@ -317,7 +326,7 @@ export class Sessions {
       await this.store.mutate(()=>{session.status='running';});
       if(run.cancelled)throw new CancelledError();
       if(fromQueue){await this.store.mutate(()=>{session.queueDispatch={ids:fromQueue,turnId:run.id,at:new Date().toISOString()};});run.submitted=true;}
-      await run.adapter.prompt(text,attachments);
+      await run.adapter.prompt(runtimeText,attachments);
       if(fromQueue&&!run.queueDispatched){run.queueDispatched=true;await this.store.mutate(()=>{session.queue=(session.queue??[]).filter(row=>!fromQueue.includes(row.id));delete session.queueDispatch;});}
       return {delivery:'turn'};
     }catch(error){
@@ -436,6 +445,8 @@ export class Sessions {
     }finally{this.rebinding.delete(id);}
   }
   async close(){
+    this.closed=true;
+    await this.agentRules.close();
     this.closed=true;clearInterval(this.adapterTimer);this.adapterTimer=null;await Promise.all([...this.runs.keys()].map(id=>this.cancel(id).catch(()=>{})));
     await Promise.allSettled([...this.inputLocks.values()]);
     await Promise.all([...this.adapters.values()].map(a=>a.close().catch(()=>{})));this.adapters.clear();this.adapterUsed.clear();await this.dsh?.close();

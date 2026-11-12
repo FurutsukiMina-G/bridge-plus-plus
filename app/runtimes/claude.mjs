@@ -7,6 +7,7 @@ import {RuntimeLifecycle} from '../core/lifecycle.mjs';
 import {failureText,failureValue,runtimeReason} from '../services/failure-details.mjs';
 import {createClaudeReviewer} from './claude-review.mjs';
 import {CLAUDE_AUTO_REVIEW_NATIVES} from '../services/runtime-permissions.mjs';
+import {rulesDocument,writeRulesFile} from '../services/agent-rules.mjs';
 
 const PERMISSIONS={readonly:'plan',ask:'default','auto-review':'acceptEdits',auto:'bypassPermissions'};
 const MODEL_ENV=['ANTHROPIC_MODEL','ANTHROPIC_DEFAULT_OPUS_MODEL','ANTHROPIC_DEFAULT_SONNET_MODEL','ANTHROPIC_DEFAULT_HAIKU_MODEL','ANTHROPIC_SMALL_FAST_MODEL','CLAUDE_CODE_SUBAGENT_MODEL'];
@@ -81,6 +82,8 @@ export class ClaudeAdapter extends RuntimeLifecycle {
   async start(){
     this.checkOpen();const credentials=join(this.configDir,'.credentials.json');if(existsSync(credentials))throw new Error(`Bridge++ 的 Claude Code 私有配置目录里出现了登录凭据文件，Bridge++ 保持非登录态；请删除 ${credentials} 后重试`);
     await mkdir(this.configDir,{recursive:true});
+    const rules=await this.agentRules?.injection();await writeRulesFile(join(this.configDir,'CLAUDE.md'),rulesDocument(rules?.text??''));
+    if(rules?.version)await this.saveNative(this.session.nativeId,{rulesVersion:rules.version});
     const resume=!!this.session.nativeId&&await hasNativeRecord(this.configDir,this.session.id);
     if(this.session.nativeId&&!resume)await this.emit({type:'notice',text:'没有找到 Claude Code 原生会话记录，已用同一 ID 新开原生会话（之前的原生上下文不可用）。'});
     const {args,env}=claudeLaunchSettings({...this,resume});

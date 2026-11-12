@@ -7,6 +7,7 @@ import {ActivityTracker,argsOf,toolSummary,gatewayNotice} from './activity.js';
 import {PendingAttachments,KINDS,allowedKinds,capabilityKey,fileSize,formatsText,kindName,kindOf,markBroken,markerHtml,mediaCardHtml,mediaUrl,refusal,replaceMarkers,trayHtml,userMediaHtml} from './attachments.js';
 import {cjkEmphasis} from './markdown-cjk.js';
 import {foldRuns,foldSummary,toolStatus} from './tool-groups.js';
+import {rulesPageHtml,ruleNoticeHtml} from './rules.js';
 import {limitNotice,sameUpstream,stopLabel,stopNote,turnExtras,upstreamHtml} from './upstream.js';
 import {mathExtension,replaceMath} from './math.js';
 import {fileLinks,toolFilePath,webLink} from './file-links.js';
@@ -29,7 +30,8 @@ const busyStates=['running','starting','waiting'];
 const state={snapshot:null,projectId:null,sessionId:null,events:[],draft:'',historyLoading:null,
   runtimeId:'dsh',modelKey:null,reasoning:'',contextTokens:null,contextBudget:null,nativeModel:'',
   tree:new Map(),expanded:new Set(),file:null,dirty:false,git:null,diffPath:null,diff:'',terminalText:'',terminalBusy:false,
-  settings:null,catalogSearch:'',catalogSource:'all',sessionSearch:'',menuSearch:'',params:null,delivery:'steer'};
+  settings:null,catalogSearch:'',catalogSource:'all',sessionSearch:'',menuSearch:'',params:null,delivery:'steer',
+  rules:null,rulesLoading:false,rulesError:null,rulesEditing:false,rulesDraft:null,rulesSaving:false};
 const ui=loadUi(),views=new WorkspaceViews(),metrics=new SessionMetrics(),activity=new ActivityTracker(),stopping=new Set(),nativeCatalog=new Map(),showAll=new Set();
 const markdownCache=new Map(),blockSource=new WeakMap();
 const pending=new PendingAttachments(),capCache=new Map(),capLoading=new Set(),mediaLookup=new Map(),mediaResolving=new Set();
@@ -830,6 +832,7 @@ function renderChat(quiet=false){
   const add=(key,html,work)=>{if(keys.has(key))key+=`#${blocks.length}`;keys.add(key);blocks.push({key,html,work});};
   const open=new Set([...chat.querySelectorAll('details[data-expand][open]')].map(el=>el.dataset.expand));
   const resolved=new Map(events.filter(e=>e.type==='approval-resolved').map(e=>[e.approvalId,e.choice]));
+  const rulesUndone=new Set(events.filter(e=>e.type==='notice'&&e.source==='long-term-rule'&&e.undone).map(e=>e.ruleId));
   const discarded=new Set(events.filter(e=>e.type==='attachments-discarded').flatMap(e=>e.attachmentIds??[]));
   const names=new Map(events.filter(e=>e.type==='user').flatMap(e=>(e.attachments??[]).map(a=>[a.id,a.name])));
   const steers=new Map(events.filter(e=>e.type==='steer-state').map(e=>[e.steerId,e]));
@@ -866,6 +869,8 @@ function renderChat(quiet=false){
     else if(e.type==='approval'&&['approve','approve-session'].includes(resolved.get(e.approvalId)))add(`approval:${e.approvalId??e.id}`,()=>approvalBlock(e,resolved),{approval:true});
     else if(e.type==='approval'||e.type==='question')add(`approval:${e.approvalId??e.id}`,approvalBlock(e,resolved));
     // Calls the automatic review let through read like granted approvals; a refusal stays in view.
+    // A long-term requirement recorded from the user's message: undo stays on its line; the undo event only marks it.
+    else if(e.type==='notice'&&e.source==='long-term-rule'){if(!e.undone)add(`note:${e.id}`,ruleNoticeHtml(e,rulesUndone.has(e.ruleId)));}
     else if(e.type==='notice'&&e.source==='auto-review'&&/^自动审查已允许/.test(e.text??''))add(`note:${e.id}`,()=>`<div class="event-note notice quiet" title="${esc(e.text)}">${icon('shield')}<span>${esc(e.text)}</span></div>`,{review:true});
     else if(e.type==='error'||e.type==='notice'){
       if(e.type==='error'&&upstreamSaid.has(`${e.turnId}\u0000${e.text}`))continue;
@@ -1418,6 +1423,14 @@ function settingsBody(tab){
     const rows=Object.entries(snap.preferences.modelDefaults);
     return`<div class="settings-head"><h1>默认搭配</h1><p>在编辑框的模型菜单里点击“记住此搭配”，再次选择该模型时会自动恢复思考强度、窗口与预算。</p></div>${rows.length?`<div class="table-wrap"><table class="catalog-table"><thead><tr><th>模型</th><th>运行环境</th><th>思考</th><th>窗口</th><th>预算</th></tr></thead><tbody>${rows.map(([key,v])=>{const m=models().find(x=>x.key===key);return`<tr><td><div class="model-name">${esc(key.startsWith('native')?`原生模型 · ${v.nativeModel||'当前默认'}`:m?.name??key)}</div><div class="model-id mono">${esc(key)}</div></td><td>${esc(runtime(v.runtimeId)?.name??v.runtimeId??'—')}</td><td>${esc(v.reasoning?effortName(v.reasoning):'默认')}</td><td>${v.contextTokens?compact(v.contextTokens):'—'}</td><td>${v.contextBudget?compact(v.contextBudget):'—'}</td></tr>`;}).join('')}</tbody></table></div>`:'<div class="note">还没有保存的搭配。</div>'}`;
   }
+  if(tab==='rules'){
+    if(!state.rules&&!state.rulesLoading&&!state.rulesError)void loadRules();
+    // Same names as the model menu (Q-/W-); a name used twice in one source also shows its upstream id.
+    const sourceModels=models().filter(m=>m.enabled&&['qoder','workbuddy'].includes(m.source)),seen=new Map();
+    for(const m of sourceModels)seen.set(sourceName(m),(seen.get(sourceName(m))??0)+1);
+    const detectorModels=sourceModels.map(m=>({key:m.key,name:seen.get(sourceName(m))>1?`${sourceName(m)} · ${m.id}`:sourceName(m),group:sourceNames[m.source]??m.source}));
+    return rulesPageHtml(state.rules,{editing:state.rulesEditing,draft:state.rulesDraft,loading:state.rulesSaving,error:state.rulesError,models:detectorModels});
+  }
   if(tab==='shortcuts')return`<div class="settings-head"><h1>快捷键</h1></div><dl class="kv">${[['Ctrl + N','新建会话'],['Enter','发送任务'],['Shift + Enter','换行'],['Ctrl + B','收起 / 展开左侧栏'],['Ctrl + Alt + B','收起 / 展开右侧面板'],['Ctrl + J','打开任务与终端'],['Ctrl + S','保存正在编辑的文件'],['Ctrl + ,','打开设置'],['Esc','关闭菜单或设置']].map(([k,v])=>`<dt><kbd>${k}</kbd></dt><dd>${v}</dd>`).join('')}</dl>`;
   if(tab==='about')return`<div class="settings-head about"><div class="about-mark">${logo(48)}</div><h1>Bridge++</h1><p>把你的模型源接到熟悉的原生 Agent 里，在一个工作区管理会话、变更与文件。</p></div><dl class="kv"><dt>版本</dt><dd>${esc(snap.app.version)}</dd><dt>工作区数据</dt><dd class="mono">${esc(snap.app.dataDir)}</dd><dt>工作文件夹</dt><dd>${snap.projects.length} 个</dd><dt>已保存会话</dt><dd>${snap.sessions.length} 个</dd></dl>${updateSectionHtml(snap.updates)}<div class="note">${icon('info')}<span>Qoder CN 和 WorkBuddy 的 bridge 内置在 Bridge++ 里；要让其他 Agent 使用这两个模型源，请到设置 → 对外接口。</span></div>`;
   return`<div class="settings-head"><h1>通用</h1><p>界面外观与工作区信息。</p></div>
@@ -1427,10 +1440,34 @@ function settingsBody(tab){
 function renderSettings(){
   const tab=state.settings,el=$('#settings');
   if(!tab||!state.snapshot)return;
-  const nav=[['general','settings','通用'],['sources','layers','模型源'],['runtimes','cpu','运行环境'],['services','plug','对外接口'],['defaults','list','默认搭配'],['shortcuts','keyboard','快捷键'],['about','info','关于']];
+  const nav=[['general','settings','通用'],['sources','layers','模型源'],['runtimes','cpu','运行环境'],['services','plug','对外接口'],['defaults','list','默认搭配'],['rules','bulb','长期要求'],['shortcuts','keyboard','快捷键'],['about','info','关于']];
   el.innerHTML=`<aside class="settings-nav"><div class="settings-top"><button class="icon-btn" id="close-settings" title="返回 (Esc)">${icon('arrowLeft')}</button><span>设置</span></div>${nav.map(([id,ico,label])=>`<button class="settings-tab${tab===id?' active':''}" data-settings-tab="${id}">${icon(ico)}<span>${label}</span></button>`).join('')}</aside><div class="settings-main"><div class="settings-drag"></div><div class="settings-scroll"><div class="settings-body" id="settings-body">${settingsBody(tab)}</div></div></div>`;
   bind('#catalog-search','input',e=>{state.catalogSearch=e.target.value;$('#model-rows').innerHTML=catalogRows();});
   bind('#catalog-source','change',e=>{state.catalogSource=e.target.value;$('#model-rows').innerHTML=catalogRows();});
+  bind('#rule-add-text','keydown',e=>{if(e.key==='Enter'&&!e.isComposing){e.preventDefault();void action(()=>rulesAction('add'));}});
+  bind('#rules-text','input',e=>{state.rulesDraft=e.target.value;});
+}
+/* ---------- long-term requirements (设置 › 长期要求) ---------- */
+async function loadRules(){
+  state.rulesLoading=true;
+  try{state.rules=await call('rules:get');state.rulesError=null;}
+  catch(error){state.rulesError=error.message;}
+  finally{state.rulesLoading=false;}
+  if(state.settings==='rules'&&!state.rulesEditing)renderSettings();
+}
+async function rulesAction(kind){
+  if(kind==='edit'){state.rulesEditing=true;state.rulesDraft=state.rules?.text??'';renderSettings();$('#rules-text')?.focus();return;}
+  if(kind==='cancel-edit'){state.rulesEditing=false;state.rulesDraft=null;renderSettings();return;}
+  if(kind==='add'){
+    const input=$('#rule-add-text'),text=input?.value.trim();
+    if(!text){input?.focus();return;}
+    state.rules=await call('rules:add',{text});renderSettings();toast('已添加长期要求');return;
+  }
+  if(kind==='save-text'){
+    state.rulesSaving=true;renderSettings();
+    try{state.rules=await call('rules:save',{text:$('#rules-text')?.value??state.rulesDraft??''});state.rulesEditing=false;state.rulesDraft=null;toast('已保存');}
+    finally{state.rulesSaving=false;renderSettings();}
+  }
 }
 function runtimeCards(){
   const envs=new Map((state.snapshot.environments??[]).map(e=>[e.id,e]));
@@ -1871,6 +1908,11 @@ document.addEventListener('click',e=>{
   }
   if((el=hit('[data-open-settings]'))){closeGuide();openSettings(el.dataset.openSettings);return;}
   if((el=hit('[data-update]'))){void action(()=>updateAction(el.dataset.update));return;}
+  if((el=hit('[data-rules]'))){void action(()=>rulesAction(el.dataset.rules));return;}
+  if((el=hit('[data-rule-delete]'))){const id=el.dataset.ruleDelete;void action(async()=>{state.rules=await call('rules:delete',{id});renderSettings();toast('已删除');});return;}
+  if((el=hit('[data-rule-undo]'))){const id=el.dataset.ruleUndo;el.disabled=true;void action(async()=>{try{const view=await call('rules:undo',{id});if(state.rules)state.rules=view;toast('已撤销这条长期要求');}finally{el.disabled=false;}});return;}
+  if((el=hit('[data-open-rules]'))){openSettings('rules');return;}
+  if((el=hit('[data-rule-session]'))){const id=el.dataset.ruleSession;closeSettings();void action(()=>openSession(id));return;}
   if((el=hit('[data-source-install]'))){void action(()=>call('source:install',{id:el.dataset.sourceInstall}));return;}
   if((el=hit('[data-source-cancel]'))){void action(()=>call('source:cancel',{id:el.dataset.sourceCancel}));return;}
   if((el=hit('[data-source-page]'))){void action(()=>call('source:openPage',{id:el.dataset.sourcePage}));return;}
@@ -2094,6 +2136,8 @@ matchMedia('(prefers-color-scheme: dark)').addEventListener('change',applyTheme)
 document.addEventListener('change',e=>{
   const t=e.target;
   if(t.matches?.('[data-svc-profile]')){const id=t.dataset.svcProfile;t.blur();void action(()=>serviceCall('bridgeService:configure',{id,defaultProfile:t.value}));return;}
+  if(t.matches?.('[data-rules-auto]')){const enabled=t.checked;void action(async()=>{state.rules=await call('rules:auto',{enabled});renderSettings();toast(enabled?'已开启自动记录长期要求':'已关闭自动记录长期要求');});return;}
+  if(t.matches?.('[data-rules-detector]')){const model=t.value;t.blur();void action(async()=>{state.rules=await call('rules:detector',{model});renderSettings();toast(model==='session'?'识别改为跟随会话当前模型':'已更换识别用的模型');});return;}
   if(t.matches?.('[data-update-auto]')){const enabled=t.checked;void action(async()=>{await call('update:auto-download',{enabled});toast(enabled?'已开启自动下载更新包':'已关闭自动下载更新包');await snapshot();refreshSettingsLive();renderUpdateSlot();});return;}
   if(t.matches?.('[data-svc-autostart]')){const id=t.dataset.svcAutostart,enabled=t.checked;void action(async()=>{try{await call('bridgeService:autostart',{id,enabled});toast(enabled?'已开启开机启动':'已关闭开机启动');}finally{await serviceCall(null,null);}});}
 });
@@ -2136,6 +2180,12 @@ window.workbench.onEvent(event=>{
     // Progress arrives between snapshots; patch the download state and repaint only what shows it.
     const d=state.snapshot?.updates?.download;
     if(d&&d.status==='downloading'&&(!d.version||d.version===event.version)){d.received=event.received;d.total=event.total;renderUpdateSlot();if(state.settings==='about')refreshSettingsLive();}
+    return;
+  }
+  if(event.type==='rules-change'){
+    // Recorded, undone or edited elsewhere: reload the page if it shows the list, never under the full-text editor.
+    if(state.settings==='rules'){if(!state.rulesEditing)void loadRules();}
+    else state.rules=null;
     return;
   }
   if(event.type==='catalog-diff'){

@@ -1,9 +1,49 @@
-import {mkdir,readFile,writeFile} from 'node:fs/promises';
+import {mkdir,readFile,writeFile,readdir,lstat,stat,copyFile,utimes,rename,rm} from 'node:fs/promises';
+import {randomUUID} from 'node:crypto';
 import {homedir} from 'node:os';
 import {basename,dirname,join} from 'node:path';
-import {parse} from 'smol-toml';
+import {parse,stringify} from 'smol-toml';
+import {rulesDocument,rulesLock,writeRulesFile} from './agent-rules.mjs';
 
 export const codexHome=()=>process.env.CODEX_HOME??join(homedir(),'.codex');
+
+export const CODEX_GATEWAY_PLUGINS=['visualize@openai-bundled',...['documents','pdf','spreadsheets','presentations','template-creator'].map(name=>name+'@openai-primary-runtime')];
+export const codexBridgeHome=root=>join(root,'engines','codex','home');
+export function codexSessionHome(session,root){return session?.selection?.modelKey!=='native'&&(!session?.nativeId||session.nativeHome==='bridge')?codexBridgeHome(root):null;}
+export function gatewayCodexConfig(config={},home){
+  const result={windows:{sandbox:'unelevated'}};
+  for(const name of ['openai-bundled','openai-primary-runtime'])if(config.marketplaces?.[name]){result.marketplaces??={};result.marketplaces[name]=structuredClone(config.marketplaces[name]);}
+  for(const name of CODEX_GATEWAY_PLUGINS)if(config.plugins?.[name]){result.plugins??={};result.plugins[name]=structuredClone(config.plugins[name]);}
+  if(config.mcp_servers?.node_repl)result.mcp_servers={node_repl:structuredClone(config.mcp_servers.node_repl)};
+  // Codex only accepts this reserved marketplace beneath the active CODEX_HOME.
+  // Its installed plugin cache is sufficient; never follow the user's .tmp path.
+  if(home&&result.marketplaces?.['openai-bundled']?.source_type==='local')result.marketplaces['openai-bundled'].source=join(home,'.tmp','bundled-marketplaces','openai-bundled');
+  return result;
+}
+async function syncPluginTree(source,target){
+  const info=await lstat(source);if(info.isSymbolicLink())throw new Error('不允许插件符号链接');
+  try{if((await lstat(target)).isSymbolicLink())throw new Error('不允许插件目标符号链接');}catch(error){if(error.code!=='ENOENT')throw error;}
+  if(info.isDirectory()){await mkdir(target,{recursive:true});for(const entry of await readdir(source))await syncPluginTree(join(source,entry),join(target,entry));}
+  else if(info.isFile()){
+    let current;try{current=await stat(target);}catch(error){if(error.code!=='ENOENT')throw error;}
+    if(current?.isFile()&&current.size===info.size&&Math.abs(current.mtimeMs-info.mtimeMs)<1)return;
+    const temp=target+'.'+randomUUID()+'.tmp';try{await copyFile(source,temp);await utimes(temp,info.atime,info.mtime);await rename(temp,target);}finally{await rm(temp,{force:true});}
+  }
+}
+export async function prepareCodexHome(root,{sourceHome=codexHome(),read=readFile,rulesText=''}={}){
+  const home=codexBridgeHome(root);let config,notice=null;
+  try{config=parse(await read(join(sourceHome,'config.toml'),'utf8'));}catch{config={};notice='用户 Codex config.toml 不存在、无法读取或解析失败；隔离配置仅启用 unelevated 沙箱。';}
+  await rulesLock(join(home,'config.toml'),async()=>{
+    await mkdir(home,{recursive:true});
+    for(const key of CODEX_GATEWAY_PLUGINS.filter(key=>config.plugins?.[key])){
+      const [name,marketplace]=key.split('@'),source=join(sourceHome,'plugins','cache',marketplace,name),target=join(home,'plugins','cache',marketplace,name);
+      try{await syncPluginTree(source,target);}catch{notice='部分文档插件缓存无法同步，已继续使用可用的隔离配置。';}
+    }
+    const file=join(home,'config.toml'),temp=file+'.'+randomUUID()+'.tmp';try{await writeFile(temp,stringify(gatewayCodexConfig(config,home)),{mode:0o600});await rename(temp,file);}finally{await rm(temp,{force:true});}
+  });
+  await writeRulesFile(join(home,'AGENTS.md'),rulesDocument(rulesText));
+  return {home,notice};
+}
 
 // Read on every lookup: "current default" is not a pinned session selection.
 // Return only the model ID and a safe explanation; never expose config content.

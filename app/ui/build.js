@@ -4200,8 +4200,61 @@ function foldSummary(run, running2) {
   return { status, title, detail: parts.join(" \xB7 ") };
 }
 
-// app/ui/upstream.js
+// app/ui/rules.js
 var esc2 = (value) => String(value ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
+var MODEL_NAMES = { "qoder:qfmodel": "Q-Qwen3.8-Flash", "workbuddy:hy4free": "W-Hy4" };
+var SOURCE_NAMES = { qoder: "Qoder", workbuddy: "WorkBuddy" };
+var modelName = (key) => MODEL_NAMES[key] ?? String(key ?? "").split(":").pop();
+var sourceOf = (key) => SOURCE_NAMES[String(key ?? "").split(":")[0]] ?? String(key ?? "").split(":")[0];
+function ruleTime(iso) {
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return "";
+  return `${d.getMonth() + 1} \u6708 ${d.getDate()} \u65E5 ${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
+}
+function detectorNote(view) {
+  const d = view.detector ?? {}, fallback = d.fallback ? `${modelName(d.fallback)}\uFF08${sourceOf(d.fallback)}\uFF09` : "Q-Qwen3.8-Flash";
+  const who = !d.model || d.model === "session" ? `\u4F60\u53D1\u7684\u6BCF\u6761\u6D88\u606F\u7531\u8FD9\u4E2A\u4F1A\u8BDD\u6B63\u5728\u7528\u7684\u6A21\u578B\u987A\u5E26\u5224\u65AD\uFF08\u8F85\u52A9\u8BF7\u6C42\u3001\u8C03\u4F4E\u601D\u8003\u5F3A\u5EA6\uFF09\uFF0C\u6D88\u606F\u4E0D\u4F1A\u53D1\u7ED9\u522B\u7684\u6A21\u578B\u6E90\uFF1B\u4F1A\u8BDD\u7528\u539F\u751F\u6A21\u578B\uFF08\u4E0D\u7ECF\u8FC7 Bridge++ \u6A21\u578B\u6E90\uFF09\u65F6\u6539\u7528 ${esc2(fallback)}\u3002` : `\u4F60\u53D1\u7684\u6BCF\u6761\u6D88\u606F\u7531 ${esc2(modelName(d.model))} \u5224\u65AD\uFF0C\u4F1A\u53D1\u7ED9 ${esc2(sourceOf(d.model))}\uFF1B\u5B83\u4E0D\u53EF\u7528\u65F6\u6539\u7528 ${esc2(fallback)}\u3002`;
+  return `${who}\u6709\u957F\u671F\u8981\u6C42\u5C31\u76F4\u63A5\u8BB0\u4E0B\uFF0C\u5E76\u5728\u5BF9\u8BDD\u91CC\u63D0\u793A\uFF0C\u53EF\u4EE5\u64A4\u9500\uFF1B\u90FD\u4E0D\u53EF\u7528\u65F6\u8DF3\u8FC7\uFF0C\u4E0D\u5F71\u54CD\u4EFB\u52A1\u3002${d.available === false ? ' <b class="warn-text">\u73B0\u5728\u6CA1\u6709\u53EF\u7528\u7684\u8BC6\u522B\u6A21\u578B\u3002</b>' : ""}`;
+}
+function detectorPicker(view, models2 = []) {
+  const current = view.detector?.model ?? "session", known = models2.some((m) => m.key === current);
+  const groups = [...new Set(models2.map((m) => m.group))];
+  const options = groups.map((g) => `<optgroup label="${esc2(g)}">${models2.filter((m) => m.group === g).map((m) => `<option value="${esc2(m.key)}"${m.key === current ? " selected" : ""}>${esc2(m.name)}</option>`).join("")}</optgroup>`).join("");
+  return `<label class="rules-detector"><span>\u8BC6\u522B\u7528\u7684\u6A21\u578B</span><select data-rules-detector><option value="session"${current === "session" ? " selected" : ""}>\u8DDF\u968F\u4F1A\u8BDD\u5F53\u524D\u6A21\u578B\uFF08\u9ED8\u8BA4\uFF09</option>${!known && current !== "session" ? `<option value="${esc2(current)}" selected>${esc2(modelName(current))}\uFF08\u73B0\u5728\u4E0D\u53EF\u7528\uFF09</option>` : ""}${options}</select></label>`;
+}
+function itemHtml(item, view) {
+  const injected = !Array.isArray(view.injected) || view.injected.includes(item.id);
+  const origin = item.auto ? "\u81EA\u52A8\u8BB0\u5F55" : "\u624B\u52A8\u6DFB\u52A0", time = ruleTime(item.at);
+  const from = item.sessionId ? `<button class="link-btn" data-rule-session="${esc2(item.sessionId)}" title="\u6253\u5F00\u6765\u6E90\u4F1A\u8BDD">${esc2(item.sessionTitle || "\u6765\u6E90\u4F1A\u8BDD")}</button>` : "";
+  return `<li class="rule-item${injected ? "" : " dropped"}" data-rule-id="${esc2(item.id)}">
+    <div class="rule-text">${esc2(item.text)}</div>
+    <div class="rule-meta"><span>${origin}</span>${time ? `<span>${esc2(time)}</span>` : ""}${from ? `<span>\u6765\u81EA ${from}</span>` : ""}${injected ? "" : `<span class="rule-tag" title="\u8D85\u8FC7 50 \u6761\u6216 8 KB \u7684\u90E8\u5206\u6682\u4E0D\u4EA4\u7ED9\u6A21\u578B\uFF0C\u5220\u6389\u4E00\u4E9B\u65E7\u7684\u5C31\u4F1A\u6062\u590D">\u672A\u6CE8\u5165</span>`}</div>
+    <button class="icon-btn sm" data-rule-delete="${esc2(item.id)}" title="\u5220\u9664\u8FD9\u6761">${icon("close")}</button>
+  </li>`;
+}
+function rulesPageHtml(view, { editing = false, draft = null, loading = false, error = null, models: models2 = [] } = {}) {
+  const head = `<div class="settings-head"><h1>\u957F\u671F\u8981\u6C42</h1><p>\u4F60\u5728\u5DE5\u4F5C\u4E2D\u63D0\u51FA\u7684\u957F\u671F\u8981\u6C42\u8BB0\u5728 Bridge++ \u81EA\u5DF1\u7684 AGENTS.md \u91CC\uFF0C\u6240\u6709\u73AF\u5883\u548C\u6A21\u578B\u90FD\u80FD\u770B\u5230\uFF1ACodex\uFF08\u6A21\u578B\u6E90\u7684\u6A21\u578B\uFF09\u548C Claude Code \u653E\u8FDB\u5B83\u4EEC\u7684\u5168\u5C40\u6307\u4EE4\uFF0C\u5176\u4ED6\u73AF\u5883\u5728\u6BCF\u4E2A\u65B0\u4F1A\u8BDD\u7684\u7B2C\u4E00\u6761\u6D88\u606F\u524D\u9644\u4E0A\u3002\u6539\u52A8\u5BF9\u4E4B\u540E\u65B0\u5F00\u7684\u4F1A\u8BDD\u751F\u6548\u3002</p></div>`;
+  if (!view) return head + (error ? `<div class="note warn">${icon("alert")}<span>\u8BFB\u53D6\u5931\u8D25\uFF1A${esc2(error)}</span></div>` : `<div class="rules-loading"><span class="spinner"></span><span>\u6B63\u5728\u8BFB\u53D6\u2026</span></div>`);
+  const items = Array.isArray(view.items) ? view.items : [];
+  const auto = `<label class="update-auto rules-auto"><input type="checkbox" data-rules-auto ${view.autoRecord ? "checked" : ""}><span><b>\u81EA\u52A8\u8BB0\u5F55\u957F\u671F\u8981\u6C42</b><small>${detectorNote(view)}</small></span></label>${view.autoRecord ? detectorPicker(view, models2) : ""}`;
+  if (editing) return `${head}${auto}
+    <div class="rules-editor"><div class="rules-editor-head"><b>\u7F16\u8F91\u5168\u6587</b><small>\u4EE5\u201C- \u201D\u5F00\u5934\u7684\u6BCF\u4E00\u884C\u662F\u4E00\u6761\u8981\u6C42\uFF1B\u884C\u5C3E\u7684\u6CE8\u91CA\u8BB0\u5F55\u6765\u6E90\uFF0C\u53EF\u4EE5\u5220\u3002</small></div>
+    <textarea id="rules-text" spellcheck="false">${esc2(draft ?? view.text ?? "")}</textarea>
+    <div class="rules-editor-actions"><button class="btn" data-rules="cancel-edit">\u53D6\u6D88</button><button class="btn primary" data-rules="save-text"${loading ? " disabled" : ""}>${loading ? '<span class="spinner"></span>' : ""}\u4FDD\u5B58</button></div></div>`;
+  const list = items.length ? `<ul class="rule-list">${items.map((item) => itemHtml(item, view)).join("")}</ul>` : `<div class="rules-empty">${icon("list")}<span>\u8FD8\u6CA1\u6709\u957F\u671F\u8981\u6C42\u3002\u4F60\u5728\u5BF9\u8BDD\u91CC\u8BF4\u201C\u4EE5\u540E\u90FD\u2026\u201D\u201C\u6BCF\u6B21\u2026\u201D\u201C\u8BB0\u4F4F\u2026\u201D\u8FD9\u7C7B\u8BDD\u65F6\uFF0C\u4F1A\u81EA\u52A8\u8BB0\u5230\u8FD9\u91CC\uFF1B\u4E5F\u53EF\u4EE5\u5728\u4E0B\u9762\u76F4\u63A5\u6DFB\u52A0\u3002</span></div>`;
+  const overflow = view.overflow ? `<div class="note warn">${icon("alert")}<span>\u8981\u6C42\u592A\u591A\uFF08\u8D85\u8FC7 50 \u6761\u6216 8 KB\uFF09\uFF0C\u6700\u65E9\u7684\u81EA\u52A8\u8BB0\u5F55\u6682\u65F6\u6CA1\u6709\u4EA4\u7ED9\u6A21\u578B\u3002</span></div>` : "";
+  return `${head}${auto}
+    <h2>\u5F53\u524D\u8981\u6C42${items.length ? `<span class="muted"> \xB7 ${items.length} \u6761</span>` : ""}</h2>${overflow}${list}
+    <div class="rule-add"><input id="rule-add-text" placeholder="\u6DFB\u52A0\u4E00\u6761\u8981\u6C42\uFF0C\u4F8B\u5982\uFF1A\u56DE\u590D\u7528\u4E2D\u6587\uFF1B\u6539\u4EE3\u7801\u524D\u5148\u8BF4\u660E\u65B9\u6848" maxlength="300" autocomplete="off"><button class="btn" data-rules="add">${icon("plus")}\u6DFB\u52A0</button></div>
+    <div class="rules-footer"><button class="btn sm" data-rules="edit">${icon("edit")}\u7F16\u8F91\u5168\u6587</button><span class="muted mono" title="${esc2(view.path)}">${esc2(view.path ?? "")}</span>${view.path ? `<button class="link-btn" data-copy-text="${esc2(view.path)}">\u590D\u5236\u8DEF\u5F84</button>` : ""}</div>`;
+}
+function ruleNoticeHtml(e, undone = false) {
+  const text3 = e.rule?.text ?? String(e.text ?? "").replace(/^已记为长期要求：/, "");
+  return `<div class="event-note notice rule-note${undone ? " undone" : ""}">${icon("bulb")}<span>${undone ? "\u5DF2\u64A4\u9500\u957F\u671F\u8981\u6C42\uFF1A" : "\u5DF2\u8BB0\u4E3A\u957F\u671F\u8981\u6C42\uFF1A"}${esc2(text3)}</span>${undone || !e.ruleId ? "" : `<button class="link-btn" data-rule-undo="${esc2(e.ruleId)}">\u64A4\u9500</button>`}<button class="link-btn" data-open-rules>\u67E5\u770B\u5168\u90E8</button></div>`;
+}
+
+// app/ui/upstream.js
+var esc3 = (value) => String(value ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
 var sources = { qoder: "Qoder", workbuddy: "WorkBuddy" };
 var pad = (n) => String(n).padStart(2, "0");
 var rateLimited = (e) => e?.status === 429 || /rate.?limit|quota/i.test(String(e?.code ?? ""));
@@ -4220,10 +4273,10 @@ var sameUpstream = (a3, b) => !!a3 && !!b && a3.provider === b.provider && a3.co
 function upstreamHtml(e, count2 = 1, now = Date.now()) {
   const where = [sources[e.provider] ?? e.provider, e.model, Number.isInteger(e.status) ? `HTTP ${e.status}` : null].filter(Boolean).join(" \xB7 ");
   const reset = resetText(e.resetAt, now), diagnosis = [e.code && `\u9519\u8BEF\u7801\uFF1A${e.code}`, e.requestId && `\u8BF7\u6C42 ID\uFF1A${e.requestId}`].filter(Boolean).join("\n");
-  return `<div class="upstream-card${rateLimited(e) ? " limited" : ""}"><div class="upstream-head">${icon("alert")}<b>${upstreamTitle(e)}</b>${where ? `<span class="muted">${esc2(where)}</span>` : ""}${count2 > 1 ? `<span class="upstream-count" title="\u540C\u6837\u7684\u9519\u8BEF\u51FA\u73B0\u4E86 ${count2} \u6B21">\xD7${count2}</span>` : ""}</div>
-    <div class="upstream-message">${esc2(upstreamText(e) || "\u4E0A\u6E38\u6CA1\u6709\u8BF4\u660E\u539F\u56E0\u3002")}</div>
-    ${reset ? `<div class="upstream-meta">${icon("clock")}<span>${esc2(reset)}</span></div>` : ""}
-    ${diagnosis ? `<details class="upstream-details" data-expand="upstream-${esc2(e.id)}"><summary>\u8BCA\u65AD\u8BE6\u60C5</summary><pre>${esc2(diagnosis)}</pre></details>` : ""}</div>`;
+  return `<div class="upstream-card${rateLimited(e) ? " limited" : ""}"><div class="upstream-head">${icon("alert")}<b>${upstreamTitle(e)}</b>${where ? `<span class="muted">${esc3(where)}</span>` : ""}${count2 > 1 ? `<span class="upstream-count" title="\u540C\u6837\u7684\u9519\u8BEF\u51FA\u73B0\u4E86 ${count2} \u6B21">\xD7${count2}</span>` : ""}</div>
+    <div class="upstream-message">${esc3(upstreamText(e) || "\u4E0A\u6E38\u6CA1\u6709\u8BF4\u660E\u539F\u56E0\u3002")}</div>
+    ${reset ? `<div class="upstream-meta">${icon("clock")}<span>${esc3(reset)}</span></div>` : ""}
+    ${diagnosis ? `<details class="upstream-details" data-expand="upstream-${esc3(e.id)}"><summary>\u8BCA\u65AD\u8BE6\u60C5</summary><pre>${esc3(diagnosis)}</pre></details>` : ""}</div>`;
 }
 function stopLabel(reason) {
   if (!reason) return "";
@@ -18556,9 +18609,9 @@ function toolFilePath(args) {
 }
 
 // app/ui/setup.js
-var esc3 = (value) => String(value ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
+var esc4 = (value) => String(value ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
 var tiles = { dsh: "DS", kimi: "Ki", codex: "Cx", antigravity: "AG", claude: "CC" };
-var tile = (r) => `<span class="rt-tile rt-${esc3(r?.id ?? "none")}">${esc3(tiles[r?.id] ?? "?")}</span>`;
+var tile = (r) => `<span class="rt-tile rt-${esc4(r?.id ?? "none")}">${esc4(tiles[r?.id] ?? "?")}</span>`;
 var usable = (r) => !!r && (r.status ? r.status === "ready" : !!r.installed);
 var permissionWarnings = { dsh: {
   auto: { title: "\u786E\u8BA4\u542F\u7528\u5B8C\u5168\u6743\u9650\uFF1F", text: "\u8FD9\u4E00\u6863\u6CA1\u6709\u6C99\u7BB1\uFF0C\u4E5F\u4E0D\u518D\u8BE2\u95EE\uFF1AAgent \u53EF\u4EE5\u76F4\u63A5\u6539\u6587\u4EF6\u3001\u8FD0\u884C\u5916\u90E8\u547D\u4EE4\uFF0C\u5305\u62EC\u654F\u611F\u64CD\u4F5C\u3002\u53EA\u5728\u4F60\u4FE1\u4EFB\u5F53\u524D\u4EFB\u52A1\u65F6\u4F7F\u7528\u3002", confirm: "\u542F\u7528\u5B8C\u5168\u6743\u9650" },
@@ -18595,34 +18648,34 @@ function jobHtml(job) {
   const verb = jobVerbs[job.action] ?? "\u5904\u7406";
   if (job.state === "downloading") {
     const total = job.total > 0 ? job.total : null, share = total ? Math.min(1, (job.received ?? 0) / total) : null;
-    return `<div class="job"><div class="job-text"><span class="spinner"></span>\u6B63\u5728\u4E0B\u8F7D${share === null ? "" : ` ${Math.round(share * 100)}%`}<span class="muted">${esc3([fileSize(job.received ?? 0), total ? fileSize(total) : ""].filter(Boolean).join(" / "))}</span></div><div class="job-bar${share === null ? " unknown" : ""}"><i style="width:${share === null ? 35 : Math.round(share * 100)}%"></i></div></div>`;
+    return `<div class="job"><div class="job-text"><span class="spinner"></span>\u6B63\u5728\u4E0B\u8F7D${share === null ? "" : ` ${Math.round(share * 100)}%`}<span class="muted">${esc4([fileSize(job.received ?? 0), total ? fileSize(total) : ""].filter(Boolean).join(" / "))}</span></div><div class="job-bar${share === null ? " unknown" : ""}"><i style="width:${share === null ? 35 : Math.round(share * 100)}%"></i></div></div>`;
   }
   if (job.state === "verifying") return `<div class="job"><div class="job-text"><span class="spinner"></span>\u6B63\u5728\u6821\u9A8C\u4E0B\u8F7D\u7684\u6587\u4EF6\u2026</div><div class="job-bar unknown"><i></i></div></div>`;
-  if (job.state === "installing") return `<div class="job"><div class="job-text"><span class="spinner"></span>\u6B63\u5728${verb}${job.message ? `<span class="muted">${esc3(job.message)}</span>` : "\uFF0C\u8BF7\u5728\u5B89\u88C5\u7A0B\u5E8F\u91CC\u5B8C\u6210"}</div><div class="job-bar unknown"><i></i></div></div>`;
-  if (job.state === "done") return `<div class="job done">${icon("check")}<span>${verb}\u5B8C\u6210${job.message ? `\uFF1A${esc3(job.message)}` : ""}</span></div>`;
+  if (job.state === "installing") return `<div class="job"><div class="job-text"><span class="spinner"></span>\u6B63\u5728${verb}${job.message ? `<span class="muted">${esc4(job.message)}</span>` : "\uFF0C\u8BF7\u5728\u5B89\u88C5\u7A0B\u5E8F\u91CC\u5B8C\u6210"}</div><div class="job-bar unknown"><i></i></div></div>`;
+  if (job.state === "done") return `<div class="job done">${icon("check")}<span>${verb}\u5B8C\u6210${job.message ? `\uFF1A${esc4(job.message)}` : ""}</span></div>`;
   if (job.state === "cancelled") return `<div class="job muted">${icon("close")}<span>\u5DF2\u53D6\u6D88${verb}</span></div>`;
-  if (job.state === "failed") return `<div class="error-box">${esc3(`${verb}\u5931\u8D25\uFF1A${job.message ?? "\u672A\u77E5\u539F\u56E0"}`)}</div>`;
+  if (job.state === "failed") return `<div class="error-box">${esc4(`${verb}\u5931\u8D25\uFF1A${job.message ?? "\u672A\u77E5\u539F\u56E0"}`)}</div>`;
   return "";
 }
 function versionLine(env, r) {
   const installed = env?.installed ?? (r?.version ? { version: r.version } : null);
   const parts = [];
-  if (installed?.version) parts.push(`<span>\u5DF2\u5B89\u88C5 <b>${esc3(installed.version)}</b>${installed.kind && kindNames2[installed.kind] ? `<span class="muted"> \xB7 ${kindNames2[installed.kind]}</span>` : ""}</span>`);
-  if (env?.updateAvailable && env.latest?.version) parts.push(`<span class="update-tag">${icon("download")}\u53EF\u66F4\u65B0\u5230 ${esc3(env.latest.version)}</span>`);
+  if (installed?.version) parts.push(`<span>\u5DF2\u5B89\u88C5 <b>${esc4(installed.version)}</b>${installed.kind && kindNames2[installed.kind] ? `<span class="muted"> \xB7 ${kindNames2[installed.kind]}</span>` : ""}</span>`);
+  if (env?.updateAvailable && env.latest?.version) parts.push(`<span class="update-tag">${icon("download")}\u53EF\u66F4\u65B0\u5230 ${esc4(env.latest.version)}</span>`);
   else if (env?.latest?.version && installed?.version) parts.push(`<span class="muted">\u5DF2\u662F\u6700\u65B0${env.latest.checkedAt ? ` \xB7 ${ago(env.latest.checkedAt)}\u68C0\u67E5` : ""}</span>`);
-  else if (env?.latest?.version) parts.push(`<span class="muted">\u6700\u65B0 ${esc3(env.latest.version)}</span>`);
+  else if (env?.latest?.version) parts.push(`<span class="muted">\u6700\u65B0 ${esc4(env.latest.version)}</span>`);
   return parts.length ? `<div class="env-version">${parts.join("")}</div>` : "";
 }
 function environmentActions(env, r, { canOpenNative }) {
   const a3 = env?.actions ?? {}, busy2 = running(env?.job), list = [];
-  if (busy2 && a3.cancel) list.push(`<button class="btn sm" data-env-cancel="${esc3(r.id)}">\u53D6\u6D88</button>`);
-  if (!busy2 && a3.install && statusOf(r) === "missing") list.push(`<button class="btn sm primary" data-env-install="${esc3(r.id)}">${icon("download")}\u4E0B\u8F7D\u5B89\u88C5</button>`);
-  if (!busy2 && a3.update && env?.updateAvailable === true) list.push(`<button class="btn sm primary" data-env-update="${esc3(r.id)}">${icon("download")}\u66F4\u65B0${env.latest?.version ? `\u5230 ${esc3(env.latest.version)}` : ""}</button>`);
-  else if (!busy2 && a3.update && !a3.check && usable(r)) list.push(`<button class="btn sm" data-env-update="${esc3(r.id)}">${icon("download")}\u8FD0\u884C\u5B98\u65B9\u66F4\u65B0</button>`);
-  if (!busy2 && a3.check) list.push(`<button class="btn sm" data-env-check="${esc3(r.id)}">${icon("refresh")}\u68C0\u67E5\u66F4\u65B0</button>`);
-  if (env?.page) list.push(`<button class="btn sm" data-env-page="${esc3(r.id)}">${icon("external")}\u5B98\u65B9\u9875\u9762</button>`);
-  list.push(`<button class="btn sm" data-configure-runtime="${esc3(r.id)}">\u6307\u5B9A\u8DEF\u5F84</button>`);
-  if (usable(r)) list.push(`${executorOnly.has(r.id) ? "" : `<button class="btn sm" data-open-runtime="${esc3(r.id)}" ${canOpenNative ? "" : "disabled"}>${icon("external")}\u539F\u751F\u7A0B\u5E8F</button>`}<button class="link-btn" data-use-runtime="${esc3(r.id)}">\u7528\u4E8E\u65B0\u4F1A\u8BDD</button>`);
+  if (busy2 && a3.cancel) list.push(`<button class="btn sm" data-env-cancel="${esc4(r.id)}">\u53D6\u6D88</button>`);
+  if (!busy2 && a3.install && statusOf(r) === "missing") list.push(`<button class="btn sm primary" data-env-install="${esc4(r.id)}">${icon("download")}\u4E0B\u8F7D\u5B89\u88C5</button>`);
+  if (!busy2 && a3.update && env?.updateAvailable === true) list.push(`<button class="btn sm primary" data-env-update="${esc4(r.id)}">${icon("download")}\u66F4\u65B0${env.latest?.version ? `\u5230 ${esc4(env.latest.version)}` : ""}</button>`);
+  else if (!busy2 && a3.update && !a3.check && usable(r)) list.push(`<button class="btn sm" data-env-update="${esc4(r.id)}">${icon("download")}\u8FD0\u884C\u5B98\u65B9\u66F4\u65B0</button>`);
+  if (!busy2 && a3.check) list.push(`<button class="btn sm" data-env-check="${esc4(r.id)}">${icon("refresh")}\u68C0\u67E5\u66F4\u65B0</button>`);
+  if (env?.page) list.push(`<button class="btn sm" data-env-page="${esc4(r.id)}">${icon("external")}\u5B98\u65B9\u9875\u9762</button>`);
+  list.push(`<button class="btn sm" data-configure-runtime="${esc4(r.id)}">\u6307\u5B9A\u8DEF\u5F84</button>`);
+  if (usable(r)) list.push(`${executorOnly.has(r.id) ? "" : `<button class="btn sm" data-open-runtime="${esc4(r.id)}" ${canOpenNative ? "" : "disabled"}>${icon("external")}\u539F\u751F\u7A0B\u5E8F</button>`}<button class="link-btn" data-use-runtime="${esc4(r.id)}">\u7528\u4E8E\u65B0\u4F1A\u8BDD</button>`);
   return `<div class="card-actions">${list.join("")}</div>`;
 }
 function environmentCardHtml(r, env, { permissions = "", canOpenNative = false } = {}) {
@@ -18630,11 +18683,11 @@ function environmentCardHtml(r, env, { permissions = "", canOpenNative = false }
   const label = busy2 ? `\u6B63\u5728${jobVerbs[env.job.action] ?? "\u5904\u7406"}` : scanning ? statusNames.checking : statusNames[status] ?? status;
   const reason = status !== "ready" && !scanning ? unusableReason(r) : "";
   const note = (status !== "ready" && !scanning && networkNotes[r.id] ? `<div class="env-note">${icon("info")}<span>${networkNotes[r.id]}</span></div>` : "") + (isolationNotes[r.id] ? `<div class="env-note">${icon("lock")}<span>${isolationNotes[r.id]}</span></div>` : "");
-  return `<article class="runtime-card env-${esc3(status)}"><div class="card-top">${tile(r)}<span class="card-status ${busy2 || scanning ? "busy" : status === "ready" ? "ready" : status === "missing" ? "none" : status === "error" ? "error" : "warn"}">${busy2 || scanning ? '<span class="spinner"></span>' : '<span class="status-dot"></span>'}${esc3(label)}</span></div>
-    <h3>${esc3(r.name)}<span class="proto">${esc3(r.protocol)}</span></h3><p>${esc3(r.description)}</p>
-    ${versionLine(env, r)}${reason ? `<div class="env-reason">${icon("alert")}<span>${esc3(reason)}</span></div>` : ""}${r.warning ? `<div class="env-reason">${icon("alert")}<span>${esc3(r.warning)}</span></div>` : ""}${note}${jobHtml(env?.job)}
-    ${usable(r) ? `<div class="features">${esc3(r.tools)}</div>${permissions}` : ""}
-    ${r.executable || r.desktop ? `<div class="runtime-path mono" title="${esc3(r.executable ?? r.desktop)}">${esc3(r.executable ?? r.desktop)}</div>` : ""}
+  return `<article class="runtime-card env-${esc4(status)}"><div class="card-top">${tile(r)}<span class="card-status ${busy2 || scanning ? "busy" : status === "ready" ? "ready" : status === "missing" ? "none" : status === "error" ? "error" : "warn"}">${busy2 || scanning ? '<span class="spinner"></span>' : '<span class="status-dot"></span>'}${esc4(label)}</span></div>
+    <h3>${esc4(r.name)}<span class="proto">${esc4(r.protocol)}</span></h3><p>${esc4(r.description)}</p>
+    ${versionLine(env, r)}${reason ? `<div class="env-reason">${icon("alert")}<span>${esc4(reason)}</span></div>` : ""}${r.warning ? `<div class="env-reason">${icon("alert")}<span>${esc4(r.warning)}</span></div>` : ""}${note}${jobHtml(env?.job)}
+    ${usable(r) ? `<div class="features">${esc4(r.tools)}</div>${permissions}` : ""}
+    ${r.executable || r.desktop ? `<div class="runtime-path mono" title="${esc4(r.executable ?? r.desktop)}">${esc4(r.executable ?? r.desktop)}</div>` : ""}
     ${scanning ? "" : environmentActions(env, r, { canOpenNative })}</article>`;
 }
 var serviceStates = { running: "\u8FD0\u884C\u4E2D", stopped: "\u5DF2\u505C\u6B62", starting: "\u6B63\u5728\u542F\u52A8", error: "\u51FA\u9519", checking: "\u6B63\u5728\u6838\u5B9E", unavailable: "\u4E0D\u53EF\u7528", crashed: "\u5DF2\u5F02\u5E38\u9000\u51FA" };
@@ -18644,59 +18697,59 @@ function serviceStatus(s) {
   const busyPort = s.error?.code === "port_in_use" || !!s.portOwner;
   const pending2 = ["starting", "checking"].includes(s.status), cls = s.status === "running" ? "ready" : pending2 ? "busy" : ["error", "unavailable", "crashed"].includes(s.status) || busyPort ? "error" : "none";
   const text3 = busyPort && s.status !== "running" ? "\u7AEF\u53E3\u88AB\u5360\u7528" : serviceStates[s.status] ?? s.status ?? "\u672A\u77E5";
-  return `<span class="card-status ${cls}">${pending2 ? '<span class="spinner"></span>' : '<span class="status-dot"></span>'}${esc3(text3)}${s.status === "running" && s.pid ? `<span class="muted"> \xB7 pid ${esc3(s.pid)}</span>` : ""}</span>`;
+  return `<span class="card-status ${cls}">${pending2 ? '<span class="spinner"></span>' : '<span class="status-dot"></span>'}${esc4(text3)}${s.status === "running" && s.pid ? `<span class="muted"> \xB7 pid ${esc4(s.pid)}</span>` : ""}</span>`;
 }
 function copyRow(label, value, { id, mono = true, extra = "" }) {
-  return `<div class="svc-row"><span class="svc-label">${label}</span><code class="svc-value${mono ? " mono" : ""}" ${id ? `id="${id}"` : ""} title="${esc3(value)}">${esc3(value)}</code>${extra}</div>`;
+  return `<div class="svc-row"><span class="svc-label">${label}</span><code class="svc-value${mono ? " mono" : ""}" ${id ? `id="${id}"` : ""} title="${esc4(value)}">${esc4(value)}</code>${extra}</div>`;
 }
 function serviceModelsHtml(list) {
   if (!Array.isArray(list)) return `<div class="svc-models"><div class="table-empty"><span class="spinner"></span> \u6B63\u5728\u8BFB\u53D6\u6A21\u578B\u2026</div></div>`;
   if (!list.length) return `<div class="svc-models"><div class="table-empty">\u8FD9\u4E2A\u63A5\u53E3\u8FD8\u6CA1\u6709\u53EF\u7528\u6A21\u578B\u3002\u8BF7\u5148\u5728\u300C\u6A21\u578B\u6E90\u300D\u91CC\u4E0B\u8F7D\u7EC4\u4EF6\u5E76\u767B\u5F55\u3002</div></div>`;
-  return `<div class="svc-models table-wrap"><table class="catalog-table"><thead><tr><th>\u6A21\u578B / ID</th><th>\u7A97\u53E3</th><th>\u601D\u8003\u6863\u4F4D</th></tr></thead><tbody>${list.map((m) => `<tr><td><div class="model-name">${esc3(m.name ?? m.id)}${(m.input_modalities ?? ["text"]).includes("image") ? `<span class="img-badge" title="\u652F\u6301\u56FE\u7247\u8F93\u5165">${icon("image")}</span>` : ""}</div><button class="model-id mono copy-id" data-copy-text="${esc3(m.id)}" title="\u590D\u5236\u6A21\u578B ID">${esc3(m.id)}${icon("copy")}</button></td><td>${m.context_window ? `<span class="ctx-tag">${esc3(compactTokens(m.context_window))}</span>` : '<span class="muted">\u2014</span>'}</td><td>${(m.reasoning_efforts ?? []).length ? m.reasoning_efforts.map((e) => `<span class="effort-tag${e === m.default_reasoning_effort ? " default" : ""}">${esc3(e === "none" ? "\u5173\u95ED" : e)}</span>`).join("") : '<span class="muted">\u9ED8\u8BA4</span>'}</td></tr>`).join("")}</tbody></table></div>`;
+  return `<div class="svc-models table-wrap"><table class="catalog-table"><thead><tr><th>\u6A21\u578B / ID</th><th>\u7A97\u53E3</th><th>\u601D\u8003\u6863\u4F4D</th></tr></thead><tbody>${list.map((m) => `<tr><td><div class="model-name">${esc4(m.name ?? m.id)}${(m.input_modalities ?? ["text"]).includes("image") ? `<span class="img-badge" title="\u652F\u6301\u56FE\u7247\u8F93\u5165">${icon("image")}</span>` : ""}</div><button class="model-id mono copy-id" data-copy-text="${esc4(m.id)}" title="\u590D\u5236\u6A21\u578B ID">${esc4(m.id)}${icon("copy")}</button></td><td>${m.context_window ? `<span class="ctx-tag">${esc4(compactTokens(m.context_window))}</span>` : '<span class="muted">\u2014</span>'}</td><td>${(m.reasoning_efforts ?? []).length ? m.reasoning_efforts.map((e) => `<span class="effort-tag${e === m.default_reasoning_effort ? " default" : ""}">${esc4(e === "none" ? "\u5173\u95ED" : e)}</span>`).join("") : '<span class="muted">\u9ED8\u8BA4</span>'}</td></tr>`).join("")}</tbody></table></div>`;
 }
 var compactTokens = (n) => n >= 1e6 ? `${+(n / 1e6).toFixed(2)}M` : n >= 1e3 ? `${+(n / 1e3).toFixed(0)}K` : String(n);
 function connectionsOf(s) {
   const list = s.connections ?? { dsh: s.dsh ?? null };
-  const file = (path2) => `<span class="mono" title="${esc3(path2)}">${esc3(path2.split(/[\\/]/).slice(-2).join("/"))}</span>`;
+  const file = (path2) => `<span class="mono" title="${esc4(path2)}">${esc4(path2.split(/[\\/]/).slice(-2).join("/"))}</span>`;
   return Object.entries(list).filter(([, c]) => c).map(([target, c]) => {
-    const where = target === "codex" && c.profile ? `<span class="mono">codex --profile ${esc3(c.profile)}</span>` : target === "kimi" && c.path ? file(c.path) : c.providerId ? `provider <span class="mono">${esc3(c.providerId)}</span>` : c.path ? file(c.path) : "";
+    const where = target === "codex" && c.profile ? `<span class="mono">codex --profile ${esc4(c.profile)}</span>` : target === "kimi" && c.path ? file(c.path) : c.providerId ? `provider <span class="mono">${esc4(c.providerId)}</span>` : c.path ? file(c.path) : "";
     const env = [c.requiredEnv].flat().filter(Boolean);
-    return `<div class="svc-dsh${env.length ? " pending" : ""}">${icon(env.length ? "alert" : "check")}<span>${env.length ? "\u5DEE\u4E00\u6B65\u63A5\u5165" : "\u5DF2\u63A5\u5165"} ${esc3(profileNames[target] ?? target)}${where ? ` \xB7 ${where}` : ""}${env.length ? ` \xB7 \u8FD8\u9700\u8981\u8BBE\u7F6E\u73AF\u5883\u53D8\u91CF <span class="mono">${esc3(env.join("\u3001"))}</span>` : c.connectedAt ? ` \xB7 ${ago(c.connectedAt)}` : ""}</span><button class="link-btn svc-disconnect" data-svc-disconnect="${esc3(s.id)}|${esc3(target)}" title="\u4ECE ${esc3(profileNames[target] ?? target)} \u7684\u914D\u7F6E\u91CC\u79FB\u9664\u8FD9\u4E2A\u63A5\u53E3">\u65AD\u5F00</button></div>`;
+    return `<div class="svc-dsh${env.length ? " pending" : ""}">${icon(env.length ? "alert" : "check")}<span>${env.length ? "\u5DEE\u4E00\u6B65\u63A5\u5165" : "\u5DF2\u63A5\u5165"} ${esc4(profileNames[target] ?? target)}${where ? ` \xB7 ${where}` : ""}${env.length ? ` \xB7 \u8FD8\u9700\u8981\u8BBE\u7F6E\u73AF\u5883\u53D8\u91CF <span class="mono">${esc4(env.join("\u3001"))}</span>` : c.connectedAt ? ` \xB7 ${ago(c.connectedAt)}` : ""}</span><button class="link-btn svc-disconnect" data-svc-disconnect="${esc4(s.id)}|${esc4(target)}" title="\u4ECE ${esc4(profileNames[target] ?? target)} \u7684\u914D\u7F6E\u91CC\u79FB\u9664\u8FD9\u4E2A\u63A5\u53E3">\u65AD\u5F00</button></div>`;
   }).join("");
 }
 function serviceFailure(e, now = Date.now()) {
   if (!e?.message || !(now - Date.parse(e.at) < 864e5)) return "";
   const where = [ago(e.at), e.model, Number.isInteger(e.status) ? `HTTP ${e.status}` : null].filter(Boolean).join(" \xB7 "), reset = resetText(e.resetAt, now);
-  return `<div class="svc-failure">${icon("alert")}<span><b>\u6700\u8FD1\u5931\u8D25</b>${where ? ` \xB7 ${esc3(where)}` : ""}<br>${esc3(upstreamText(e))}${reset ? `<br>${esc3(reset)}` : ""}</span></div>`;
+  return `<div class="svc-failure">${icon("alert")}<span><b>\u6700\u8FD1\u5931\u8D25</b>${where ? ` \xB7 ${esc4(where)}` : ""}<br>${esc4(upstreamText(e))}${reset ? `<br>${esc4(reset)}` : ""}</span></div>`;
 }
 function serviceCardHtml(s, view = {}) {
-  const id = esc3(s.id), runningNow = s.status === "running", starting = s.status === "starting";
-  const top = `<div class="card-top"><span class="source-logo ${esc3(s.source)}">${esc3(sourceLogos[s.source] ?? "?")}</span>${serviceStatus(s)}</div>
-    <h3>${esc3(s.name)}<span class="proto">${esc3(s.sourceName ?? s.source)}</span></h3>`;
+  const id = esc4(s.id), runningNow = s.status === "running", starting = s.status === "starting";
+  const top = `<div class="card-top"><span class="source-logo ${esc4(s.source)}">${esc4(sourceLogos[s.source] ?? "?")}</span>${serviceStatus(s)}</div>
+    <h3>${esc4(s.name)}<span class="proto">${esc4(s.sourceName ?? s.source)}</span></h3>`;
   if (s.status === "checking") return `<article class="service-card" data-service="${id}">${top}<p class="svc-pending">\u6B63\u5728\u6838\u5B9E\u8FD9\u4E2A\u63A5\u53E3\u7684\u72B6\u6001\u2026</p></article>`;
-  if (s.status === "unavailable") return `<article class="service-card" data-service="${id}">${top}<div class="error-box">${esc3(s.error?.message ?? "\u8FD9\u4E2A\u63A5\u53E3\u6682\u65F6\u4E0D\u80FD\u4F7F\u7528")}</div><div class="card-actions"><button class="btn sm primary" data-svc-action="${id}|retry">${icon("refresh")}\u91CD\u8BD5</button></div></article>`;
+  if (s.status === "unavailable") return `<article class="service-card" data-service="${id}">${top}<div class="error-box">${esc4(s.error?.message ?? "\u8FD9\u4E2A\u63A5\u53E3\u6682\u65F6\u4E0D\u80FD\u4F7F\u7528")}</div><div class="card-actions"><button class="btn sm primary" data-svc-action="${id}|retry">${icon("refresh")}\u91CD\u8BD5</button></div></article>`;
   const profiles = s.profiles?.length ? s.profiles : Object.keys(profileNames).map((p) => ({ id: p }));
   const target = profiles.find((p) => p.id === s.defaultProfile) ?? profiles[0], targetName = profileNames[target?.id] ?? target?.name ?? target?.id;
   const address = target?.baseURL ?? s.baseURL ?? "\u2014";
-  const key = view.key ? `<code class="svc-value mono revealed">${esc3(view.key)}</code>` : `<code class="svc-value mono">${esc3(s.keyPreview ?? "\u672A\u751F\u6210")}</code>`;
-  const owner = s.portOwner ? `<div class="error-box">\u7AEF\u53E3 ${esc3(s.port)} \u5DF2\u88AB ${esc3(s.portOwner.name ?? "\u5176\u4ED6\u7A0B\u5E8F")}\uFF08pid ${esc3(s.portOwner.pid ?? "?")}\uFF09\u5360\u7528${s.portOwner.command ? `\uFF1A<span class="mono">${esc3(s.portOwner.command)}</span>` : ""}\u3002\u8BF7\u5148\u505C\u6B62\u5360\u7528\u5B83\u7684\u7A0B\u5E8F\uFF0C\u6216\u6362\u4E00\u4E2A\u7AEF\u53E3\u3002</div>` : s.error?.message ? `<div class="error-box">${esc3(s.error.message)}</div>` : "";
+  const key = view.key ? `<code class="svc-value mono revealed">${esc4(view.key)}</code>` : `<code class="svc-value mono">${esc4(s.keyPreview ?? "\u672A\u751F\u6210")}</code>`;
+  const owner = s.portOwner ? `<div class="error-box">\u7AEF\u53E3 ${esc4(s.port)} \u5DF2\u88AB ${esc4(s.portOwner.name ?? "\u5176\u4ED6\u7A0B\u5E8F")}\uFF08pid ${esc4(s.portOwner.pid ?? "?")}\uFF09\u5360\u7528${s.portOwner.command ? `\uFF1A<span class="mono">${esc4(s.portOwner.command)}</span>` : ""}\u3002\u8BF7\u5148\u505C\u6B62\u5360\u7528\u5B83\u7684\u7A0B\u5E8F\uFF0C\u6216\u6362\u4E00\u4E2A\u7AEF\u53E3\u3002</div>` : s.error?.message ? `<div class="error-box">${esc4(s.error.message)}</div>` : "";
   const autostart = s.autostart ?? {};
-  const stale = s.stale ? `<div class="env-note">${icon("info")}<span>\u73B0\u5728\u8FD0\u884C\u7684\u662F ${esc3(s.stale.running ?? "\u65E7\u7248\u672C")}\uFF0C\u8FD9\u4E2A\u63A5\u53E3\u7A7A\u95F2\u540E\u4F1A\u81EA\u52A8\u6362\u6210 ${esc3(s.stale.current)}\uFF0C\u4E5F\u53EF\u4EE5\u73B0\u5728\u91CD\u542F\u3002</span></div>` : "";
-  const requests = s.requests?.total ? `<span class="muted">\u5DF2\u5904\u7406 ${esc3(s.requests.total)} \u4E2A\u8BF7\u6C42${s.requests.failed ? `\uFF0C\u5931\u8D25 ${esc3(s.requests.failed)} \u4E2A` : ""}${s.requests.lastAt ? ` \xB7 \u6700\u8FD1 ${ago(s.requests.lastAt)}` : ""}</span>` : '<span class="muted">\u8FD8\u6CA1\u6709\u8BF7\u6C42</span>';
+  const stale = s.stale ? `<div class="env-note">${icon("info")}<span>\u73B0\u5728\u8FD0\u884C\u7684\u662F ${esc4(s.stale.running ?? "\u65E7\u7248\u672C")}\uFF0C\u8FD9\u4E2A\u63A5\u53E3\u7A7A\u95F2\u540E\u4F1A\u81EA\u52A8\u6362\u6210 ${esc4(s.stale.current)}\uFF0C\u4E5F\u53EF\u4EE5\u73B0\u5728\u91CD\u542F\u3002</span></div>` : "";
+  const requests = s.requests?.total ? `<span class="muted">\u5DF2\u5904\u7406 ${esc4(s.requests.total)} \u4E2A\u8BF7\u6C42${s.requests.failed ? `\uFF0C\u5931\u8D25 ${esc4(s.requests.failed)} \u4E2A` : ""}${s.requests.lastAt ? ` \xB7 \u6700\u8FD1 ${ago(s.requests.lastAt)}` : ""}</span>` : '<span class="muted">\u8FD8\u6CA1\u6709\u8BF7\u6C42</span>';
   const models2 = s.models ?? {};
   return `<article class="service-card" data-service="${id}">${top}
     <div class="svc-rows">
-      <div class="svc-row"><span class="svc-label">\u63A5\u5165\u5230</span><select class="svc-select" data-svc-profile="${id}" title="\u5E95\u4E0B\u7684\u300C\u63A5\u5165\u300D\u6309\u94AE\u767B\u8BB0\u5230\u8FD9\u4E2A Agent\uFF1B\u4E0D\u5E26\u524D\u7F00\u7684 /v1 \u4E5F\u6309\u5B83\u7684\u5DE5\u5177\u7EA6\u5B9A\u56DE\u7B54">${profiles.map((p) => `<option value="${esc3(p.id)}" ${p.id === target?.id ? "selected" : ""}>${esc3(profileNames[p.id] ?? p.name ?? p.id)}</option>`).join("")}</select></div>
-      ${copyRow("\u5730\u5740", address, { extra: `<button class="icon-btn xs" data-copy-text="${esc3(address)}" title="\u590D\u5236\u5730\u5740">${icon("copy")}</button>` })}
+      <div class="svc-row"><span class="svc-label">\u63A5\u5165\u5230</span><select class="svc-select" data-svc-profile="${id}" title="\u5E95\u4E0B\u7684\u300C\u63A5\u5165\u300D\u6309\u94AE\u767B\u8BB0\u5230\u8FD9\u4E2A Agent\uFF1B\u4E0D\u5E26\u524D\u7F00\u7684 /v1 \u4E5F\u6309\u5B83\u7684\u5DE5\u5177\u7EA6\u5B9A\u56DE\u7B54">${profiles.map((p) => `<option value="${esc4(p.id)}" ${p.id === target?.id ? "selected" : ""}>${esc4(profileNames[p.id] ?? p.name ?? p.id)}</option>`).join("")}</select></div>
+      ${copyRow("\u5730\u5740", address, { extra: `<button class="icon-btn xs" data-copy-text="${esc4(address)}" title="\u590D\u5236\u5730\u5740">${icon("copy")}</button>` })}
       <div class="svc-row"><span class="svc-label">\u5BC6\u94A5</span>${key}<button class="icon-btn xs" data-svc-key="${id}|reveal" title="${view.key ? "\u9690\u85CF" : "\u663E\u793A"}">${icon("eye")}</button><button class="icon-btn xs" data-svc-key="${id}|copy" title="\u590D\u5236\u5BC6\u94A5">${icon("copy")}</button><button class="icon-btn xs" data-svc-key="${id}|regenerate" title="\u91CD\u65B0\u751F\u6210\u5BC6\u94A5">${icon("refresh")}</button></div>
-      <div class="svc-row"><span class="svc-label">\u7AEF\u53E3</span><input class="svc-port" type="number" min="1024" max="65535" value="${esc3(s.port ?? "")}" data-svc-port="${id}"><button class="btn sm" data-svc-apply-port="${id}">\u5E94\u7528</button></div>
-      <label class="svc-row svc-toggle"><span class="svc-label">\u5F00\u673A\u542F\u52A8</span><input type="checkbox" data-svc-autostart="${id}" ${autostart.enabled ? "checked" : ""}><span>\u767B\u5F55 Windows \u65F6\u5728\u540E\u53F0\u542F\u52A8</span>${autostart.enabled && autostart.valid === false ? `<span class="svc-issue">${icon("alert")}${esc3(autostart.issue ?? "\u5F00\u673A\u4EFB\u52A1\u9700\u8981\u4FEE\u590D")}</span>` : ""}</label>
+      <div class="svc-row"><span class="svc-label">\u7AEF\u53E3</span><input class="svc-port" type="number" min="1024" max="65535" value="${esc4(s.port ?? "")}" data-svc-port="${id}"><button class="btn sm" data-svc-apply-port="${id}">\u5E94\u7528</button></div>
+      <label class="svc-row svc-toggle"><span class="svc-label">\u5F00\u673A\u542F\u52A8</span><input type="checkbox" data-svc-autostart="${id}" ${autostart.enabled ? "checked" : ""}><span>\u767B\u5F55 Windows \u65F6\u5728\u540E\u53F0\u542F\u52A8</span>${autostart.enabled && autostart.valid === false ? `<span class="svc-issue">${icon("alert")}${esc4(autostart.issue ?? "\u5F00\u673A\u4EFB\u52A1\u9700\u8981\u4FEE\u590D")}</span>` : ""}</label>
     </div>
     ${owner}${stale}
-    <div class="card-foot"><span><b>${esc3(models2.count ?? "\u2014")}</b> \u4E2A\u6A21\u578B${models2.refreshedAt ? ` \xB7 ${ago(models2.refreshedAt)}\u5237\u65B0` : ""}</span>${requests}</div>
-    ${models2.error ? `<div class="error-box">${esc3(models2.error)}</div>` : ""}
+    <div class="card-foot"><span><b>${esc4(models2.count ?? "\u2014")}</b> \u4E2A\u6A21\u578B${models2.refreshedAt ? ` \xB7 ${ago(models2.refreshedAt)}\u5237\u65B0` : ""}</span>${requests}</div>
+    ${models2.error ? `<div class="error-box">${esc4(models2.error)}</div>` : ""}
     ${serviceFailure(s.requests?.lastError)}
-    <div class="card-actions">${runningNow ? `<button class="btn sm" data-svc-action="${id}|restart">${icon("refresh")}\u91CD\u542F</button><button class="btn sm danger" data-svc-action="${id}|stop">${icon("stop")}\u505C\u6B62</button>` : `<button class="btn sm primary" data-svc-action="${id}|start" ${starting ? "disabled" : ""}>${icon("play")}${s.status === "crashed" ? "\u91CD\u65B0\u542F\u52A8" : "\u542F\u52A8"}</button>`}<button class="btn sm" data-svc-models="${id}">${icon("list")}${view.models ? "\u6536\u8D77\u6A21\u578B" : "\u67E5\u770B\u6A21\u578B"}</button><button class="btn sm" data-svc-refresh="${id}">${icon("refresh")}\u5237\u65B0\u6A21\u578B</button><button class="btn sm${runningNow ? " primary" : ""}" data-svc-connect="${id}|${esc3(target?.id ?? "dsh")}" ${runningNow && !view.connecting ? "" : "disabled"} title="${runningNow ? `\u628A\u8FD9\u4E2A\u63A5\u53E3\u767B\u8BB0\u5230 ${esc3(targetName)}` : "\u5148\u542F\u52A8\u63A5\u53E3"}">${view.connecting ? `<span class="spinner"></span>\u63A5\u5165\u4E2D\u2026` : `${icon("plug")}\u63A5\u5165 ${esc3(targetName)}`}</button></div>
+    <div class="card-actions">${runningNow ? `<button class="btn sm" data-svc-action="${id}|restart">${icon("refresh")}\u91CD\u542F</button><button class="btn sm danger" data-svc-action="${id}|stop">${icon("stop")}\u505C\u6B62</button>` : `<button class="btn sm primary" data-svc-action="${id}|start" ${starting ? "disabled" : ""}>${icon("play")}${s.status === "crashed" ? "\u91CD\u65B0\u542F\u52A8" : "\u542F\u52A8"}</button>`}<button class="btn sm" data-svc-models="${id}">${icon("list")}${view.models ? "\u6536\u8D77\u6A21\u578B" : "\u67E5\u770B\u6A21\u578B"}</button><button class="btn sm" data-svc-refresh="${id}">${icon("refresh")}\u5237\u65B0\u6A21\u578B</button><button class="btn sm${runningNow ? " primary" : ""}" data-svc-connect="${id}|${esc4(target?.id ?? "dsh")}" ${runningNow && !view.connecting ? "" : "disabled"} title="${runningNow ? `\u628A\u8FD9\u4E2A\u63A5\u53E3\u767B\u8BB0\u5230 ${esc4(targetName)}` : "\u5148\u542F\u52A8\u63A5\u53E3"}">${view.connecting ? `<span class="spinner"></span>\u63A5\u5165\u4E2D\u2026` : `${icon("plug")}\u63A5\u5165 ${esc4(targetName)}`}</button></div>
     ${connectionsOf(s)}
     ${view.models ? serviceModelsHtml(view.list) : ""}</article>`;
 }
@@ -18712,12 +18765,12 @@ function guideEnvRow(r, env) {
   let side;
   if (busy2) side = `<span class="guide-state"><span class="spinner"></span>${env.job.state === "downloading" && env.job.total ? `${Math.round(100 * (env.job.received ?? 0) / env.job.total)}%` : "\u5904\u7406\u4E2D"}</span>`;
   else if (r.checking && status !== "ready") side = '<span class="guide-state"><span class="spinner"></span>\u68C0\u6D4B\u4E2D</span>';
-  else if (status === "ready") side = `<span class="guide-state ok">${icon("check")}${esc3(env?.installed?.version ? `\u5DF2\u5C31\u7EEA \xB7 ${env.installed.version}` : "\u5DF2\u5C31\u7EEA")}</span>`;
-  else if (a3.install) side = `<button class="btn sm primary" data-env-install="${esc3(r.id)}">${icon("download")}\u4E0B\u8F7D\u5B89\u88C5</button>`;
-  else if (env?.page) side = `<button class="btn sm" data-env-page="${esc3(r.id)}">${icon("external")}\u5B98\u65B9\u9875\u9762</button>`;
-  else side = `<button class="btn sm" data-configure-runtime="${esc3(r.id)}">\u6307\u5B9A\u8DEF\u5F84</button>`;
+  else if (status === "ready") side = `<span class="guide-state ok">${icon("check")}${esc4(env?.installed?.version ? `\u5DF2\u5C31\u7EEA \xB7 ${env.installed.version}` : "\u5DF2\u5C31\u7EEA")}</span>`;
+  else if (a3.install) side = `<button class="btn sm primary" data-env-install="${esc4(r.id)}">${icon("download")}\u4E0B\u8F7D\u5B89\u88C5</button>`;
+  else if (env?.page) side = `<button class="btn sm" data-env-page="${esc4(r.id)}">${icon("external")}\u5B98\u65B9\u9875\u9762</button>`;
+  else side = `<button class="btn sm" data-configure-runtime="${esc4(r.id)}">\u6307\u5B9A\u8DEF\u5F84</button>`;
   const sub2 = status === "ready" ? r.description : busy2 ? "" : r.checking ? r.description : unusableReason(r) + (networkNotes[r.id] ? ` \xB7 ${networkNotes[r.id]}` : "");
-  return `<div class="guide-row">${tile(r)}<span class="guide-main"><span class="guide-name">${esc3(r.name)}${recommended.has(r.id) ? '<span class="mi-tag">\u63A8\u8350</span>' : ""}</span><span class="guide-sub">${esc3(sub2)}</span>${env?.job?.state === "failed" ? `<span class="guide-error">${esc3(env.job.message ?? "\u5931\u8D25")}</span>` : ""}</span>${side}</div>`;
+  return `<div class="guide-row">${tile(r)}<span class="guide-main"><span class="guide-name">${esc4(r.name)}${recommended.has(r.id) ? '<span class="mi-tag">\u63A8\u8350</span>' : ""}</span><span class="guide-sub">${esc4(sub2)}</span>${env?.job?.state === "failed" ? `<span class="guide-error">${esc4(env.job.message ?? "\u5931\u8D25")}</span>` : ""}</span>${side}</div>`;
 }
 var sourceTitles = { qoder: "Qoder CN", workbuddy: "WorkBuddy", antigravity: "Antigravity \xB7 Gemini" };
 function sourceState(catalog, component) {
@@ -18728,24 +18781,24 @@ function sourceState(catalog, component) {
   if (catalog?.status === "error") return { key: "error", label: "\u9700\u8981\u5904\u7406" };
   return { key: "idle", label: "\u5C1A\u672A\u8BFB\u53D6" };
 }
-var sourceInstallButton = (id) => `<button class="btn sm primary" data-source-install="${esc3(id)}">${icon("download")}\u4E0B\u8F7D\u7EC4\u4EF6</button>`;
-var sourceRefreshButton = (id, busy2 = false) => `<button class="btn sm" data-refresh-source="${esc3(id)}" ${busy2 ? "disabled" : ""}>${icon("refresh")}${busy2 ? "\u8BFB\u53D6\u4E2D" : "\u91CD\u65B0\u68C0\u6D4B"}</button>`;
-var sourcePageButton = (id, component) => component?.page ? `<button class="btn sm" data-source-page="${esc3(id)}">${icon("external")}\u5B98\u65B9\u9875\u9762</button>` : "";
+var sourceInstallButton = (id) => `<button class="btn sm primary" data-source-install="${esc4(id)}">${icon("download")}\u4E0B\u8F7D\u7EC4\u4EF6</button>`;
+var sourceRefreshButton = (id, busy2 = false) => `<button class="btn sm" data-refresh-source="${esc4(id)}" ${busy2 ? "disabled" : ""}>${icon("refresh")}${busy2 ? "\u8BFB\u53D6\u4E2D" : "\u91CD\u65B0\u68C0\u6D4B"}</button>`;
+var sourcePageButton = (id, component) => component?.page ? `<button class="btn sm" data-source-page="${esc4(id)}">${icon("external")}\u5B98\u65B9\u9875\u9762</button>` : "";
 var jobShare = (job) => job?.state === "downloading" && job.total ? `${Math.round(100 * (job.received ?? 0) / job.total)}%` : "\u5904\u7406\u4E2D";
 function guideSourceRow(id, snap) {
   const c = snap.catalog?.[id], component = snap.sourceComponents?.find((x2) => x2.id === id), now = sourceState(c, component), count2 = c?.models?.filter((m) => m.enabled).length ?? 0;
   const sub2 = { working: "", component: component?.signIn ?? "\u9700\u8981\u5148\u4E0B\u8F7D\u8FD9\u4E2A\u6765\u6E90\u7684\u7EC4\u4EF6", loading: "\u6B63\u5728\u8BFB\u53D6\u76EE\u5F55\u2026", ready: `\u5DF2\u8FDE\u63A5 \xB7 ${count2} \u4E2A\u53EF\u7528\u6A21\u578B`, error: c?.error ?? component?.signIn ?? "\u9700\u8981\u5904\u7406", idle: "\u7EC4\u4EF6\u5DF2\u5C31\u7EEA\uFF0C\u8FD8\u6CA1\u6709\u8BFB\u53D6\u76EE\u5F55" }[now.key];
   const side = { working: `<span class="guide-state"><span class="spinner"></span>${jobShare(component?.job)}</span>`, component: `<span class="guide-actions">${sourcePageButton(id, component)}${sourceInstallButton(id)}</span>`, loading: '<span class="guide-state"><span class="spinner"></span>\u8BFB\u53D6\u4E2D</span>', ready: `<span class="guide-state ok">${icon("check")}\u5DF2\u8FDE\u63A5</span>`, error: `<span class="guide-actions">${sourcePageButton(id, component)}${sourceRefreshButton(id)}</span>`, idle: `<span class="guide-actions">${sourceRefreshButton(id)}</span>` }[now.key];
   const failed = component?.job?.state === "failed" ? component.job.message ?? "\u4E0B\u8F7D\u5931\u8D25" : component?.status === "error" ? component.error : "";
-  return `<div class="guide-row"><span class="source-logo ${esc3(id)}">${sourceLogos[id]}</span><span class="guide-main"><span class="guide-name">${sourceTitles[id]}</span><span class="guide-sub">${esc3(sub2)}</span>${failed ? `<span class="guide-error">${esc3(failed)}</span>` : ""}</span>${side}</div>`;
+  return `<div class="guide-row"><span class="source-logo ${esc4(id)}">${sourceLogos[id]}</span><span class="guide-main"><span class="guide-name">${sourceTitles[id]}</span><span class="guide-sub">${esc4(sub2)}</span>${failed ? `<span class="guide-error">${esc4(failed)}</span>` : ""}</span>${side}</div>`;
 }
 function sourceCardHtml(id, description, c, component) {
   const now = sourceState(c, component), working = now.key === "working", loading = now.key === "loading";
   const status = { ready: "ready", error: "error", component: "warn", working: "loading", loading: "loading" }[now.key] ?? "none";
   const count2 = c?.models?.filter((m) => m.enabled).length;
-  const actions = working ? `<button class="btn sm" data-source-cancel="${esc3(id)}">${icon("close")}\u53D6\u6D88</button>` : now.key === "component" ? `${sourceInstallButton(id)}${sourcePageButton(id, component)}` : `<button class="btn sm" data-refresh-source="${esc3(id)}" ${loading ? "disabled" : ""}>${icon("refresh")}${loading ? "\u8BFB\u53D6\u4E2D" : "\u5237\u65B0\u76EE\u5F55"}</button>${now.key === "error" ? sourcePageButton(id, component) : ""}`;
-  const detail = component ? `<span class="source-package mono" title="\u4E0B\u8F7D\u5230\u672C\u673A\u7684\u7EC4\u4EF6">${esc3(component.package)} ${esc3(component.installedVersion ?? component.version)}</span>` : "";
-  return `<article class="source-card"><div class="card-top"><span class="source-logo ${esc3(id)}">${sourceLogos[id] ?? "G"}</span><span class="card-status ${status}">${working || loading ? '<span class="spinner"></span>' : '<span class="status-dot"></span>'}${now.label}</span></div><h3>${esc3(sourceTitles[id] ?? id)}</h3><p>${esc3(description)}</p>${now.key === "component" || now.key === "error" ? `<p class="source-hint">${esc3(component?.signIn ?? "")}</p>` : ""}${detail}${component?.status === "error" && component.error ? `<div class="error-box">${esc3(component.error)}</div>` : ""}${c?.error && now.key === "error" ? `<div class="error-box">${esc3(c.error)}</div>` : ""}${jobHtml(component?.job)}<div class="card-foot"><span><b>${count2 ?? "\u2014"}</b> \u4E2A\u53EF\u7528\u6A21\u578B${c?.checkedAt ? ` \xB7 ${ago(c.checkedAt)}` : ""}</span><span class="source-actions">${actions}</span></div></article>`;
+  const actions = working ? `<button class="btn sm" data-source-cancel="${esc4(id)}">${icon("close")}\u53D6\u6D88</button>` : now.key === "component" ? `${sourceInstallButton(id)}${sourcePageButton(id, component)}` : `<button class="btn sm" data-refresh-source="${esc4(id)}" ${loading ? "disabled" : ""}>${icon("refresh")}${loading ? "\u8BFB\u53D6\u4E2D" : "\u5237\u65B0\u76EE\u5F55"}</button>${now.key === "error" ? sourcePageButton(id, component) : ""}`;
+  const detail = component ? `<span class="source-package mono" title="\u4E0B\u8F7D\u5230\u672C\u673A\u7684\u7EC4\u4EF6">${esc4(component.package)} ${esc4(component.installedVersion ?? component.version)}</span>` : "";
+  return `<article class="source-card"><div class="card-top"><span class="source-logo ${esc4(id)}">${sourceLogos[id] ?? "G"}</span><span class="card-status ${status}">${working || loading ? '<span class="spinner"></span>' : '<span class="status-dot"></span>'}${now.label}</span></div><h3>${esc4(sourceTitles[id] ?? id)}</h3><p>${esc4(description)}</p>${now.key === "component" || now.key === "error" ? `<p class="source-hint">${esc4(component?.signIn ?? "")}</p>` : ""}${detail}${component?.status === "error" && component.error ? `<div class="error-box">${esc4(component.error)}</div>` : ""}${c?.error && now.key === "error" ? `<div class="error-box">${esc4(c.error)}</div>` : ""}${jobHtml(component?.job)}<div class="card-foot"><span><b>${count2 ?? "\u2014"}</b> \u4E2A\u53EF\u7528\u6A21\u578B${c?.checkedAt ? ` \xB7 ${ago(c.checkedAt)}` : ""}</span><span class="source-actions">${actions}</span></div></article>`;
 }
 function onboardingHtml(snap) {
   const envs = new Map((snap.environments ?? []).map((e) => [e.id, e]));
@@ -18761,7 +18814,7 @@ function onboardingHtml(snap) {
 }
 
 // app/ui/questions.js
-var esc4 = (value) => String(value ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
+var esc5 = (value) => String(value ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
 var questionOptions = (q2) => Array.isArray(q2?.options) ? q2.options : [];
 function structuredQuestions(data) {
   const qs = Array.isArray(data?.questions) ? data.questions : null;
@@ -18774,9 +18827,9 @@ function questionFormHtml(qs) {
     const options = questionOptions(q2);
     const other = !options.length ? "\u4F60\u7684\u56DE\u7B54" : q2.multiSelect ? "\u53E6\u5916\u8865\u5145\uFF08\u53EF\u9009\uFF09" : "\u5176\u4ED6\u7B54\u6848\uFF08\u586B\u5199\u540E\u4EE3\u66FF\u4E0A\u9762\u7684\u9009\u9879\uFF09";
     const input = q2.allowCustom === false ? "" : `<input class="q-other" type="${q2.secret === true ? "password" : "text"}" data-q-other="${i2}" placeholder="${other}" maxlength="2000" autocomplete="off">`;
-    const detail = typeof q2.detail === "string" && q2.detail.trim() ? `<p class="q-detail">${esc4(q2.detail)}</p>` : "";
-    const picks = options.map((o, j2) => `<label class="q-option"><input type="${q2.multiSelect ? "checkbox" : "radio"}" name="q${i2}" value="${j2}"><span class="q-option-text"><b>${esc4(o.label)}</b>${o.description ? `<span class="muted">${esc4(o.description)}</span>` : ""}</span></label>`).join("");
-    return `<fieldset class="q-field"><legend>${q2.header ? `<span class="q-tag">${esc4(q2.header)}</span>` : ""}<span class="q-text">${esc4(q2.question)}</span>${q2.multiSelect && options.length ? '<span class="muted">\u53EF\u591A\u9009</span>' : ""}</legend>${detail}${picks}${input}</fieldset>`;
+    const detail = typeof q2.detail === "string" && q2.detail.trim() ? `<p class="q-detail">${esc5(q2.detail)}</p>` : "";
+    const picks = options.map((o, j2) => `<label class="q-option"><input type="${q2.multiSelect ? "checkbox" : "radio"}" name="q${i2}" value="${j2}"><span class="q-option-text"><b>${esc5(o.label)}</b>${o.description ? `<span class="muted">${esc5(o.description)}</span>` : ""}</span></label>`).join("");
+    return `<fieldset class="q-field"><legend>${q2.header ? `<span class="q-tag">${esc5(q2.header)}</span>` : ""}<span class="q-text">${esc5(q2.question)}</span>${q2.multiSelect && options.length ? '<span class="muted">\u53EF\u591A\u9009</span>' : ""}</legend>${detail}${picks}${input}</fieldset>`;
   }).join("")}</div>`;
 }
 function buildAnswers(qs, read) {
@@ -18831,7 +18884,7 @@ function budgetCheck(raw, { min = 4096, max } = {}) {
 
 // app/ui/app.js
 var $2 = (selector) => document.querySelector(selector);
-var esc5 = (value) => String(value ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
+var esc6 = (value) => String(value ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
 var labels = { idle: "\u51C6\u5907\u5C31\u7EEA", starting: "\u6B63\u5728\u8FDE\u63A5", running: "\u8FD0\u884C\u4E2D", waiting: "\u7B49\u5F85\u6388\u6743", completed: "\u5DF2\u5B8C\u6210", failed: "\u8FD0\u884C\u5931\u8D25", interrupted: "\u5DF2\u4E2D\u65AD", paused: "\u5DF2\u6682\u505C" };
 var sourceNames = { qoder: "Qoder CN", workbuddy: "WorkBuddy", antigravity: "Antigravity \xB7 Gemini" };
 var tiles2 = { dsh: "DS", kimi: "Ki", codex: "Cx", antigravity: "AG", claude: "CC" };
@@ -18868,7 +18921,13 @@ var state = {
   sessionSearch: "",
   menuSearch: "",
   params: null,
-  delivery: "steer"
+  delivery: "steer",
+  rules: null,
+  rulesLoading: false,
+  rulesError: null,
+  rulesEditing: false,
+  rulesDraft: null,
+  rulesSaving: false
 };
 var ui = loadUi();
 var views = new WorkspaceViews();
@@ -18937,7 +18996,7 @@ async function call(method, args = {}) {
 function toast(text3, error = false) {
   clearTimeout(toastTimer);
   const el = $2("#toast");
-  el.innerHTML = `${icon(error ? "alert" : "check")}<span>${esc5(text3)}</span>`;
+  el.innerHTML = `${icon(error ? "alert" : "check")}<span>${esc6(text3)}</span>`;
   el.className = `toast${error ? " error" : ""}`;
   toastTimer = setTimeout(() => el.classList.add("hidden"), error ? 7e3 : Math.max(3600, text3.length * 110));
 }
@@ -19040,7 +19099,7 @@ var pretty = (data) => {
 };
 var clip2 = (text3, max = 2e4) => text3.length > max ? `${text3.slice(0, max)}
 \u2026 \u5DF2\u622A\u65AD ${(text3.length - max).toLocaleString()} \u5B57\u7B26` : text3;
-var tile2 = (r) => `<span class="rt-tile rt-${esc5(r?.id ?? "none")}">${esc5(tiles2[r?.id] ?? "?")}</span>`;
+var tile2 = (r) => `<span class="rt-tile rt-${esc6(r?.id ?? "none")}">${esc6(tiles2[r?.id] ?? "?")}</span>`;
 var effortName = (e) => e === "none" ? "\u5173\u95ED" : e;
 function ago2(date) {
   const s = (Date.now() - Date.parse(date)) / 1e3;
@@ -19133,8 +19192,8 @@ function selectRuntime(runtimeId) {
 }
 function modelLabel(selection, model) {
   if (!selection?.modelKey) return '<span class="ml-name">\u9009\u62E9\u6A21\u578B</span>';
-  if (selection.modelKey === "native") return `<span class="ml-name">\u539F\u751F\u6A21\u578B</span><span class="ml-meta">${esc5(selection.nativeModel || "\u5F53\u524D\u9ED8\u8BA4")}${selection.reasoning ? ` \xB7 ${esc5(effortName(selection.reasoning))}` : ""}</span>`;
-  if (!model) return `<span class="ml-name">${esc5(selection.modelKey.split(":").slice(1).join(":"))}</span><span class="ml-meta">\u76EE\u5F55\u4E2D\u4E0D\u53EF\u7528</span>`;
+  if (selection.modelKey === "native") return `<span class="ml-name">\u539F\u751F\u6A21\u578B</span><span class="ml-meta">${esc6(selection.nativeModel || "\u5F53\u524D\u9ED8\u8BA4")}${selection.reasoning ? ` \xB7 ${esc6(effortName(selection.reasoning))}` : ""}</span>`;
+  if (!model) return `<span class="ml-name">${esc6(selection.modelKey.split(":").slice(1).join(":"))}</span><span class="ml-meta">\u76EE\u5F55\u4E2D\u4E0D\u53EF\u7528</span>`;
   const parts = [];
   if (model.source !== "antigravity") {
     parts.push(selection.reasoning ? effortName(selection.reasoning) : "\u9ED8\u8BA4\u601D\u8003");
@@ -19142,7 +19201,7 @@ function modelLabel(selection, model) {
     if (ctx) parts.push(compact(ctx));
     if (selection.contextBudget) parts.push(`\u9884\u7B97 ${compact(selection.contextBudget)}`);
   } else parts.push("\u539F\u751F\u6267\u884C");
-  return `<span class="ml-name">${esc5(sourceName(model))}</span><span class="ml-meta">${esc5(parts.join(" \xB7 "))}</span>`;
+  return `<span class="ml-name">${esc6(sourceName(model))}</span><span class="ml-meta">${esc6(parts.join(" \xB7 "))}</span>`;
 }
 function modelTitle(selection, model, locked) {
   const lead = locked ? "\u67E5\u770B\u6216\u8C03\u6574\u6B64\u4F1A\u8BDD\u7684\u53C2\u6570" : "\u9009\u62E9\u6A21\u578B\u3001\u601D\u8003\u5F3A\u5EA6\u4E0E\u4E0A\u4E0B\u6587\u7A97\u53E3";
@@ -19217,10 +19276,10 @@ function renderSidebarFrame() {
   });
 }
 function sessionRow(s) {
-  return `<button class="session-row${s.id === state.sessionId ? " active" : ""}" data-session="${s.id}" title="${esc5(s.title)}${s.lastFailure?.message ? `
-\u4E0A\u4E00\u8F6E\u4E2D\u65AD\uFF1A${esc5(s.lastFailure.message)}` : ""}">
-    <span class="dot ${esc5(s.status)}"></span><span class="session-title">${esc5(s.title)}</span>
-    <span class="session-meta">${esc5(runtime(s.runtimeId)?.short ?? s.runtimeId)} \xB7 ${busy(s) ? `<span class="session-activity" data-activity="${s.id}">${esc5(activityOf(s).short)}</span>` : ago2(s.updatedAt)}</span>
+  return `<button class="session-row${s.id === state.sessionId ? " active" : ""}" data-session="${s.id}" title="${esc6(s.title)}${s.lastFailure?.message ? `
+\u4E0A\u4E00\u8F6E\u4E2D\u65AD\uFF1A${esc6(s.lastFailure.message)}` : ""}">
+    <span class="dot ${esc6(s.status)}"></span><span class="session-title">${esc6(s.title)}</span>
+    <span class="session-meta">${esc6(runtime(s.runtimeId)?.short ?? s.runtimeId)} \xB7 ${busy(s) ? `<span class="session-activity" data-activity="${s.id}">${esc6(activityOf(s).short)}</span>` : ago2(s.updatedAt)}</span>
     <span class="row-action" data-archive="${s.id}" title="\u5F52\u6863">${icon("archive")}</span></button>`;
 }
 function renderFolders() {
@@ -19237,7 +19296,7 @@ function renderFolders() {
     if (query && !rows.length) return "";
     const collapsed = !query && ui.collapsed.includes(p.id), live = rows.filter(busy).length, limit = showAll.has(p.id) || query ? rows.length : 12;
     return `<div class="folder${collapsed ? " collapsed" : ""}${p.id === state.projectId ? " current" : ""}">
-      <div class="folder-head" data-folder="${p.id}" title="${esc5(p.path)}">${icon("chevronDown", "chev")}${icon("folder", "folder-icon")}<span class="folder-name">${esc5(p.name)}</span>${live ? `<span class="live-count" title="${live} \u4E2A\u4F1A\u8BDD\u6B63\u5728\u8FD0\u884C">${live}</span>` : ""}
+      <div class="folder-head" data-folder="${p.id}" title="${esc6(p.path)}">${icon("chevronDown", "chev")}${icon("folder", "folder-icon")}<span class="folder-name">${esc6(p.name)}</span>${live ? `<span class="live-count" title="${live} \u4E2A\u4F1A\u8BDD\u6B63\u5728\u8FD0\u884C">${live}</span>` : ""}
         <span class="folder-actions"><button class="icon-btn xs" data-new-in="${p.id}" title="\u5728\u6B64\u6587\u4EF6\u5939\u65B0\u5EFA\u4F1A\u8BDD">${icon("plus")}</button><button class="icon-btn xs" data-reveal="${p.id}" title="\u5728\u8D44\u6E90\u7BA1\u7406\u5668\u4E2D\u6253\u5F00">${icon("external")}</button></span></div>
       <div class="folder-sessions">${rows.length ? rows.slice(0, limit).map(sessionRow).join("") + (rows.length > limit ? `<button class="show-more" data-show-all="${p.id}">\u663E\u793A\u5168\u90E8 ${rows.length} \u4E2A\u4F1A\u8BDD</button>` : "") : '<div class="folder-empty">\u8FD8\u6CA1\u6709\u4F1A\u8BDD</div>'}</div></div>`;
   }).join("") || '<div class="folders-empty"><p>\u6CA1\u6709\u5339\u914D\u7684\u4F1A\u8BDD</p></div>';
@@ -19245,8 +19304,8 @@ function renderFolders() {
 function renderTopbar() {
   const s = session(), p = project();
   const left = ui.left ? "" : `<button class="icon-btn" id="toggle-left" title="\u5C55\u5F00\u4FA7\u680F (Ctrl+B)">${icon("panelLeft")}</button><span class="topbar-brand">${logo(18)}</span>`;
-  const crumb = p ? `<span class="crumb" title="${esc5(p.path)}">${icon("folder")}${esc5(p.name)}</span>` : "";
-  const title = s ? `<span class="crumb-sep">/</span><button class="title-btn" id="rename-session" title="\u91CD\u547D\u540D\u4F1A\u8BDD">${esc5(s.title)}</button>` : p ? '<span class="crumb-sep">/</span><span class="title-muted">\u65B0\u4F1A\u8BDD</span>' : '<span class="title-muted">Bridge++</span>';
+  const crumb = p ? `<span class="crumb" title="${esc6(p.path)}">${icon("folder")}${esc6(p.name)}</span>` : "";
+  const title = s ? `<span class="crumb-sep">/</span><button class="title-btn" id="rename-session" title="\u91CD\u547D\u540D\u4F1A\u8BDD">${esc6(s.title)}</button>` : p ? '<span class="crumb-sep">/</span><span class="title-muted">\u65B0\u4F1A\u8BDD</span>' : '<span class="title-muted">Bridge++</span>';
   const actions = s ? `${hasNativeUi(s.runtimeId) ? `<button class="ghost-btn" id="native-session" title="\u5728\u539F\u751F\u5B8C\u6574\u754C\u9762\u4E2D\u7EE7\u7EED">${icon("external")}<span>\u539F\u751F\u754C\u9762</span></button>` : ""}<button class="icon-btn" id="session-more" title="\u66F4\u591A">${icon("more")}</button>` : "";
   const right = ui.right ? "" : `<button class="icon-btn" id="toggle-right" title="\u5C55\u5F00\u53F3\u4FA7\u9762\u677F (Ctrl+Alt+B)">${icon("panelRight")}</button>`;
   $2("#topbar").innerHTML = `<div class="topbar-left">${left}${crumb}${title}</div><div class="topbar-right">${actions}${right}</div>`;
@@ -19335,8 +19394,8 @@ function renderQueue() {
   const running2 = busy(s);
   const held = new Set(s.queueDispatch?.ids ?? []), onHold = items.some((q2) => held.has(q2.id));
   const head = running2 ? `\u6392\u961F ${items.length} \u6761 \xB7 \u672C\u8F6E\u7ED3\u675F\u540E\u81EA\u52A8\u53D1\u9001` : onHold ? "\u4E0A\u6B21\u53D1\u9001\u540E\u6CA1\u6536\u5230\u539F\u751F\u786E\u8BA4\uFF0C\u6D88\u606F\u5148\u4FDD\u7559\uFF0C\u4E0D\u4F1A\u81EA\u52A8\u91CD\u53D1" : `\u6709 ${items.length} \u6761\u6392\u961F\u6D88\u606F\u6CA1\u6709\u53D1\u51FA\uFF08\u4E0A\u4E00\u8F6E\u6CA1\u6709\u6B63\u5E38\u7ED3\u675F\uFF09`;
-  const actions = (q2) => held.has(q2.id) ? `<span class="queue-held" title="\u8BF7\u5728\u539F\u751F\u754C\u9762\u786E\u8BA4\u8FD9\u6761\u6D88\u606F\u662F\u5426\u5DF2\u7ECF\u53D1\u51FA\uFF0C\u518D\u51B3\u5B9A\u662F\u5426\u91CD\u53D1">\u5F85\u6838\u5BF9</span>` : `<button class="icon-btn xs" data-queue-edit="${esc5(q2.id)}" title="\u53D6\u56DE\u5230\u8F93\u5165\u6846\u4FEE\u6539">${icon("edit")}</button><button class="icon-btn xs" data-queue-remove="${esc5(q2.id)}" title="\u5220\u9664\u8FD9\u6761">${icon("close")}</button>`;
-  patchHtml(el, `<div class="queue-head">${icon(onHold && !running2 ? "alert" : "clock")}<span>${esc5(head)}</span>${running2 || onHold ? "" : `<button class="btn sm primary" data-queue-send="all">${icon("arrowUp")}\u73B0\u5728\u53D1\u9001</button>`}</div>${items.map((q2) => `<div class="queue-item"><span class="queue-text" title="${esc5(q2.text)}">${esc5(q2.text || `${q2.attachments?.length ?? 0} \u4E2A\u9644\u4EF6`)}</span>${q2.attachments?.length ? `<span class="queue-att" title="${esc5(q2.attachments.map((a3) => a3.name).join("\u3001"))}">${icon("paperclip")}${q2.attachments.length}</span>` : ""}${actions(q2)}</div>`).join("")}`);
+  const actions = (q2) => held.has(q2.id) ? `<span class="queue-held" title="\u8BF7\u5728\u539F\u751F\u754C\u9762\u786E\u8BA4\u8FD9\u6761\u6D88\u606F\u662F\u5426\u5DF2\u7ECF\u53D1\u51FA\uFF0C\u518D\u51B3\u5B9A\u662F\u5426\u91CD\u53D1">\u5F85\u6838\u5BF9</span>` : `<button class="icon-btn xs" data-queue-edit="${esc6(q2.id)}" title="\u53D6\u56DE\u5230\u8F93\u5165\u6846\u4FEE\u6539">${icon("edit")}</button><button class="icon-btn xs" data-queue-remove="${esc6(q2.id)}" title="\u5220\u9664\u8FD9\u6761">${icon("close")}</button>`;
+  patchHtml(el, `<div class="queue-head">${icon(onHold && !running2 ? "alert" : "clock")}<span>${esc6(head)}</span>${running2 || onHold ? "" : `<button class="btn sm primary" data-queue-send="all">${icon("arrowUp")}\u73B0\u5728\u53D1\u9001</button>`}</div>${items.map((q2) => `<div class="queue-item"><span class="queue-text" title="${esc6(q2.text)}">${esc6(q2.text || `${q2.attachments?.length ?? 0} \u4E2A\u9644\u4EF6`)}</span>${q2.attachments?.length ? `<span class="queue-att" title="${esc6(q2.attachments.map((a3) => a3.name).join("\u3001"))}">${icon("paperclip")}${q2.attachments.length}</span>` : ""}${actions(q2)}</div>`).join("")}`);
 }
 async function dequeue(s, queueId) {
   const item = await call("session:dequeue", { sessionId: s.id, queueId });
@@ -19418,7 +19477,7 @@ function attachButtonHtml() {
   const caps = attachCaps(), kinds = allowedKinds(caps);
   if (caps === null) return "";
   const tip = kinds.length ? `\u6DFB\u52A0${kinds.map(kindName).join("\u3001")}\uFF08\u4E5F\u53EF\u4EE5\u62D6\u8FDB\u6765\u6216\u7C98\u8D34\uFF09` : refusal(caps);
-  return `<button class="chip-btn attach-btn${kinds.length ? "" : " unavailable"}" id="attach-btn" title="${esc5(tip)}" aria-label="${esc5(tip)}">${icon("paperclip")}</button>`;
+  return `<button class="chip-btn attach-btn${kinds.length ? "" : " unavailable"}" id="attach-btn" title="${esc6(tip)}" aria-label="${esc6(tip)}">${icon("paperclip")}</button>`;
 }
 function renderTray() {
   const el = $2("#attach-tray");
@@ -19527,7 +19586,7 @@ function showDropHint(on) {
   }
   const caps = attachCaps(), kinds = allowedKinds(caps);
   hint.className = `drop-hint${kinds.length ? "" : " refused"}`;
-  hint.innerHTML = kinds.length ? `${icon("paperclip")}<span>\u677E\u5F00\u5373\u53EF\u6DFB\u52A0${esc5(kinds.map(kindName).join("\u3001"))}</span>` : `${icon("alert")}<span>${esc5(refusal(caps))}</span>`;
+  hint.innerHTML = kinds.length ? `${icon("paperclip")}<span>\u677E\u5F00\u5373\u53EF\u6DFB\u52A0${esc6(kinds.map(kindName).join("\u3001"))}</span>` : `${icon("alert")}<span>${esc6(refusal(caps))}</span>`;
   hint.hidden = false;
 }
 function renderComposerControls() {
@@ -19537,16 +19596,16 @@ function renderComposerControls() {
   const steer = running2 && deliveryFor(s) === "steer";
   prompt.placeholder = !p ? "\u5148\u6253\u5F00\u4E00\u4E2A\u5DE5\u4F5C\u6587\u4EF6\u5939\uFF0C\u518D\u5F00\u59CB\u2026" : s ? running2 ? steer ? "\u8865\u5145\u6216\u7EA0\u6B63\u8981\u6C42\uFF0CEnter \u63D2\u8BDD\uFF0C\u6A21\u578B\u4E0B\u4E00\u6B65\u5C31\u80FD\u770B\u5230\u2026" : "Enter \u6392\u961F\uFF0C\u672C\u8F6E\u7ED3\u675F\u540E\u81EA\u52A8\u53D1\u9001\u2026" : "\u7EE7\u7EED\u8FD9\u4E2A\u4EFB\u52A1\u2026" : "\u63CF\u8FF0\u8981\u5B8C\u6210\u7684\u4EFB\u52A1\uFF0CAgent \u4F1A\u5728\u6240\u9009\u6587\u4EF6\u5939\u4E2D\u5DE5\u4F5C\u2026";
   const selection = s ? s.selection : composerSelection(), model = s ? modelOf(s.selection) : currentModel();
-  const folder = s ? "" : `<button class="chip-btn" id="folder-chip" data-value="${esc5(p?.id ?? "")}" title="${esc5(p?.path ?? "\u9009\u62E9\u5DE5\u4F5C\u6587\u4EF6\u5939")}">${icon("folder")}<span class="chip-text">${esc5(p?.name ?? "\u9009\u62E9\u6587\u4EF6\u5939")}</span>${icon("chevronDown", "caret")}</button>`;
+  const folder = s ? "" : `<button class="chip-btn" id="folder-chip" data-value="${esc6(p?.id ?? "")}" title="${esc6(p?.path ?? "\u9009\u62E9\u5DE5\u4F5C\u6587\u4EF6\u5939")}">${icon("folder")}<span class="chip-text">${esc6(p?.name ?? "\u9009\u62E9\u6587\u4EF6\u5939")}</span>${icon("chevronDown", "caret")}</button>`;
   const envOk = !!s || usable(env);
-  const envChip = `<button class="chip-btn${s ? " locked" : ""}${envOk ? "" : " unavailable"}" id="env-chip" data-value="${esc5(env?.id ?? "")}" title="${s ? "\u4F1A\u8BDD\u521B\u5EFA\u540E\u4E0D\u80FD\u66F4\u6362\u8FD0\u884C\u73AF\u5883" : envOk ? "\u5148\u9009\u62E9\u8FD0\u884C\u73AF\u5883" : esc5(unusableReason(env))}">${tile2(env)}<span class="chip-text">${esc5(env?.name ?? "\u9009\u62E9\u73AF\u5883")}</span>${icon(s ? "lock" : "chevronDown", "caret")}</button>`;
+  const envChip = `<button class="chip-btn${s ? " locked" : ""}${envOk ? "" : " unavailable"}" id="env-chip" data-value="${esc6(env?.id ?? "")}" title="${s ? "\u4F1A\u8BDD\u521B\u5EFA\u540E\u4E0D\u80FD\u66F4\u6362\u8FD0\u884C\u73AF\u5883" : envOk ? "\u5148\u9009\u62E9\u8FD0\u884C\u73AF\u5883" : esc6(unusableReason(env))}">${tile2(env)}<span class="chip-text">${esc6(env?.name ?? "\u9009\u62E9\u73AF\u5883")}</span>${icon(s ? "lock" : "chevronDown", "caret")}</button>`;
   const chipTitle = modelTitle(selection, model, !!s) + (s?.selectionNext ? `
 \u5DF2\u6392\u961F\uFF08\u672C\u8F6E\u7ED3\u675F\u540E\u5E94\u7528\uFF09\uFF1A${paramsText(s.selectionNext)}` : "");
-  const modelChip = `<button class="chip-btn model-chip${s?.selectionNext ? " has-queued" : ""}" id="model-chip" data-value="${esc5(selection.modelKey ?? "")}" title="${esc5(chipTitle)}">${icon("layers")}<span class="chip-text">${modelLabel(selection, model)}</span>${s?.selectionNext ? `<span class="queued-dot" aria-label="\u53C2\u6570\u4FEE\u6539\u5DF2\u6392\u961F"></span>` : ""}${icon("chevronDown", "caret")}</button>`;
+  const modelChip = `<button class="chip-btn model-chip${s?.selectionNext ? " has-queued" : ""}" id="model-chip" data-value="${esc6(selection.modelKey ?? "")}" title="${esc6(chipTitle)}">${icon("layers")}<span class="chip-text">${modelLabel(selection, model)}</span>${s?.selectionNext ? `<span class="queued-dot" aria-label="\u53C2\u6570\u4FEE\u6539\u5DF2\u6392\u961F"></span>` : ""}${icon("chevronDown", "caret")}</button>`;
   const permChip = permissionChipHtml(s, env);
   const waiting = !running2 && !!env?.checking;
   const choice = running2 && s.interject?.steer === true ? `<div class="delivery-seg" role="radiogroup" aria-label="\u8FD0\u884C\u4E2D\u53D1\u9001\u65B9\u5F0F"><button role="radio" aria-checked="${steer}" class="${steer ? "on" : ""}" data-delivery="steer" title="\u63D2\u8FDB\u6B63\u5728\u8FD0\u884C\u7684\u8FD9\u4E00\u8F6E\uFF0C\u6A21\u578B\u4E0B\u4E00\u6B65\u5C31\u80FD\u770B\u5230">\u63D2\u8BDD</button><button role="radio" aria-checked="${!steer}" class="${steer ? "" : "on"}" data-delivery="queue" title="\u7B49\u8FD9\u4E00\u8F6E\u7ED3\u675F\u540E\u518D\u53D1\u9001">\u6392\u961F</button></div>` : "";
-  const actions = running2 ? `<div class="run-actions">${choice}<button class="send stop" id="stop-run" title="\u505C\u6B62\u672C\u8F6E" aria-label="\u505C\u6B62\u672C\u8F6E">${icon("stop")}</button><button class="send run-send" id="send" title="${esc5(sendTitle(s))}" aria-label="${steer ? "\u63D2\u8BDD" : "\u6392\u961F"}">${icon("arrowUp")}</button></div>` : `<button class="send" id="send" title="${waiting ? "\u6B63\u5728\u68C0\u6D4B\u8FD0\u884C\u73AF\u5883\uFF0C\u7A0D\u7B49\u51E0\u79D2" : "\u53D1\u9001 (Enter)"}" aria-label="\u53D1\u9001" ${p && envOk && !waiting ? "" : "disabled"}>${icon("arrowUp")}</button>`;
+  const actions = running2 ? `<div class="run-actions">${choice}<button class="send stop" id="stop-run" title="\u505C\u6B62\u672C\u8F6E" aria-label="\u505C\u6B62\u672C\u8F6E">${icon("stop")}</button><button class="send run-send" id="send" title="${esc6(sendTitle(s))}" aria-label="${steer ? "\u63D2\u8BDD" : "\u6392\u961F"}">${icon("arrowUp")}</button></div>` : `<button class="send" id="send" title="${waiting ? "\u6B63\u5728\u68C0\u6D4B\u8FD0\u884C\u73AF\u5883\uFF0C\u7A0D\u7B49\u51E0\u79D2" : "\u53D1\u9001 (Enter)"}" aria-label="\u53D1\u9001" ${p && envOk && !waiting ? "" : "disabled"}>${icon("arrowUp")}</button>`;
   el.innerHTML = `<div class="composer-left">${attachButtonHtml()}${folder}${envChip}<span class="chip-sep">${icon("chevronRight")}</span>${modelChip}${permChip}</div>${actions}`;
   $2(".composer-box")?.classList.toggle("running", running2);
   syncDraftMark();
@@ -19587,20 +19646,20 @@ function permissionChipHtml(s, env) {
   const label = permissionLabel(p, mode) + (next !== void 0 ? " \u2192 " + permissionLabel(p, next) : "");
   const scope = permissionScope(p, s, env);
   const tip = s ? "\u6B64\u4F1A\u8BDD\u7684\u6388\u6743\u65B9\u5F0F\uFF1B\u8FD0\u884C\u4E2D\u5207\u6362\u4F1A\u5728\u4E0B\u4E00\u8F6E\u751F\u6548" : `\u65B0\u4F1A\u8BDD\u7684\u9ED8\u8BA4\u6388\u6743\u65B9\u5F0F\uFF08${env.name}${scope}\uFF09`;
-  return `<button class="chip-btn perm-chip${p.issue ? " warn" : ""}${mode === "auto" || permissionWarning(env.id, mode) ? " risky" : ""}" id="perm-chip" data-value="${esc5(mode ?? "")}" title="${esc5(tip)}">${icon(permissionIcons[mode] ?? "shield")}<span class="chip-text">${esc5(label)}</span>${icon("chevronDown", "caret")}</button>`;
+  return `<button class="chip-btn perm-chip${p.issue ? " warn" : ""}${mode === "auto" || permissionWarning(env.id, mode) ? " risky" : ""}" id="perm-chip" data-value="${esc6(mode ?? "")}" title="${esc6(tip)}">${icon(permissionIcons[mode] ?? "shield")}<span class="chip-text">${esc6(label)}</span>${icon("chevronDown", "caret")}</button>`;
 }
 function permissionMenuHtml() {
   const s = session(), env = runtime(s ? s.runtimeId : state.runtimeId), p = permissionsFor(s, env);
   if (!p) return `<div class="menu-label">\u6388\u6743\u65B9\u5F0F</div><div class="menu-static"><span class="mi-main"><span class="mi-sub">\u6B64\u8FD0\u884C\u73AF\u5883\u6CA1\u6709\u53EF\u5207\u6362\u7684\u6388\u6743\u65B9\u5F0F\u3002</span></span></div>`;
   const { mode, next } = s ? sessionPermission(s) : { mode: p.current ?? null, next: void 0 };
   const scope = permissionScope(p, s, env);
-  const head = s ? `\u6B64\u4F1A\u8BDD \xB7 ${esc5(env.name)}${scope}${busy(s) ? " \xB7 \u4E0B\u4E00\u8F6E\u751F\u6548" : ""}` : `\u65B0\u4F1A\u8BDD\u9ED8\u8BA4 \xB7 ${esc5(env.name)}${scope}`;
+  const head = s ? `\u6B64\u4F1A\u8BDD \xB7 ${esc6(env.name)}${scope}${busy(s) ? " \xB7 \u4E0B\u4E00\u8F6E\u751F\u6548" : ""}` : `\u65B0\u4F1A\u8BDD\u9ED8\u8BA4 \xB7 ${esc6(env.name)}${scope}`;
   const items = permissionChoices(p).map((m) => {
     const id = m.id ?? null, selected = id === mode, queued = next !== void 0 && id === next && id !== mode;
-    return `<button class="menu-item perm-item${selected ? " selected" : ""}" data-permission-choice="${esc5(id ?? "__default")}">${icon(permissionIcons[id] ?? "shield", "mi-icon")}<span class="mi-main"><span class="mi-name">${esc5(m.label)}${queued ? '<span class="mi-tag">\u4E0B\u4E00\u8F6E</span>' : ""}</span><span class="mi-sub">${esc5(m.description ?? "")}</span></span>${selected ? icon("check", "mi-check") : ""}</button>`;
+    return `<button class="menu-item perm-item${selected ? " selected" : ""}" data-permission-choice="${esc6(id ?? "__default")}">${icon(permissionIcons[id] ?? "shield", "mi-icon")}<span class="mi-main"><span class="mi-name">${esc6(m.label)}${queued ? '<span class="mi-tag">\u4E0B\u4E00\u8F6E</span>' : ""}</span><span class="mi-sub">${esc6(m.description ?? "")}</span></span>${selected ? icon("check", "mi-check") : ""}</button>`;
   }).join("");
-  const issue = p.issue ? `<div class="menu-note warn">${icon("alert")}<span>${esc5(p.issue)}</span></div>` : "";
-  const migrated = p.migration?.reason ? `<div class="menu-note">${icon("info")}<span>${esc5(p.migration.reason)}</span></div>` : "";
+  const issue = p.issue ? `<div class="menu-note warn">${icon("alert")}<span>${esc6(p.issue)}</span></div>` : "";
+  const migrated = p.migration?.reason ? `<div class="menu-note">${icon("info")}<span>${esc6(p.migration.reason)}</span></div>` : "";
   const exec = p.protocol === "exec-json" ? `<div class="menu-note">${icon("info")}<span>\u539F\u751F Codex \u6309\u5B98\u65B9 CLI \u7684 exec \u65B9\u5F0F\u8FD0\u884C\uFF0C\u4E0D\u80FD\u9010\u6761\u8BE2\u95EE\uFF1B\u9700\u8981\u66F4\u9AD8\u6743\u9650\u7684\u64CD\u4F5C\u7531\u539F\u751F\u6C99\u7BB1\u62D2\u7EDD\uFF0C\u6216\u4EA4\u7ED9\u81EA\u52A8\u5BA1\u67E5\u3002</span></div>` : "";
   const review = env?.id === "dsh" && p.modes?.some((m) => m.id === "auto-review") ? `<div class="menu-note">${icon("zap")}<span>\u81EA\u52A8\u5BA1\u67E5\u4F1A\u5728\u6BCF\u6B21\u5DE5\u5177\u8C03\u7528\u524D\u53E6\u53D1\u4E00\u6B21\u6A21\u578B\u8BF7\u6C42\uFF0C\u8BF7\u6C42\u6570\u5927\u7EA6\u7FFB\u500D\uFF0C\u4E5F\u66F4\u6162\u3002</span></div>` : "";
   const claudeAuto = env?.id === "claude" && p.modes?.some((m) => m.id === "auto-review") ? `<div class="menu-note">${icon("zap")}<span>\u201C\u81EA\u52A8\u5BA1\u67E5\u201D\u7528 Claude Code \u539F\u751F\u7684 auto \u6A21\u5F0F\uFF1A\u5DE5\u4F5C\u533A\u5185\u7684\u7F16\u8F91\u76F4\u63A5\u6267\u884C\uFF0C\u5176\u4ED6\u64CD\u4F5C\u5148\u7531\u540C\u4E00\u4E2A\u6A21\u578B\u5224\u65AD\u662F\u5426\u5B89\u5168\uFF0C\u4F1A\u591A\u53D1\u6A21\u578B\u8BF7\u6C42\u3002</span></div>` : "";
@@ -19613,7 +19672,7 @@ function changePermission(runtimeId, mode, current, apply3) {
     return;
   }
   closeMenu();
-  modal(warning.title, `<p class="modal-text">${esc5(warning.text)}</p>`, apply3, { confirm: warning.confirm, danger: true });
+  modal(warning.title, `<p class="modal-text">${esc6(warning.text)}</p>`, apply3, { confirm: warning.confirm, danger: true });
 }
 function runtimePermissionHtml(r) {
   const p = r.permissions;
@@ -19624,19 +19683,19 @@ function runtimePermissionHtml(r) {
 function permissionBlockHtml(r, scope, p) {
   const choices = permissionChoices(p), current = p.current ?? null, chosen = choices.find((m) => (m.id ?? null) === current) ?? choices[0];
   const named = scope ? permissionScopes[p.protocol] ?? (scope === "native" ? "\u539F\u751F\u6A21\u578B" : "\u7B2C\u4E09\u65B9\u6A21\u578B") : "", title = named ? ` \xB7 ${named}` : "";
-  const version2 = p.observed?.version ? `<span class="perm-observed">\u5DF2\u6309\u672C\u673A ${esc5(String(p.observed.version))} \u6838\u5B9E\u53EF\u7528\u6A21\u5F0F</span>` : "";
-  const migrated = p.migration?.reason ? `<p class="perm-desc">${esc5(p.migration.reason)}</p>` : "";
-  return `<div class="perm-block"><div class="perm-title">${icon("shield")}<span>\u6388\u6743\u65B9\u5F0F</span><span class="perm-scope">\xB7 ${named ? `${esc5(named)} \xB7 ` : ""}\u65B0\u4F1A\u8BDD\u9ED8\u8BA4</span></div><div class="perm-options" role="radiogroup" aria-label="${esc5(r.name)}${esc5(title)} \u6388\u6743\u65B9\u5F0F">${choices.map((m) => {
+  const version2 = p.observed?.version ? `<span class="perm-observed">\u5DF2\u6309\u672C\u673A ${esc6(String(p.observed.version))} \u6838\u5B9E\u53EF\u7528\u6A21\u5F0F</span>` : "";
+  const migrated = p.migration?.reason ? `<p class="perm-desc">${esc6(p.migration.reason)}</p>` : "";
+  return `<div class="perm-block"><div class="perm-title">${icon("shield")}<span>\u6388\u6743\u65B9\u5F0F</span><span class="perm-scope">\xB7 ${named ? `${esc6(named)} \xB7 ` : ""}\u65B0\u4F1A\u8BDD\u9ED8\u8BA4</span></div><div class="perm-options" role="radiogroup" aria-label="${esc6(r.name)}${esc6(title)} \u6388\u6743\u65B9\u5F0F">${choices.map((m) => {
     const id = m.id ?? null;
-    return `<button class="perm-option${id === current ? " active" : ""}" role="radio" aria-checked="${id === current}" data-runtime-permission="${esc5(r.id)}|${esc5(id ?? "__default")}|${esc5(scope)}" title="${esc5(m.description ?? "")}">${icon(permissionIcons[id] ?? "shield")}${esc5(m.label)}</button>`;
-  }).join("")}</div><p class="perm-desc">${esc5(chosen?.description ?? p.description ?? "")}</p>${migrated}${version2}${p.issue ? `<p class="perm-issue">${icon("alert")}<span>${esc5(p.issue)}</span></p>` : ""}</div>`;
+    return `<button class="perm-option${id === current ? " active" : ""}" role="radio" aria-checked="${id === current}" data-runtime-permission="${esc6(r.id)}|${esc6(id ?? "__default")}|${esc6(scope)}" title="${esc6(m.description ?? "")}">${icon(permissionIcons[id] ?? "shield")}${esc6(m.label)}</button>`;
+  }).join("")}</div><p class="perm-desc">${esc6(chosen?.description ?? p.description ?? "")}</p>${migrated}${version2}${p.issue ? `<p class="perm-issue">${icon("alert")}<span>${esc6(p.issue)}</span></p>` : ""}</div>`;
 }
 function renderBanner() {
   const el = $2("#composer-banner");
   if (!el) return;
   const s = session(), notes = [];
   if (s?.selectionIssue) {
-    el.innerHTML = `<div class="banner warn" id="session-model-warning">${icon("alert")}<span>${esc5(s.selectionIssue)}</span><span class="banner-actions"><button class="btn sm" id="refresh-session-model">\u5237\u65B0\u6765\u6E90</button><button class="btn primary sm" id="rebind-session-model" ${busy(s) ? "disabled" : ""}>\u91CD\u65B0\u786E\u8BA4\u6A21\u578B</button></span></div>`;
+    el.innerHTML = `<div class="banner warn" id="session-model-warning">${icon("alert")}<span>${esc6(s.selectionIssue)}</span><span class="banner-actions"><button class="btn sm" id="refresh-session-model">\u5237\u65B0\u6765\u6E90</button><button class="btn primary sm" id="rebind-session-model" ${busy(s) ? "disabled" : ""}>\u91CD\u65B0\u786E\u8BA4\u6A21\u578B</button></span></div>`;
     return;
   }
   if (!s && project()) {
@@ -19655,8 +19714,8 @@ function renderBanner() {
   }
   const limit = s && !busy(s) ? limitNotice(s.lastFailure) : "";
   if (limit) notes.push(limit);
-  const queued = s?.selectionNext ? `<div class="banner" id="queued-params-banner">${icon("clock")}<span>\u53C2\u6570\u4FEE\u6539\u5DF2\u6392\u961F\uFF1A${esc5(paramsText(s.selectionNext))}\uFF0C\u672C\u8F6E\u7ED3\u675F\u540E\u81EA\u52A8\u5E94\u7528\u3002</span><span class="banner-actions"><button class="btn sm" id="cancel-queued-params">\u53D6\u6D88</button></span></div>` : "";
-  el.innerHTML = queued + notes.map((text3) => `<div class="banner">${icon("info")}<span>${esc5(text3)}</span></div>`).join("");
+  const queued = s?.selectionNext ? `<div class="banner" id="queued-params-banner">${icon("clock")}<span>\u53C2\u6570\u4FEE\u6539\u5DF2\u6392\u961F\uFF1A${esc6(paramsText(s.selectionNext))}\uFF0C\u672C\u8F6E\u7ED3\u675F\u540E\u81EA\u52A8\u5E94\u7528\u3002</span><span class="banner-actions"><button class="btn sm" id="cancel-queued-params">\u53D6\u6D88</button></span></div>` : "";
+  el.innerHTML = queued + notes.map((text3) => `<div class="banner">${icon("info")}<span>${esc6(text3)}</span></div>`).join("");
 }
 function ringSvg(ratio) {
   const r = 8.5, c = 2 * Math.PI * r, level = ratio == null ? "none" : ratio >= 0.85 ? "high" : ratio >= 0.6 ? "mid" : "low";
@@ -19684,9 +19743,9 @@ function renderFooter() {
   const cacheText = cache ? `${cache.status === "estimated" ? "\u2248" : ""}${pct(cache.ratio)}` : "\u672A\u62A5\u544A";
   const cacheTitle = cache ? `\u6700\u8FD1\u4E00\u6B21\u8BF7\u6C42\u547D\u4E2D ${pct(cache.ratio)}\uFF0C\u672C\u4F1A\u8BDD\u7D2F\u8BA1 ${pct(cache.sessionRatio)}${cache.status === "estimated" ? "\uFF08\u4F30\u7B97\uFF09" : ""}` : "\u5F53\u524D\u8FD0\u884C\u73AF\u5883\u6216\u6A21\u578B\u6E90\u6CA1\u6709\u62A5\u544A\u7F13\u5B58\u547D\u4E2D";
   const ctxTitle = ctx.used !== null ? `\u4E0A\u4E0B\u6587\u5DF2\u7528 ${compact(ctx.used)} / ${compact(ctx.window)} tokens` : ctx.window ? `\u4E0A\u4E0B\u6587\u7A97\u53E3 ${compact(ctx.window)} tokens\uFF0C\u8FD8\u6CA1\u6709\u7528\u91CF\u6570\u636E` : "\u8FD8\u6CA1\u6709\u4E0A\u4E0B\u6587\u6570\u636E";
-  patchHtml(el, `<span class="footer-left"><span class="dot ${esc5(s.status)}"></span><span class="footer-status">${esc5(live ? activityOf(s).long : labels[s.status] ?? s.status)}</span>${live ? `<span class="footer-elapsed">\xB7 ${elapsed(turnStartedAt())}</span>` : ""}</span>
-    <span class="footer-center"><span class="metric" title="${esc5(rateTitle)}">${icon("zap")}${rateText}</span><span class="metric-sep"></span><span class="metric" title="${esc5(cacheTitle)}">${icon("database")}\u7F13\u5B58\u547D\u4E2D ${cacheText}</span></span>
-    <span class="footer-right" title="${esc5(ctxTitle)}" id="context-ring"><span class="ctx-text">${ctx.ratio !== null ? pct(ctx.ratio) : ctx.window ? compact(ctx.window) : "\u2014"}</span>${ringSvg(ctx.ratio)}</span>`);
+  patchHtml(el, `<span class="footer-left"><span class="dot ${esc6(s.status)}"></span><span class="footer-status">${esc6(live ? activityOf(s).long : labels[s.status] ?? s.status)}</span>${live ? `<span class="footer-elapsed">\xB7 ${elapsed(turnStartedAt())}</span>` : ""}</span>
+    <span class="footer-center"><span class="metric" title="${esc6(rateTitle)}">${icon("zap")}${rateText}</span><span class="metric-sep"></span><span class="metric" title="${esc6(cacheTitle)}">${icon("database")}\u7F13\u5B58\u547D\u4E2D ${cacheText}</span></span>
+    <span class="footer-right" title="${esc6(ctxTitle)}" id="context-ring"><span class="ctx-text">${ctx.ratio !== null ? pct(ctx.ratio) : ctx.window ? compact(ctx.window) : "\u2014"}</span>${ringSvg(ctx.ratio)}</span>`);
 }
 function tick() {
   const live = state.snapshot?.sessions.some(busy);
@@ -19784,11 +19843,11 @@ function toolBlock(key, t, running2, names = /* @__PURE__ */ new Map()) {
   const start2 = t.start, end = t.end, raw = start2?.name ?? end?.name ?? "\u5DE5\u5177", name = toolNames[raw] ?? raw;
   const status = toolStatus(t, running2), summary = attachmentSummary(toolSummary(start2 ?? end), names), file = start2?.data ? toolFilePath(argsOf(start2.data)) : null;
   const input = start2?.data ? clip2(pretty(argsOf(start2.data))) : "", output = clip2(toolOutput(t));
-  return `<details class="tool ${status}" data-expand="tool-${esc5(key)}"><summary>${toolMark(status)}<span class="tool-name">${esc5(name)}</span><span class="tool-summary"${file ? ` data-link-path="${esc5(file)}"` : ""}>${esc5(summary === raw ? "" : summary)}</span>${icon("chevronRight", "tool-caret")}</summary><div class="tool-body">${input && input !== "{}" ? `<div class="tool-label">\u8F93\u5165</div><pre>${esc5(input)}</pre>` : ""}${output ? `<div class="tool-label">\u8F93\u51FA</div><pre>${esc5(output)}</pre>` : ""}${!input && !output ? '<div class="tool-label">\u6CA1\u6709\u53EF\u663E\u793A\u7684\u53C2\u6570</div>' : ""}</div></details>`;
+  return `<details class="tool ${status}" data-expand="tool-${esc6(key)}"><summary>${toolMark(status)}<span class="tool-name">${esc6(name)}</span><span class="tool-summary"${file ? ` data-link-path="${esc6(file)}"` : ""}>${esc6(summary === raw ? "" : summary)}</span>${icon("chevronRight", "tool-caret")}</summary><div class="tool-body">${input && input !== "{}" ? `<div class="tool-label">\u8F93\u5165</div><pre>${esc6(input)}</pre>` : ""}${output ? `<div class="tool-label">\u8F93\u51FA</div><pre>${esc6(output)}</pre>` : ""}${!input && !output ? '<div class="tool-label">\u6CA1\u6709\u53EF\u663E\u793A\u7684\u53C2\u6570</div>' : ""}</div></details>`;
 }
 function foldBlock(run, running2, open2) {
   const first = run.find((b) => b.work.tool).key.replace(/^tool:/, ""), id = `tools-${first}`, { status, title, detail } = foldSummary(run, running2);
-  return [`tools:${first}`, `<details class="tool tool-fold ${status}" data-expand="${esc5(id)}"><summary>${toolMark(status)}<span class="tool-name">${esc5(title)}</span><span class="tool-summary">${esc5(detail)}</span>${icon("chevronRight", "tool-caret")}</summary><div class="tool-fold-body">${open2.has(id) ? run.map((b) => b.html()).join("") : ""}</div></details>`];
+  return [`tools:${first}`, `<details class="tool tool-fold ${status}" data-expand="${esc6(id)}"><summary>${toolMark(status)}<span class="tool-name">${esc6(title)}</span><span class="tool-summary">${esc6(detail)}</span>${icon("chevronRight", "tool-caret")}</summary><div class="tool-fold-body">${open2.has(id) ? run.map((b) => b.html()).join("") : ""}</div></details>`];
 }
 function diffStat(text3) {
   let files = 0, adds = 0, dels = 0;
@@ -19801,7 +19860,7 @@ function diffStat(text3) {
 }
 function diffHtml(text3) {
   if (!text3) return '<div class="pane-empty small">\u6CA1\u6709\u6587\u672C\u5DEE\u5F02\u3002</div>';
-  return `<pre class="diff">${clip2(text3, 3e5).split("\n").map((l) => `<span class="dl${l.startsWith("diff ") || l.startsWith("+++") || l.startsWith("---") || l.startsWith("index ") ? " dh" : l.startsWith("+") ? " da" : l.startsWith("-") ? " dd" : l.startsWith("@@") ? " dk" : ""}">${esc5(l) || " "}</span>`).join("")}</pre>`;
+  return `<pre class="diff">${clip2(text3, 3e5).split("\n").map((l) => `<span class="dl${l.startsWith("diff ") || l.startsWith("+++") || l.startsWith("---") || l.startsWith("index ") ? " dh" : l.startsWith("+") ? " da" : l.startsWith("-") ? " dd" : l.startsWith("@@") ? " dk" : ""}">${esc6(l) || " "}</span>`).join("")}</pre>`;
 }
 function approvalSummary(e) {
   const d = e.data ?? {};
@@ -19816,24 +19875,24 @@ function approvalSummary(e) {
 var REVIEW_RISK = { low: "\u4F4E\u98CE\u9669", medium: "\u4E2D\u7B49\u98CE\u9669", high: "\u9AD8\u98CE\u9669" };
 function reviewNote(review) {
   if (!review?.reason) return "";
-  return `<div class="approval-review ${esc5(review.risk ?? "")}">${icon("shield")}<span>\u81EA\u52A8\u5BA1\u67E5${review.risk && REVIEW_RISK[review.risk] ? `\uFF08${REVIEW_RISK[review.risk]}\uFF09` : ""}\uFF1A${esc5(review.reason)}</span></div>`;
+  return `<div class="approval-review ${esc6(review.risk ?? "")}">${icon("shield")}<span>\u81EA\u52A8\u5BA1\u67E5${review.risk && REVIEW_RISK[review.risk] ? `\uFF08${REVIEW_RISK[review.risk]}\uFF09` : ""}\uFF1A${esc6(review.reason)}</span></div>`;
 }
 function approvalBlock(e, resolved) {
   const done = resolved.get(e.approvalId);
-  if (done !== void 0) return `<div class="approval-done ${done === "reject" || done === "reject-session" ? "rejected" : ""}">${icon(done === "expired" ? "clock" : done?.startsWith?.("reject") ? "close" : "check")}<span>${e.type === "question" ? "\u95EE\u9898" : "\u6388\u6743"}${esc5(resolvedLabels[done] ?? "\u5DF2\u5904\u7406")}</span><span class="muted">${esc5(e.name ?? "")}</span></div>`;
+  if (done !== void 0) return `<div class="approval-done ${done === "reject" || done === "reject-session" ? "rejected" : ""}">${icon(done === "expired" ? "clock" : done?.startsWith?.("reject") ? "close" : "check")}<span>${e.type === "question" ? "\u95EE\u9898" : "\u6388\u6743"}${esc6(resolvedLabels[done] ?? "\u5DF2\u5904\u7406")}</span><span class="muted">${esc6(e.name ?? "")}</span></div>`;
   const summary = approvalSummary(e), choices = e.choices?.length ? e.choices : ["approve", "reject"];
   let buttons;
   if (choices.includes("native")) buttons = '<button class="btn primary sm" data-approval-native="true">\u5728\u5B8C\u6574\u5DE5\u5177\u754C\u9762\u5904\u7406</button>';
-  else if (e.type === "question") buttons = `<button class="btn primary sm" data-question="${esc5(e.approvalId)}">\u56DE\u7B54</button><button class="btn sm danger" data-approval="${esc5(e.approvalId)}" data-choice="reject">\u4E0D\u56DE\u7B54</button>${hasNativeUi(session()?.runtimeId) ? '<button class="btn sm" data-approval-native="true">\u5728\u539F\u751F\u754C\u9762\u5904\u7406</button>' : ""}`;
-  else buttons = choices.filter((c) => choiceLabels[c]).map((c) => `<button class="btn sm${c === "approve" ? " primary" : c.startsWith("reject") ? " danger" : ""}" data-approval="${esc5(e.approvalId)}" data-choice="${esc5(c)}">${choiceLabels[c]}</button>`).join("");
-  return `<div class="approval-card"><div class="approval-head">${icon(e.type === "question" ? "info" : "key")}<b>${e.type === "question" ? "Agent \u9700\u8981\u4F60\u8865\u5145\u4FE1\u606F" : "Agent \u8BF7\u6C42\u6388\u6743"}</b>${e.name ? `<span class="muted">${esc5(e.name)}</span>` : ""}</div>${summary ? `<div class="approval-summary">${esc5(summary)}</div>` : ""}${reviewNote(e.data?.review)}<details class="approval-details" data-expand="approval-${esc5(e.approvalId)}"><summary>\u8BE6\u7EC6\u53C2\u6570</summary><pre>${esc5(clip2(pretty(e.data)))}</pre></details><div class="approval-actions">${buttons}</div></div>`;
+  else if (e.type === "question") buttons = `<button class="btn primary sm" data-question="${esc6(e.approvalId)}">\u56DE\u7B54</button><button class="btn sm danger" data-approval="${esc6(e.approvalId)}" data-choice="reject">\u4E0D\u56DE\u7B54</button>${hasNativeUi(session()?.runtimeId) ? '<button class="btn sm" data-approval-native="true">\u5728\u539F\u751F\u754C\u9762\u5904\u7406</button>' : ""}`;
+  else buttons = choices.filter((c) => choiceLabels[c]).map((c) => `<button class="btn sm${c === "approve" ? " primary" : c.startsWith("reject") ? " danger" : ""}" data-approval="${esc6(e.approvalId)}" data-choice="${esc6(c)}">${choiceLabels[c]}</button>`).join("");
+  return `<div class="approval-card"><div class="approval-head">${icon(e.type === "question" ? "info" : "key")}<b>${e.type === "question" ? "Agent \u9700\u8981\u4F60\u8865\u5145\u4FE1\u606F" : "Agent \u8BF7\u6C42\u6388\u6743"}</b>${e.name ? `<span class="muted">${esc6(e.name)}</span>` : ""}</div>${summary ? `<div class="approval-summary">${esc6(summary)}</div>` : ""}${reviewNote(e.data?.review)}<details class="approval-details" data-expand="approval-${esc6(e.approvalId)}"><summary>\u8BE6\u7EC6\u53C2\u6570</summary><pre>${esc6(clip2(pretty(e.data)))}</pre></details><div class="approval-actions">${buttons}</div></div>`;
 }
 function planBlock(e, live) {
   const d = e.data ?? {}, items = (d.entries ?? d.plan ?? []).map((x2) => ({ text: x2.content ?? x2.step ?? "", status: String(x2.status ?? "") }));
   if (!items.length) return miscBlock(e, "list", "\u8BA1\u5212");
   const doing = (x2) => /progress/i.test(x2.status), stalled = !live && items.some(doing);
   const mark = (x2) => x2.status === "completed" ? icon("check") : doing(x2) ? live ? '<span class="spinner"></span>' : '<span class="plan-stalled" title="\u8FD9\u4E00\u8F6E\u5DF2\u7ECF\u7ED3\u675F\uFF0C\u8FD9\u4E00\u9879\u6CA1\u6709\u5B8C\u6210"></span>' : '<span class="plan-dot"></span>';
-  return `<div class="plan-card"><div class="plan-head">${icon("list")}<span>\u8BA1\u5212</span><span class="muted">${items.filter((x2) => x2.status === "completed").length}/${items.length}</span>${stalled ? '<span class="plan-state">\u672A\u5B8C\u6210</span>' : ""}</div><ul>${items.map((x2) => `<li class="${doing(x2) ? live ? "doing" : "stalled" : x2.status === "completed" ? "done" : ""}">${mark(x2)}<span>${esc5(x2.text)}</span></li>`).join("")}</ul></div>`;
+  return `<div class="plan-card"><div class="plan-head">${icon("list")}<span>\u8BA1\u5212</span><span class="muted">${items.filter((x2) => x2.status === "completed").length}/${items.length}</span>${stalled ? '<span class="plan-state">\u672A\u5B8C\u6210</span>' : ""}</div><ul>${items.map((x2) => `<li class="${doing(x2) ? live ? "doing" : "stalled" : x2.status === "completed" ? "done" : ""}">${mark(x2)}<span>${esc6(x2.text)}</span></li>`).join("")}</ul></div>`;
 }
 var steerNotes = {
   pending: ["clock", "\u63D2\u8BDD \xB7 \u7B49\u5F85\u63D2\u5165\u4E0B\u4E00\u6B65"],
@@ -19845,16 +19904,16 @@ function userBlock(e, discarded, steers) {
   let note = "";
   if (e.delivery === "steer") {
     const s = steers.get(e.steerId), key = steerNotes[s?.state] ? s.state : "pending", [ico, text3] = steerNotes[key];
-    note = `<div class="user-note ${key}"${s?.reason ? ` title="${esc5(s.reason)}"` : ""}>${icon(ico)}<span>${esc5(text3)}${key === "failed" && s?.reason ? `\uFF1A${esc5(s.reason)}` : ""}</span></div>`;
+    note = `<div class="user-note ${key}"${s?.reason ? ` title="${esc6(s.reason)}"` : ""}>${icon(ico)}<span>${esc6(text3)}${key === "failed" && s?.reason ? `\uFF1A${esc6(s.reason)}` : ""}</span></div>`;
   } else if (e.fromQueue?.length) note = `<div class="user-note queued">${icon("clock")}<span>${e.fromQueue.length > 1 ? `\u6392\u961F\u7684 ${e.fromQueue.length} \u6761\u6D88\u606F\uFF0C\u5408\u5E76\u53D1\u51FA` : "\u6392\u961F\u6D88\u606F\uFF0C\u4E0A\u4E00\u8F6E\u7ED3\u675F\u540E\u53D1\u51FA"}</span></div>`;
-  return `<article class="message user-message${e.delivery === "steer" ? " steer" : ""}">${userMediaHtml(e.attachments, discarded)}${e.text ? `<div class="user-bubble">${esc5(e.text)}</div>` : ""}${note}<div class="user-meta">${clock(e.at)}</div></article>`;
+  return `<article class="message user-message${e.delivery === "steer" ? " steer" : ""}">${userMediaHtml(e.attachments, discarded)}${e.text ? `<div class="user-bubble">${esc6(e.text)}</div>` : ""}${note}<div class="user-meta">${clock(e.at)}</div></article>`;
 }
 function miscBlock(e, ico, label) {
-  return `<details class="tool" data-expand="${esc5(e.id)}"><summary>${icon(ico, "tool-status")}<span class="tool-name">${label}</span><span class="tool-summary">${esc5(toolSummary(e))}</span>${icon("chevronRight", "tool-caret")}</summary><div class="tool-body"><pre>${esc5(clip2(e.text ?? pretty(e.data ?? {})))}</pre></div></details>`;
+  return `<details class="tool" data-expand="${esc6(e.id)}"><summary>${icon(ico, "tool-status")}<span class="tool-name">${label}</span><span class="tool-summary">${esc6(toolSummary(e))}</span>${icon("chevronRight", "tool-caret")}</summary><div class="tool-body"><pre>${esc6(clip2(e.text ?? pretty(e.data ?? {})))}</pre></div></details>`;
 }
 function diffBlock(e) {
   const text3 = typeof e.text === "string" && e.text ? e.text : null;
-  return `<details class="tool diff-event" data-expand="diff-${esc5(e.turnId ?? e.id)}"><summary>${icon("fileDiff", "tool-status")}<span class="tool-name">\u4EE3\u7801\u53D8\u66F4</span><span class="tool-summary">${esc5(text3 ? diffStat(text3) : "\u5DE5\u4F5C\u533A\u53D8\u66F4")}</span>${icon("chevronRight", "tool-caret")}</summary><div class="tool-body">${text3 ? diffHtml(text3) : `<pre>${esc5(clip2(pretty(e.data)))}</pre>`}</div></details>`;
+  return `<details class="tool diff-event" data-expand="diff-${esc6(e.turnId ?? e.id)}"><summary>${icon("fileDiff", "tool-status")}<span class="tool-name">\u4EE3\u7801\u53D8\u66F4</span><span class="tool-summary">${esc6(text3 ? diffStat(text3) : "\u5DE5\u4F5C\u533A\u53D8\u66F4")}</span>${icon("chevronRight", "tool-caret")}</summary><div class="tool-body">${text3 ? diffHtml(text3) : `<pre>${esc6(clip2(pretty(e.data)))}</pre>`}</div></details>`;
 }
 function turnEndBlock(e) {
   const t = e.turnId ? metrics.turn(e.turnId) : null, why = ["completed", "paused"].includes(e.status) ? "" : stopLabel(e.reason), parts = [{ completed: "\u672C\u8F6E\u5B8C\u6210", interrupted: "\u5DF2\u505C\u6B62", failed: "\u672C\u8F6E\u672A\u5B8C\u6210", paused: "\u5DF2\u6682\u505C" }[e.status] ?? "\u672C\u8F6E\u7ED3\u675F", ...why ? [why] : [], clock(e.at)];
@@ -19862,7 +19921,7 @@ function turnEndBlock(e) {
   if (t?.output != null) parts.push(`\u8F93\u51FA ${compact(t.output)}`);
   if (t?.cacheRatio != null) parts.push(`\u7F13\u5B58 ${t.cacheStatus === "estimated" ? "\u2248" : ""}${pct(t.cacheRatio)}`);
   parts.push(...turnExtras(e.stats));
-  return `<div class="turn-end ${esc5(e.status)}"><span>${parts.map(esc5).join(" \xB7 ")}</span></div>`;
+  return `<div class="turn-end ${esc6(e.status)}"><span>${parts.map(esc6).join(" \xB7 ")}</span></div>`;
 }
 function renderChat(quiet = false) {
   const chat = $2("#chat"), scroller = $2("#scroller");
@@ -19875,6 +19934,7 @@ function renderChat(quiet = false) {
   };
   const open2 = new Set([...chat.querySelectorAll("details[data-expand][open]")].map((el) => el.dataset.expand));
   const resolved = new Map(events.filter((e) => e.type === "approval-resolved").map((e) => [e.approvalId, e.choice]));
+  const rulesUndone = new Set(events.filter((e) => e.type === "notice" && e.source === "long-term-rule" && e.undone).map((e) => e.ruleId));
   const discarded = new Set(events.filter((e) => e.type === "attachments-discarded").flatMap((e) => e.attachmentIds ?? []));
   const names = new Map(events.filter((e) => e.type === "user").flatMap((e) => (e.attachments ?? []).map((a3) => [a3.id, a3.name])));
   const steers = new Map(events.filter((e) => e.type === "steer-state").map((e) => [e.steerId, e]));
@@ -19897,7 +19957,7 @@ function renderChat(quiet = false) {
     else if (e.type === "text") {
       if (!e.text?.trim()) continue;
       add(`text:${e.id}`, `<article class="message"><div class="message-content markdown">${cachedMarkdown(e)}</div><div class="message-tools"><button class="icon-btn xs copy-answer" title="\u590D\u5236">${icon("copy")}</button></div></article>`);
-    } else if (e.type === "thinking") add(`thinking:${e.id}`, () => `<details class="thinking" data-expand="thinking-${esc5(e.id)}"><summary>${icon("bulb")}<span>\u601D\u8003\u8FC7\u7A0B</span><span class="muted">${(e.text ?? "").length.toLocaleString()} \u5B57</span>${icon("chevronRight", "tool-caret")}</summary><div class="thinking-body">${esc5(clip2(e.text ?? "", 6e4))}</div></details>`, { thinking: true });
+    } else if (e.type === "thinking") add(`thinking:${e.id}`, () => `<details class="thinking" data-expand="thinking-${esc6(e.id)}"><summary>${icon("bulb")}<span>\u601D\u8003\u8FC7\u7A0B</span><span class="muted">${(e.text ?? "").length.toLocaleString()} \u5B57</span>${icon("chevronRight", "tool-caret")}</summary><div class="thinking-body">${esc6(clip2(e.text ?? "", 6e4))}</div></details>`, { thinking: true });
     else if (["tool-start", "tool-output", "tool-end"].includes(e.type)) {
       const key = toolKey(e);
       if (!key) {
@@ -19915,13 +19975,15 @@ function renderChat(quiet = false) {
       if (lastDiff.get(e.turnId ?? "none") === e) add(`diff:${e.turnId ?? e.id}`, diffBlock(e));
     } else if (e.type === "approval" && ["approve", "approve-session"].includes(resolved.get(e.approvalId))) add(`approval:${e.approvalId ?? e.id}`, () => approvalBlock(e, resolved), { approval: true });
     else if (e.type === "approval" || e.type === "question") add(`approval:${e.approvalId ?? e.id}`, approvalBlock(e, resolved));
-    else if (e.type === "notice" && e.source === "auto-review" && /^自动审查已允许/.test(e.text ?? "")) add(`note:${e.id}`, () => `<div class="event-note notice quiet" title="${esc5(e.text)}">${icon("shield")}<span>${esc5(e.text)}</span></div>`, { review: true });
+    else if (e.type === "notice" && e.source === "long-term-rule") {
+      if (!e.undone) add(`note:${e.id}`, ruleNoticeHtml(e, rulesUndone.has(e.ruleId)));
+    } else if (e.type === "notice" && e.source === "auto-review" && /^自动审查已允许/.test(e.text ?? "")) add(`note:${e.id}`, () => `<div class="event-note notice quiet" title="${esc6(e.text)}">${icon("shield")}<span>${esc6(e.text)}</span></div>`, { review: true });
     else if (e.type === "error" || e.type === "notice") {
       if (e.type === "error" && upstreamSaid.has(`${e.turnId}\0${e.text}`)) continue;
       const note = e.type === "notice" && e.source === "gateway" ? gatewayNotice(e.text) : null;
       if (note?.transient) continue;
       const quiet2 = e.type === "notice" && e.source === "native-warning";
-      add(`note:${e.id}`, `<div class="event-note ${e.type}${quiet2 ? " quiet" : ""}"${quiet2 ? ` title="${esc5(e.text)}"` : ""}>${icon(e.type === "error" ? "alert" : "info")}<span>${esc5(note ? `${note.long}${note.detail ? ` \xB7 ${note.detail}` : ""}` : e.text)}</span>${e.detail ? `<details><summary>\u8BCA\u65AD\u8BE6\u60C5</summary><pre>${esc5(e.detail)}</pre></details>` : ""}</div>`);
+      add(`note:${e.id}`, `<div class="event-note ${e.type}${quiet2 ? " quiet" : ""}"${quiet2 ? ` title="${esc6(e.text)}"` : ""}>${icon(e.type === "error" ? "alert" : "info")}<span>${esc6(note ? `${note.long}${note.detail ? ` \xB7 ${note.detail}` : ""}` : e.text)}</span>${e.detail ? `<details><summary>\u8BCA\u65AD\u8BE6\u60C5</summary><pre>${esc6(e.detail)}</pre></details>` : ""}</div>`);
     } else if (e.type === "upstream-error") {
       const last = blocks.at(-1);
       if (sameUpstream(last?.upstream?.e, e)) {
@@ -19934,7 +19996,7 @@ function renderChat(quiet = false) {
     } else if (e.type === "turn-end") {
       const said = new Set(events.filter((x2) => x2.turnId === e.turnId && ["error", "upstream-error"].includes(x2.type)).flatMap((x2) => [x2.text, x2.message]));
       const note = e.status === "completed" ? "" : stopNote(e.reason, said);
-      if (note) add(`stop:${e.id}`, `<div class="event-note error">${icon("alert")}<span>${esc5(note)}</span></div>`);
+      if (note) add(`stop:${e.id}`, `<div class="event-note error">${icon("alert")}<span>${esc6(note)}</span></div>`);
       add(`end:${e.id}`, turnEndBlock(e));
     }
   }
@@ -19942,7 +20004,7 @@ function renderChat(quiet = false) {
   else if (!events.length) add("empty", `<div class="empty-chat">${icon("spark")}<span>\u4F1A\u8BDD\u5DF2\u51C6\u5907\u597D\uFF0C\u53D1\u9001\u7B2C\u4E00\u4E2A\u4EFB\u52A1\u5F00\u59CB\u534F\u4F5C\u3002</span></div>`);
   if (running2) {
     const now = activityOf(s);
-    add("working", `<div class="working" data-state="${esc5(now.kind)}"><span class="pulse"></span><span class="working-label">${esc5(now.long)}</span>${now.detail ? `<span class="working-detail" title="${esc5(now.detail)}">${esc5(now.detail)}</span>` : ""}<span class="working-elapsed" id="working-elapsed">${elapsed(turnStartedAt())}</span></div>`);
+    add("working", `<div class="working" data-state="${esc6(now.kind)}"><span class="pulse"></span><span class="working-label">${esc6(now.long)}</span>${now.detail ? `<span class="working-detail" title="${esc6(now.detail)}">${esc6(now.detail)}</span>` : ""}<span class="working-elapsed" id="working-elapsed">${elapsed(turnStartedAt())}</span></div>`);
   }
   const near = scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight < 160;
   patchBlocks(chat, foldRuns(blocks).map((b) => b.fold ? foldBlock(b.fold, running2, open2) : [b.key, b.work ? b.html() : b.html]), quiet);
@@ -20058,11 +20120,11 @@ function fileMenuHtml() {
   const f2 = menu.file, here = f2.inside && f2.exists, name = f2.path.split(/[\\/]/).filter(Boolean).pop() ?? f2.path;
   const item = (id, glyph, label, on = true) => `<button class="menu-item" data-file-menu="${id}" ${on ? "" : "disabled"}>${icon(glyph, "mi-icon")}<span class="mi-main"><span class="mi-name">${label}</span></span></button>`;
   const note = here ? "" : `<div class="menu-note">${icon("info")}<span>${f2.inside ? "\u8FD9\u4E2A\u6587\u4EF6\u5DF2\u7ECF\u4E0D\u5B58\u5728" : "\u4E0D\u5728\u5F53\u524D\u5DE5\u4F5C\u6587\u4EF6\u5939\u91CC\uFF0C\u53EA\u80FD\u590D\u5236\u8DEF\u5F84"}</span></div>`;
-  return `<div class="menu-label" title="${esc5(f2.path)}">${esc5(name)}</div>${item("preview", "eye", "\u9884\u89C8", here && !!f2.preview)}${item("reveal", "folder", "\u5728\u8D44\u6E90\u7BA1\u7406\u5668\u4E2D\u663E\u793A", here)}${item("open", "external", "\u7528\u9ED8\u8BA4\u5E94\u7528\u6253\u5F00", here && f2.kind === "file" && f2.openable !== false)}${item("copy", "copy", "\u590D\u5236\u8DEF\u5F84")}${note}${here && f2.kind === "file" && f2.openable === false ? `<div class="menu-note">${icon("info")}<span>\u8FD9\u7C7B\u6587\u4EF6\u53EF\u80FD\u4F1A\u8FD0\u884C\u7A0B\u5E8F\uFF0C\u4E0D\u80FD\u76F4\u63A5\u6253\u5F00\uFF0C\u53EF\u4EE5\u5728\u8D44\u6E90\u7BA1\u7406\u5668\u91CC\u67E5\u770B</span></div>` : ""}`;
+  return `<div class="menu-label" title="${esc6(f2.path)}">${esc6(name)}</div>${item("preview", "eye", "\u9884\u89C8", here && !!f2.preview)}${item("reveal", "folder", "\u5728\u8D44\u6E90\u7BA1\u7406\u5668\u4E2D\u663E\u793A", here)}${item("open", "external", "\u7528\u9ED8\u8BA4\u5E94\u7528\u6253\u5F00", here && f2.kind === "file" && f2.openable !== false)}${item("copy", "copy", "\u590D\u5236\u8DEF\u5F84")}${note}${here && f2.kind === "file" && f2.openable === false ? `<div class="menu-note">${icon("info")}<span>\u8FD9\u7C7B\u6587\u4EF6\u53EF\u80FD\u4F1A\u8FD0\u884C\u7A0B\u5E8F\uFF0C\u4E0D\u80FD\u76F4\u63A5\u6253\u5F00\uFF0C\u53EF\u4EE5\u5728\u8D44\u6E90\u7BA1\u7406\u5668\u91CC\u67E5\u770B</span></div>` : ""}`;
 }
 function linkMenuHtml() {
   const { host } = new URL(menu.url);
-  return `<div class="menu-label" title="${esc5(menu.url)}">${esc5(host)}</div><button class="menu-item" data-link-menu="open">${icon("external", "mi-icon")}<span class="mi-main"><span class="mi-name">\u5728\u6D4F\u89C8\u5668\u4E2D\u6253\u5F00</span></span></button><button class="menu-item" data-link-menu="copy">${icon("copy", "mi-icon")}<span class="mi-main"><span class="mi-name">\u590D\u5236\u94FE\u63A5</span></span></button>`;
+  return `<div class="menu-label" title="${esc6(menu.url)}">${esc6(host)}</div><button class="menu-item" data-link-menu="open">${icon("external", "mi-icon")}<span class="mi-main"><span class="mi-name">\u5728\u6D4F\u89C8\u5668\u4E2D\u6253\u5F00</span></span></button><button class="menu-item" data-link-menu="copy">${icon("copy", "mi-icon")}<span class="mi-main"><span class="mi-name">\u590D\u5236\u94FE\u63A5</span></span></button>`;
 }
 async function previewFile(f2, line) {
   if (!f2.inside || !f2.exists) throw new Error(f2.inside ? "\u8FD9\u4E2A\u6587\u4EF6\u5DF2\u7ECF\u4E0D\u5B58\u5728" : "\u8FD9\u4E2A\u6587\u4EF6\u4E0D\u5728\u5F53\u524D\u5DE5\u4F5C\u6587\u4EF6\u5939\u91CC");
@@ -20090,17 +20152,17 @@ async function fileMenuAction(id, f2) {
   toast("\u5DF2\u590D\u5236\u8DEF\u5F84");
 }
 function folderMenuHtml() {
-  return `<div class="menu-label">\u5DE5\u4F5C\u6587\u4EF6\u5939</div>${state.snapshot.projects.map((p) => `<button class="menu-item${p.id === state.projectId ? " selected" : ""}" data-pick-folder="${p.id}">${icon("folder", "mi-icon")}<span class="mi-main"><span class="mi-name">${esc5(p.name)}</span><span class="mi-sub">${esc5(p.path)}</span></span>${p.id === state.projectId ? icon("check", "mi-check") : ""}</button>`).join("")}${state.snapshot.projects.length ? '<div class="menu-sep"></div>' : ""}<button class="menu-item" id="menu-open-folder">${icon("folderPlus", "mi-icon")}<span class="mi-main"><span class="mi-name">\u6253\u5F00\u6587\u4EF6\u5939\u2026</span></span></button>`;
+  return `<div class="menu-label">\u5DE5\u4F5C\u6587\u4EF6\u5939</div>${state.snapshot.projects.map((p) => `<button class="menu-item${p.id === state.projectId ? " selected" : ""}" data-pick-folder="${p.id}">${icon("folder", "mi-icon")}<span class="mi-main"><span class="mi-name">${esc6(p.name)}</span><span class="mi-sub">${esc6(p.path)}</span></span>${p.id === state.projectId ? icon("check", "mi-check") : ""}</button>`).join("")}${state.snapshot.projects.length ? '<div class="menu-sep"></div>' : ""}<button class="menu-item" id="menu-open-folder">${icon("folderPlus", "mi-icon")}<span class="mi-main"><span class="mi-name">\u6253\u5F00\u6587\u4EF6\u5939\u2026</span></span></button>`;
 }
 function envMenuHtml() {
   const s = session();
   if (s) {
     const r = runtime(s.runtimeId);
-    return `<div class="menu-label">\u8FD0\u884C\u73AF\u5883</div><div class="menu-static">${tile2(r)}<span class="mi-main"><span class="mi-name">${esc5(r?.name ?? s.runtimeId)}</span><span class="mi-sub">\u4F1A\u8BDD\u521B\u5EFA\u540E\u4E0D\u80FD\u66F4\u6362\u8FD0\u884C\u73AF\u5883\u3002\u8981\u6362\u73AF\u5883\uFF0C\u8BF7\u65B0\u5EFA\u4F1A\u8BDD\u3002</span></span>${icon("lock", "mi-check")}</div>`;
+    return `<div class="menu-label">\u8FD0\u884C\u73AF\u5883</div><div class="menu-static">${tile2(r)}<span class="mi-main"><span class="mi-name">${esc6(r?.name ?? s.runtimeId)}</span><span class="mi-sub">\u4F1A\u8BDD\u521B\u5EFA\u540E\u4E0D\u80FD\u66F4\u6362\u8FD0\u884C\u73AF\u5883\u3002\u8981\u6362\u73AF\u5883\uFF0C\u8BF7\u65B0\u5EFA\u4F1A\u8BDD\u3002</span></span>${icon("lock", "mi-check")}</div>`;
   }
   return `<div class="menu-label">\u8FD0\u884C\u73AF\u5883 \xB7 \u5148\u9009\u73AF\u5883\uFF0C\u518D\u9009\u6A21\u578B</div>${state.snapshot.runtimes.map((r) => {
     const ok = usable(r), current = ok && r.id === state.runtimeId;
-    return `<button class="menu-item env-item${current ? " selected" : ""}" data-env="${r.id}" ${ok ? "" : "disabled"}>${tile2(r)}<span class="mi-main"><span class="mi-name">${esc5(r.name)}<span class="mi-tag">${esc5(r.protocol)}</span></span><span class="mi-sub">${ok ? esc5(r.description) : r.checking ? esc5(unusableReason(r)) : `${esc5(unusableReason(r))} \xB7 \u53EF\u5728\u8BBE\u7F6E \u2192 \u8FD0\u884C\u73AF\u5883\u91CC\u5B89\u88C5\u6216\u6307\u5B9A\u8DEF\u5F84`}</span></span>${current ? icon("check", "mi-check") : ""}</button>`;
+    return `<button class="menu-item env-item${current ? " selected" : ""}" data-env="${r.id}" ${ok ? "" : "disabled"}>${tile2(r)}<span class="mi-main"><span class="mi-name">${esc6(r.name)}<span class="mi-tag">${esc6(r.protocol)}</span></span><span class="mi-sub">${ok ? esc6(r.description) : r.checking ? esc6(unusableReason(r)) : `${esc6(unusableReason(r))} \xB7 \u53EF\u5728\u8BBE\u7F6E \u2192 \u8FD0\u884C\u73AF\u5883\u91CC\u5B89\u88C5\u6216\u6307\u5B9A\u8DEF\u5F84`}</span></span>${current ? icon("check", "mi-check") : ""}</button>`;
   }).join("")}<div class="menu-sep"></div><button class="menu-item subtle" data-open-settings="runtimes">${icon("settings", "mi-icon")}<span class="mi-main"><span class="mi-name">\u7BA1\u7406\u8FD0\u884C\u73AF\u5883\u2026</span></span></button>`;
 }
 function sessionMenuHtml() {
@@ -20166,22 +20228,22 @@ function priceTag(m) {
   const p = priceNow(m.pricing);
   if (!p) return "";
   const tip = ["\u79EF\u5206\u500D\u7387" + (Number.isFinite(p.base) ? ` ${factorText(p.base)}` : ""), m.pricing.original && m.pricing.original !== p.base ? `\u539F\u4EF7 ${factorText(m.pricing.original)}` : "", m.pricing.badge, ...(m.pricing.windows ?? []).map(windowText), m.pricing.peak?.note, p.until ? `\u9650\u514D\u81F3 ${new Date(p.until).toLocaleString("zh-CN", { month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit" })}` : ""].filter(Boolean).join("\n");
-  if (p.free) return `<span class="mi-tag price free" title="${esc5(tip)}">${m.pricing.limited || p.until ? "\u9650\u514D" : "\u514D\u8D39"}</span>`;
+  if (p.free) return `<span class="mi-tag price free" title="${esc6(tip)}">${m.pricing.limited || p.until ? "\u9650\u514D" : "\u514D\u8D39"}</span>`;
   if (p.value === null) return "";
-  const peak = p.peak ? `<span class="mi-tag price peak" title="${esc5(m.pricing.peak?.note ?? "")}">${esc5(m.pricing.peak?.label || "\u9AD8\u5CF0")} \xD7${m.pricing.peak?.factor ?? 2}</span>` : "";
+  const peak = p.peak ? `<span class="mi-tag price peak" title="${esc6(m.pricing.peak?.note ?? "")}">${esc6(m.pricing.peak?.label || "\u9AD8\u5CF0")} \xD7${m.pricing.peak?.factor ?? 2}</span>` : "";
   const original = Number.isFinite(m.pricing.original) && m.pricing.original !== p.value ? m.pricing.original : p.active ? p.base : null;
-  if (p.active) return `<span class="mi-tag price deal" title="${esc5(tip)}">${esc5(windowWord(p.active))} ${factorText(p.value)}<s>${factorText(original)}</s></span>${peak}`;
-  const soon = p.next ? `<span class="mi-tag price soon" title="${esc5(tip)}">${p.next.wait < 60 ? `${p.next.wait} \u5206\u949F\u540E` : `${p.next.start} \u8D77`}${esc5(windowWord(p.next))} ${factorText(p.base * p.next.factor)}</span>` : "";
-  return `<span class="mi-tag price${original ? " deal" : ""}" title="${esc5(tip)}">${factorText(p.value)}${original ? `<s>${factorText(original)}</s>` : ""}</span>${peak}${soon}`;
+  if (p.active) return `<span class="mi-tag price deal" title="${esc6(tip)}">${esc6(windowWord(p.active))} ${factorText(p.value)}<s>${factorText(original)}</s></span>${peak}`;
+  const soon = p.next ? `<span class="mi-tag price soon" title="${esc6(tip)}">${p.next.wait < 60 ? `${p.next.wait} \u5206\u949F\u540E` : `${p.next.start} \u8D77`}${esc6(windowWord(p.next))} ${factorText(p.base * p.next.factor)}</span>` : "";
+  return `<span class="mi-tag price${original ? " deal" : ""}" title="${esc6(tip)}">${factorText(p.value)}${original ? `<s>${factorText(original)}</s>` : ""}</span>${peak}${soon}`;
 }
 function balanceText(source) {
   const a3 = state.snapshot?.catalog?.[source]?.account;
   if (!a3 || !Number.isFinite(a3.balance)) return "";
   const n = a3.balance >= 1e3 ? Math.round(a3.balance).toLocaleString("zh-CN") : Number(a3.balance.toFixed(1)).toString();
-  return `<span class="mg-balance" title="${esc5(`${a3.unit ?? "\u79EF\u5206"}\u4F59\u989D${a3.fetchedAt ? `\uFF0C${since(a3.fetchedAt)}\u66F4\u65B0` : ""}`)}">\u4F59\u989D ${esc5(n)}</span>`;
+  return `<span class="mg-balance" title="${esc6(`${a3.unit ?? "\u79EF\u5206"}\u4F59\u989D${a3.fetchedAt ? `\uFF0C${since(a3.fetchedAt)}\u66F4\u65B0` : ""}`)}">\u4F59\u989D ${esc6(n)}</span>`;
 }
 function modelItemHtml(m) {
-  return `<button class="menu-item model-item${m.key === state.modelKey ? " selected" : ""}" data-model-key="${esc5(m.key)}"><span class="mi-main"><span class="mi-name">${esc5(sourceName(m))}</span><span class="mi-sub mono">${esc5(m.id)}</span></span><span class="mi-tags">${priceTag(m)}${m.reasoning.some((e) => e !== "none") ? '<span class="mi-tag">\u601D\u8003</span>' : ""}${m.contextMaximum ? `<span class="mi-tag">${compact(m.contextMaximum)}</span>` : ""}</span>${m.key === state.modelKey ? icon("check", "mi-check") : ""}</button>`;
+  return `<button class="menu-item model-item${m.key === state.modelKey ? " selected" : ""}" data-model-key="${esc6(m.key)}"><span class="mi-main"><span class="mi-name">${esc6(sourceName(m))}</span><span class="mi-sub mono">${esc6(m.id)}</span></span><span class="mi-tags">${priceTag(m)}${m.reasoning.some((e) => e !== "none") ? '<span class="mi-tag">\u601D\u8003</span>' : ""}${m.contextMaximum ? `<span class="mi-tag">${compact(m.contextMaximum)}</span>` : ""}</span>${m.key === state.modelKey ? icon("check", "mi-check") : ""}</button>`;
 }
 function modelListHtml() {
   const env = state.runtimeId, q2 = state.menuSearch.trim().toLowerCase();
@@ -20190,14 +20252,14 @@ function modelListHtml() {
     const list = all.filter((m) => !q2 || `${sourceName(m)} ${m.name} ${m.id}`.toLowerCase().includes(q2));
     if (!list.length) return "";
     const open2 = !!q2 || openGroups.has(source), chosen = all.find((m) => m.key === state.modelKey);
-    return `<div class="model-group${open2 ? " open" : ""}"><button class="model-group-head" data-model-group="${source}" aria-expanded="${open2}">${icon("chevronRight", "mg-caret")}<span class="mg-name">${esc5(sourceNames[source])}</span><span class="mg-count">${q2 ? `${list.length}/${all.length}` : all.length} \u4E2A</span>${balanceText(source)}${chosen && !open2 ? `<span class="mg-chosen" title="\u5F53\u524D\u9009\u62E9">${icon("check")}${esc5(sourceName(chosen))}</span>` : ""}</button>${open2 ? `<div class="model-group-body">${list.map(modelItemHtml).join("")}</div>` : ""}</div>`;
+    return `<div class="model-group${open2 ? " open" : ""}"><button class="model-group-head" data-model-group="${source}" aria-expanded="${open2}">${icon("chevronRight", "mg-caret")}<span class="mg-name">${esc6(sourceNames[source])}</span><span class="mg-count">${q2 ? `${list.length}/${all.length}` : all.length} \u4E2A</span>${balanceText(source)}${chosen && !open2 ? `<span class="mg-chosen" title="\u5F53\u524D\u9009\u62E9">${icon("check")}${esc6(sourceName(chosen))}</span>` : ""}</button>${open2 ? `<div class="model-group-body">${list.map(modelItemHtml).join("")}</div>` : ""}</div>`;
   }).join("");
-  const native = !gatewayOnly(env) && (!q2 || "\u539F\u751F native".includes(q2)) ? `<div class="menu-label">\u539F\u751F</div><button class="menu-item model-item${state.modelKey === "native" ? " selected" : ""}" data-model-key="native"><span class="mi-main"><span class="mi-name">\u539F\u751F\u6A21\u578B\u8BBE\u7F6E</span><span class="mi-sub">\u4F7F\u7528 ${esc5(runtime(env)?.name ?? "")} \u81EA\u5DF1\u7684\u6A21\u578B\u4E0E\u767B\u5F55</span></span>${state.modelKey === "native" ? icon("check", "mi-check") : ""}</button>` : "";
+  const native = !gatewayOnly(env) && (!q2 || "\u539F\u751F native".includes(q2)) ? `<div class="menu-label">\u539F\u751F</div><button class="menu-item model-item${state.modelKey === "native" ? " selected" : ""}" data-model-key="native"><span class="mi-main"><span class="mi-name">\u539F\u751F\u6A21\u578B\u8BBE\u7F6E</span><span class="mi-sub">\u4F7F\u7528 ${esc6(runtime(env)?.name ?? "")} \u81EA\u5DF1\u7684\u6A21\u578B\u4E0E\u767B\u5F55</span></span>${state.modelKey === "native" ? icon("check", "mi-check") : ""}</button>` : "";
   return groups + native || `<div class="menu-empty">${models().length ? "\u6CA1\u6709\u5339\u914D\u7684\u6A21\u578B" : "\u8FD8\u6CA1\u6709\u6A21\u578B\u76EE\u5F55\u3002\u8BF7\u5230\u8BBE\u7F6E \u2192 \u6A21\u578B\u6E90\u4E0B\u8F7D\u7EC4\u4EF6\u5E76\u767B\u5F55\u3002"}</div>`;
 }
 function effortRow(model, value) {
   if (!model.reasoning.length) return `<div class="param"><span class="param-label">${icon("bulb")}\u601D\u8003\u5F3A\u5EA6</span><span class="param-inline">\u6765\u6E90\u672A\u58F0\u660E\u6863\u4F4D\uFF0C\u4F7F\u7528\u9ED8\u8BA4</span></div>`;
-  return `<div class="param"><span class="param-label">${icon("bulb")}\u601D\u8003\u5F3A\u5EA6</span><div class="seg">${["", ...model.reasoning].map((e) => `<button class="${value === e ? "on" : ""}" data-effort="${esc5(e)}">${e ? esc5(effortName(e)) : `\u9ED8\u8BA4${model.defaultReasoning ? `<small>${esc5(effortName(model.defaultReasoning))}</small>` : ""}`}</button>`).join("")}</div></div>`;
+  return `<div class="param"><span class="param-label">${icon("bulb")}\u601D\u8003\u5F3A\u5EA6</span><div class="seg">${["", ...model.reasoning].map((e) => `<button class="${value === e ? "on" : ""}" data-effort="${esc6(e)}">${e ? esc6(effortName(e)) : `\u9ED8\u8BA4${model.defaultReasoning ? `<small>${esc6(effortName(model.defaultReasoning))}</small>` : ""}`}</button>`).join("")}</div></div>`;
 }
 function contextRow(model, value) {
   if (!model.contexts.length) return "";
@@ -20206,7 +20268,7 @@ function contextRow(model, value) {
 function budgetRow(model, value, context) {
   if (!model.contextMaximum) return "";
   const max = budgetMax(model, context), text3 = value ? formatTokens(value) : "";
-  return `<div class="param"><span class="param-label">${icon("database")}\u672C\u5730\u538B\u7F29\u9884\u7B97</span><div class="budget"><input id="budget-input" type="text" inputmode="decimal" autocomplete="off" spellcheck="false" placeholder="\u4E0D\u8BBE\u7F6E" value="${esc5(text3)}" data-max="${max ?? ""}" aria-describedby="budget-help" title="\u53EF\u4EE5\u5199 900K\u30011M\u30010.75M\u300190\u4E07 \u6216\u5177\u4F53\u6570\u5B57\uFF1BK\u3001M \u6309 1000 \u8FDB\u4F4D\uFF0C\u548C\u6A21\u578B\u6E90\u6807\u7684\u7A97\u53E3\u4E00\u81F4"><span class="budget-help" id="budget-help">${esc5(value ? budgetCheck(text3, { max }).text : `\u4F8B\u5982 200K\u30010.5M\uFF0C\u6700\u5927 ${compact(max)}`)}</span></div></div>`;
+  return `<div class="param"><span class="param-label">${icon("database")}\u672C\u5730\u538B\u7F29\u9884\u7B97</span><div class="budget"><input id="budget-input" type="text" inputmode="decimal" autocomplete="off" spellcheck="false" placeholder="\u4E0D\u8BBE\u7F6E" value="${esc6(text3)}" data-max="${max ?? ""}" aria-describedby="budget-help" title="\u53EF\u4EE5\u5199 900K\u30011M\u30010.75M\u300190\u4E07 \u6216\u5177\u4F53\u6570\u5B57\uFF1BK\u3001M \u6309 1000 \u8FDB\u4F4D\uFF0C\u548C\u6A21\u578B\u6E90\u6807\u7684\u7A97\u53E3\u4E00\u81F4"><span class="budget-help" id="budget-help">${esc6(value ? budgetCheck(text3, { max }).text : `\u4F8B\u5982 200K\u30010.5M\uFF0C\u6700\u5927 ${compact(max)}`)}</span></div></div>`;
 }
 function paintBudgetHelp(input) {
   const help = $2("#budget-help");
@@ -20232,14 +20294,14 @@ function nativeEfforts() {
 function nativeChoiceHtml() {
   const rows = nativeCatalog.get(state.runtimeId) ?? [];
   if (!rows.length) return "";
-  const group = (items, label) => items.length ? `<optgroup label="${label}">${items.map((r) => `<option value="${esc5(r.id)}">${esc5(r.name)} \xB7 ${esc5(r.id)}${r.hidden ? " \xB7 \u9690\u85CF" : ""}</option>`).join("")}</optgroup>` : "";
+  const group = (items, label) => items.length ? `<optgroup label="${label}">${items.map((r) => `<option value="${esc6(r.id)}">${esc6(r.name)} \xB7 ${esc6(r.id)}${r.hidden ? " \xB7 \u9690\u85CF" : ""}</option>`).join("")}</optgroup>` : "";
   return `<select id="native-model-choice" aria-label="\u5B8C\u6574\u539F\u751F\u6A21\u578B\u5217\u8868"><option value="">\u624B\u52A8\u586B\u5199 / \u539F\u751F\u5F53\u524D\u6A21\u578B</option>${group(rows.filter((r) => !r.hidden), "\u5E38\u89C4\u6A21\u578B")}${group(rows.filter((r) => r.hidden), "\u539F\u751F\u9690\u85CF\u6761\u76EE")}</select>`;
 }
 function nativeParamsHtml() {
   const rows = nativeCatalog.get(state.runtimeId) ?? [], canList = ["codex", "antigravity"].includes(state.runtimeId);
-  return `<div class="param"><span class="param-label">${icon("cpu")}\u539F\u751F\u6A21\u578B ID</span><div class="native-row"><input id="native-id" placeholder="\u7559\u7A7A\u4F7F\u7528\u539F\u751F\u5F53\u524D\u6A21\u578B" value="${esc5(state.nativeModel)}" autocomplete="off" spellcheck="false">${canList ? `<button class="btn sm" id="load-native-models">${rows.length ? "\u5237\u65B0\u76EE\u5F55" : "\u8BFB\u53D6\u539F\u751F\u76EE\u5F55"}</button>` : ""}</div></div>
+  return `<div class="param"><span class="param-label">${icon("cpu")}\u539F\u751F\u6A21\u578B ID</span><div class="native-row"><input id="native-id" placeholder="\u7559\u7A7A\u4F7F\u7528\u539F\u751F\u5F53\u524D\u6A21\u578B" value="${esc6(state.nativeModel)}" autocomplete="off" spellcheck="false">${canList ? `<button class="btn sm" id="load-native-models">${rows.length ? "\u5237\u65B0\u76EE\u5F55" : "\u8BFB\u53D6\u539F\u751F\u76EE\u5F55"}</button>` : ""}</div></div>
     <div id="native-choice-slot">${nativeChoiceHtml()}</div>
-    <div class="param"><span class="param-label">${icon("bulb")}\u601D\u8003\u5F3A\u5EA6</span><select id="native-effort"><option value="">\u539F\u751F\u9ED8\u8BA4</option>${nativeEfforts().map((e) => `<option value="${esc5(e)}" ${state.reasoning === e ? "selected" : ""}>${esc5(effortName(e))}</option>`).join("")}</select></div>
+    <div class="param"><span class="param-label">${icon("bulb")}\u601D\u8003\u5F3A\u5EA6</span><select id="native-effort"><option value="">\u539F\u751F\u9ED8\u8BA4</option>${nativeEfforts().map((e) => `<option value="${esc6(e)}" ${state.reasoning === e ? "selected" : ""}>${esc6(effortName(e))}</option>`).join("")}</select></div>
     <div class="param-hint" id="native-model-summary">${rows.length ? `\u5171 ${rows.length} \u4E2A\u539F\u751F\u6A21\u578B${rows.some((r) => r.hidden) ? `\uFF08\u542B ${rows.filter((r) => r.hidden).length} \u4E2A\u9690\u85CF\u6761\u76EE\uFF09` : ""}` : "\u5DE5\u5177\u3001\u6280\u80FD\u3001MCP \u4E0E\u6743\u9650\u90FD\u4F7F\u7528\u539F\u751F\u914D\u7F6E\u3002"}</div>
     <div class="param-actions"><button class="btn sm" id="save-model-default">${icon("check")}\u8BB0\u4F4F\u6B64\u642D\u914D</button></div>`;
 }
@@ -20254,17 +20316,17 @@ function repaintNativeEffort() {
   if (!select) return;
   const efforts = nativeEfforts();
   if (!efforts.includes(state.reasoning)) state.reasoning = "";
-  select.innerHTML = `<option value="">\u539F\u751F\u9ED8\u8BA4</option>${efforts.map((e) => `<option value="${esc5(e)}">${esc5(effortName(e))}</option>`).join("")}`;
+  select.innerHTML = `<option value="">\u539F\u751F\u9ED8\u8BA4</option>${efforts.map((e) => `<option value="${esc6(e)}">${esc6(effortName(e))}</option>`).join("")}`;
   select.value = state.reasoning;
 }
 function sessionParamsHtml(s) {
   const m = modelOf(s.selection), p = state.params;
   const native = s.selection.modelKey === "native";
-  if (!m || m.source === "antigravity") return `<div class="menu-session-head">${icon("lock")}<div><b>${esc5(m?.name ?? (native ? "\u539F\u751F\u6A21\u578B" : s.selection.modelKey))}</b><small>${esc5(native ? s.selection.nativeModel || "\u539F\u751F\u5F53\u524D\u6A21\u578B" : m ? m.id : "\u4E0D\u5728\u5F53\u524D\u6A21\u578B\u76EE\u5F55\u4E2D")}</small></div></div><div class="param-note">${icon("info")}<span>${m ? "Gemini \u7531 Antigravity \u539F\u751F\u6267\u884C\uFF0C\u53C2\u6570\u5728\u539F\u751F\u754C\u9762\u4E2D\u8C03\u6574\u3002" : native ? "\u539F\u751F\u6A21\u578B\u4F1A\u8BDD\u7684\u53C2\u6570\u8BF7\u5728\u539F\u751F\u754C\u9762\u4E2D\u8C03\u6574\u3002" : "\u8FD9\u4E2A\u6A21\u578B\u4E0D\u5728\u5F53\u524D\u76EE\u5F55\u4E2D\u3002\u8BF7\u5237\u65B0\u6A21\u578B\u6E90\uFF0C\u518D\u7528\u7F16\u8F91\u6846\u4E0A\u65B9\u7684\u201C\u91CD\u65B0\u786E\u8BA4\u6A21\u578B\u201D\u3002"}</span></div>`;
+  if (!m || m.source === "antigravity") return `<div class="menu-session-head">${icon("lock")}<div><b>${esc6(m?.name ?? (native ? "\u539F\u751F\u6A21\u578B" : s.selection.modelKey))}</b><small>${esc6(native ? s.selection.nativeModel || "\u539F\u751F\u5F53\u524D\u6A21\u578B" : m ? m.id : "\u4E0D\u5728\u5F53\u524D\u6A21\u578B\u76EE\u5F55\u4E2D")}</small></div></div><div class="param-note">${icon("info")}<span>${m ? "Gemini \u7531 Antigravity \u539F\u751F\u6267\u884C\uFF0C\u53C2\u6570\u5728\u539F\u751F\u754C\u9762\u4E2D\u8C03\u6574\u3002" : native ? "\u539F\u751F\u6A21\u578B\u4F1A\u8BDD\u7684\u53C2\u6570\u8BF7\u5728\u539F\u751F\u754C\u9762\u4E2D\u8C03\u6574\u3002" : "\u8FD9\u4E2A\u6A21\u578B\u4E0D\u5728\u5F53\u524D\u76EE\u5F55\u4E2D\u3002\u8BF7\u5237\u65B0\u6A21\u578B\u6E90\uFF0C\u518D\u7528\u7F16\u8F91\u6846\u4E0A\u65B9\u7684\u201C\u91CD\u65B0\u786E\u8BA4\u6A21\u578B\u201D\u3002"}</span></div>`;
   const running2 = busy(s), pending2 = s.selectionNext;
-  const queued = pending2 ? `<div class="param-pending">${icon("clock")}<span><b>\u5DF2\u6392\u961F</b>${esc5(paramsText(pending2))}<small>\u672C\u8F6E\u7ED3\u675F\u540E\u81EA\u52A8\u5E94\u7528</small></span><button class="btn sm" id="cancel-session-params">\u53D6\u6D88\u6392\u961F</button></div>` : "";
+  const queued = pending2 ? `<div class="param-pending">${icon("clock")}<span><b>\u5DF2\u6392\u961F</b>${esc6(paramsText(pending2))}<small>\u672C\u8F6E\u7ED3\u675F\u540E\u81EA\u52A8\u5E94\u7528</small></span><button class="btn sm" id="cancel-session-params">\u53D6\u6D88\u6392\u961F</button></div>` : "";
   const timing = running2 ? "\u4EFB\u52A1\u6B63\u5728\u8FD0\u884C\uFF1A\u65B0\u53C2\u6570\u5148\u6392\u961F\uFF0C\u672C\u8F6E\u7ED3\u675F\u540E\u81EA\u52A8\u5E94\u7528\uFF0C\u5E94\u7528\u524D\u53EF\u4EE5\u968F\u65F6\u53D6\u6D88\u3002" : "";
-  return `<div class="menu-session-head">${icon("lock")}<div><b>${esc5(m.name)}</b><small>${esc5(sourceNames[m.source])} \xB7 ${esc5(m.id)}</small></div></div><div class="menu-params">${effortRow(m, p.reasoning)}${contextRow(m, p.contextTokens)}${budgetRow(m, p.contextBudget, p.contextTokens)}<div class="param-hint">${budgetNote}\u4F1A\u8BDD\u521B\u5EFA\u540E\u4E0D\u80FD\u66F4\u6362\u6A21\u578B\u6216\u8FD0\u884C\u73AF\u5883\uFF1B\u5E94\u7528\u65B0\u53C2\u6570\u4F1A\u91CD\u542F\u8FD9\u4E2A\u4F1A\u8BDD\u7684\u8FD0\u884C\u73AF\u5883\uFF0C\u4E0B\u4E00\u8F6E\u4F1A\u91CD\u65B0\u53D1\u9001\u5B8C\u6574\u4E0A\u4E0B\u6587\u3002${timing}</div>${queued}<div class="param-actions"><button class="btn primary sm" id="apply-session-params">${running2 ? pending2 ? "\u66FF\u6362\u6392\u961F\u7684\u53C2\u6570" : "\u672C\u8F6E\u7ED3\u675F\u540E\u5E94\u7528" : "\u5E94\u7528\u5230\u6B64\u4F1A\u8BDD"}</button></div></div>`;
+  return `<div class="menu-session-head">${icon("lock")}<div><b>${esc6(m.name)}</b><small>${esc6(sourceNames[m.source])} \xB7 ${esc6(m.id)}</small></div></div><div class="menu-params">${effortRow(m, p.reasoning)}${contextRow(m, p.contextTokens)}${budgetRow(m, p.contextBudget, p.contextTokens)}<div class="param-hint">${budgetNote}\u4F1A\u8BDD\u521B\u5EFA\u540E\u4E0D\u80FD\u66F4\u6362\u6A21\u578B\u6216\u8FD0\u884C\u73AF\u5883\uFF1B\u5E94\u7528\u65B0\u53C2\u6570\u4F1A\u91CD\u542F\u8FD9\u4E2A\u4F1A\u8BDD\u7684\u8FD0\u884C\u73AF\u5883\uFF0C\u4E0B\u4E00\u8F6E\u4F1A\u91CD\u65B0\u53D1\u9001\u5B8C\u6574\u4E0A\u4E0B\u6587\u3002${timing}</div>${queued}<div class="param-actions"><button class="btn primary sm" id="apply-session-params">${running2 ? pending2 ? "\u66FF\u6362\u6392\u961F\u7684\u53C2\u6570" : "\u672C\u8F6E\u7ED3\u675F\u540E\u5E94\u7528" : "\u5E94\u7528\u5230\u6B64\u4F1A\u8BDD"}</button></div></div>`;
 }
 function modelMenuHtml() {
   const s = session();
@@ -20366,7 +20428,7 @@ function renderRightBody() {
   else if (ui.rightTab === "tasks") renderTasks();
   else void renderChanges();
 }
-var emptyPane = (ico, text3, extra = "") => `<div class="pane-empty">${icon(ico)}<span>${esc5(text3)}</span>${extra}</div>`;
+var emptyPane = (ico, text3, extra = "") => `<div class="pane-empty">${icon(ico)}<span>${esc6(text3)}</span>${extra}</div>`;
 function statusClass(status) {
   const s = status.trim();
   return s === "??" ? "untracked" : s.includes("D") ? "deleted" : s.includes("A") ? "added" : s.includes("R") ? "renamed" : "modified";
@@ -20381,10 +20443,10 @@ function paintChanges() {
   const agent = lastAgentDiff(), agentOpen = !!body.querySelector(".agent-diff")?.open, message = body.querySelector("#commit-message")?.value ?? "", checked = new Set([...body.querySelectorAll('input[name="stage-file"]:checked')].map((x2) => x2.value));
   const rows = g.files.map((f2) => {
     const slash = f2.path.lastIndexOf("/"), dir = slash >= 0 ? f2.path.slice(0, slash + 1) : "", name = f2.path.slice(slash + 1), staged = f2.status[0] !== " " && f2.status[0] !== "?";
-    return `<div class="change-row${state.diffPath === f2.path ? " open" : ""}"><input type="checkbox" name="stage-file" value="${esc5(f2.path)}" aria-label="\u9009\u62E9 ${esc5(f2.path)}"><button class="change-main" data-diff-file="${esc5(f2.path)}" title="${esc5(f2.oldPath ? `${f2.oldPath} \u2192 ${f2.path}` : f2.path)}"><span class="badge ${statusClass(f2.status)}">${esc5(f2.status.trim() === "??" ? "U" : f2.status.trim()[0] ?? "M")}</span><span class="change-path"><span class="change-name">${esc5(name)}</span><span class="change-dir">${esc5(dir)}</span></span>${staged ? '<span class="staged">\u5DF2\u6682\u5B58</span>' : ""}</button></div>${state.diffPath === f2.path ? `<div class="diff-box" id="diff-container">${diffHtml(state.diff)}</div>` : ""}`;
+    return `<div class="change-row${state.diffPath === f2.path ? " open" : ""}"><input type="checkbox" name="stage-file" value="${esc6(f2.path)}" aria-label="\u9009\u62E9 ${esc6(f2.path)}"><button class="change-main" data-diff-file="${esc6(f2.path)}" title="${esc6(f2.oldPath ? `${f2.oldPath} \u2192 ${f2.path}` : f2.path)}"><span class="badge ${statusClass(f2.status)}">${esc6(f2.status.trim() === "??" ? "U" : f2.status.trim()[0] ?? "M")}</span><span class="change-path"><span class="change-name">${esc6(name)}</span><span class="change-dir">${esc6(dir)}</span></span>${staged ? '<span class="staged">\u5DF2\u6682\u5B58</span>' : ""}</button></div>${state.diffPath === f2.path ? `<div class="diff-box" id="diff-container">${diffHtml(state.diff)}</div>` : ""}`;
   }).join("");
-  body.innerHTML = `<div class="changes"><div class="pane-toolbar"><span class="pane-title">${icon("git")}${g.repository ? esc5(g.branch) : "\u672A\u521D\u59CB\u5316 Git"}</span><span class="pane-meta">${g.repository ? `${g.files.length} \u4E2A\u6587\u4EF6` : ""}</span><button class="icon-btn sm" id="refresh-git" title="\u5237\u65B0">${icon("refresh")}</button></div>
-    ${agent ? `<details class="agent-diff" data-expand="agent-diff"><summary>${icon("spark")}<span>\u672C\u4F1A\u8BDD Agent \u62A5\u544A\u7684\u53D8\u66F4</span><span class="muted">${esc5(typeof agent.text === "string" && agent.text ? diffStat(agent.text) : "")}</span></summary>${typeof agent.text === "string" && agent.text ? diffHtml(agent.text) : `<pre>${esc5(clip2(pretty(agent.data)))}</pre>`}</details>` : ""}
+  body.innerHTML = `<div class="changes"><div class="pane-toolbar"><span class="pane-title">${icon("git")}${g.repository ? esc6(g.branch) : "\u672A\u521D\u59CB\u5316 Git"}</span><span class="pane-meta">${g.repository ? `${g.files.length} \u4E2A\u6587\u4EF6` : ""}</span><button class="icon-btn sm" id="refresh-git" title="\u5237\u65B0">${icon("refresh")}</button></div>
+    ${agent ? `<details class="agent-diff" data-expand="agent-diff"><summary>${icon("spark")}<span>\u672C\u4F1A\u8BDD Agent \u62A5\u544A\u7684\u53D8\u66F4</span><span class="muted">${esc6(typeof agent.text === "string" && agent.text ? diffStat(agent.text) : "")}</span></summary>${typeof agent.text === "string" && agent.text ? diffHtml(agent.text) : `<pre>${esc6(clip2(pretty(agent.data)))}</pre>`}</details>` : ""}
     ${!g.repository ? emptyPane("git", "\u8FD9\u4E2A\u6587\u4EF6\u5939\u8FD8\u4E0D\u662F Git \u4ED3\u5E93", '<button class="btn sm" id="init-git">\u521D\u59CB\u5316 Git \u4ED3\u5E93</button>') : !g.files.length ? emptyPane("check", "\u5DE5\u4F5C\u76EE\u5F55\u662F\u5E72\u51C0\u7684", "<small>Agent \u4FEE\u6539\u7684\u6587\u4EF6\u4F1A\u51FA\u73B0\u5728\u8FD9\u91CC\u3002</small>") : `<div class="change-list">${rows}</div><div class="commit-box"><div class="commit-actions"><button class="btn sm" id="stage-selected">\u6682\u5B58\u6240\u9009</button><span class="muted">\u53EA\u63D0\u4EA4\u5DF2\u6682\u5B58\u7684\u53D8\u66F4</span></div><textarea id="commit-message" rows="2" placeholder="\u63D0\u4EA4\u8BF4\u660E"></textarea><button class="btn primary sm" id="commit">${icon("check")}\u63D0\u4EA4\u5230\u672C\u5730</button></div>`}</div>`;
   const details = body.querySelector(".agent-diff");
   if (details) details.open = agentOpen;
@@ -20432,11 +20494,11 @@ async function loadTree(path2 = "", projectId = state.projectId, cache = state.t
   cache.set(path2, await call("project:tree", { projectId, path: path2 }));
 }
 function treeHtml(path2 = "", depth = 0) {
-  return (state.tree.get(path2) ?? []).map((f2) => `<button class="tree-row d${Math.min(depth, 9)}${state.file?.path === f2.path ? " active" : ""}" data-file-path="${esc5(f2.path)}" data-directory="${f2.directory}">${f2.directory ? icon(state.expanded.has(f2.path) ? "chevronDown" : "chevronRight", "tree-caret") : '<span class="tree-caret"></span>'}${icon(f2.directory ? "folder" : "file", "tree-icon")}<span class="tree-name">${esc5(f2.name)}</span></button>${f2.directory && state.expanded.has(f2.path) ? treeHtml(f2.path, depth + 1) : ""}`).join("");
+  return (state.tree.get(path2) ?? []).map((f2) => `<button class="tree-row d${Math.min(depth, 9)}${state.file?.path === f2.path ? " active" : ""}" data-file-path="${esc6(f2.path)}" data-directory="${f2.directory}">${f2.directory ? icon(state.expanded.has(f2.path) ? "chevronDown" : "chevronRight", "tree-caret") : '<span class="tree-caret"></span>'}${icon(f2.directory ? "folder" : "file", "tree-icon")}<span class="tree-name">${esc6(f2.name)}</span></button>${f2.directory && state.expanded.has(f2.path) ? treeHtml(f2.path, depth + 1) : ""}`).join("");
 }
 function codeHtml(text3) {
   const lines = text3.split("\n"), max = 4e3;
-  return `<pre class="code">${lines.slice(0, max).map((l, i2) => `<span class="cl"><span class="ln">${i2 + 1}</span><span class="lc">${esc5(l) || " "}</span></span>`).join("")}</pre>${lines.length > max ? `<div class="pane-note">\u4EC5\u9884\u89C8\u524D ${max} \u884C\uFF0C\u5171 ${lines.length.toLocaleString()} \u884C\u3002\u8FDB\u5165\u7F16\u8F91\u53EF\u67E5\u770B\u5168\u90E8\u5185\u5BB9\u3002</div>` : ""}`;
+  return `<pre class="code">${lines.slice(0, max).map((l, i2) => `<span class="cl"><span class="ln">${i2 + 1}</span><span class="lc">${esc6(l) || " "}</span></span>`).join("")}</pre>${lines.length > max ? `<div class="pane-note">\u4EC5\u9884\u89C8\u524D ${max} \u884C\uFF0C\u5171 ${lines.length.toLocaleString()} \u884C\u3002\u8FDB\u5165\u7F16\u8F91\u53EF\u67E5\u770B\u5168\u90E8\u5185\u5BB9\u3002</div>` : ""}`;
 }
 async function renderFiles() {
   const body = $2("#rp-body"), projectId = state.projectId, epoch = rightEpoch;
@@ -20449,8 +20511,8 @@ async function renderFiles() {
     if (!state.tree.has("")) await loadTree();
     if (projectId !== state.projectId || epoch !== rightEpoch || ui.rightTab !== "files") return;
     const f2 = state.file;
-    body.innerHTML = `<div class="files${f2 ? " has-file" : ""}"><div class="tree-pane"><div class="pane-toolbar"><span class="pane-title">${icon("folder")}${esc5(project().name)}</span><button class="icon-btn sm" id="refresh-files" title="\u5237\u65B0">${icon("refresh")}</button></div><div id="tree" class="tree">${treeHtml() || '<div class="pane-empty small">\u7A7A\u6587\u4EF6\u5939</div>'}</div></div>
-      ${f2 ? `<div class="preview-pane${state.dirty ? " dirty" : ""}" id="preview-pane"><div class="pane-toolbar"><span class="pane-title mono" title="${esc5(f2.path)}">${icon("file")}<span class="file-path">${esc5(f2.path)}</span><i class="dirty-dot" title="\u672A\u4FDD\u5B58"></i></span><span class="pane-actions">${f2.editing ? '<button class="btn sm" id="cancel-edit">\u5B8C\u6210</button><button class="btn primary sm" id="save-file">\u4FDD\u5B58</button>' : `<button class="btn sm" id="reference-file" title="\u628A\u6587\u4EF6\u8DEF\u5F84\u52A0\u5165\u4EFB\u52A1\u8349\u7A3F">\u5F15\u7528</button><button class="btn sm" id="edit-file">${icon("edit")}\u7F16\u8F91</button>`}<button class="icon-btn sm" id="close-file" title="\u5173\u95ED\u6587\u4EF6">${icon("close")}</button></span></div>${f2.editing ? '<textarea id="editor" class="editor" spellcheck="false" aria-label="\u6587\u4EF6\u7F16\u8F91\u5668"></textarea>' : `<div class="code-view">${codeHtml(f2.text)}</div>`}</div>` : ""}</div>`;
+    body.innerHTML = `<div class="files${f2 ? " has-file" : ""}"><div class="tree-pane"><div class="pane-toolbar"><span class="pane-title">${icon("folder")}${esc6(project().name)}</span><button class="icon-btn sm" id="refresh-files" title="\u5237\u65B0">${icon("refresh")}</button></div><div id="tree" class="tree">${treeHtml() || '<div class="pane-empty small">\u7A7A\u6587\u4EF6\u5939</div>'}</div></div>
+      ${f2 ? `<div class="preview-pane${state.dirty ? " dirty" : ""}" id="preview-pane"><div class="pane-toolbar"><span class="pane-title mono" title="${esc6(f2.path)}">${icon("file")}<span class="file-path">${esc6(f2.path)}</span><i class="dirty-dot" title="\u672A\u4FDD\u5B58"></i></span><span class="pane-actions">${f2.editing ? '<button class="btn sm" id="cancel-edit">\u5B8C\u6210</button><button class="btn primary sm" id="save-file">\u4FDD\u5B58</button>' : `<button class="btn sm" id="reference-file" title="\u628A\u6587\u4EF6\u8DEF\u5F84\u52A0\u5165\u4EFB\u52A1\u8349\u7A3F">\u5F15\u7528</button><button class="btn sm" id="edit-file">${icon("edit")}\u7F16\u8F91</button>`}<button class="icon-btn sm" id="close-file" title="\u5173\u95ED\u6587\u4EF6">${icon("close")}</button></span></div>${f2.editing ? '<textarea id="editor" class="editor" spellcheck="false" aria-label="\u6587\u4EF6\u7F16\u8F91\u5668"></textarea>' : `<div class="code-view">${codeHtml(f2.text)}</div>`}</div>` : ""}</div>`;
     if (f2?.editing) {
       const editor = $2("#editor");
       editor.value = f2.text;
@@ -20515,7 +20577,7 @@ async function discardFile(close2) {
     reportDirty();
     await renderFiles();
   };
-  if (state.dirty) modal("\u653E\u5F03\u672A\u4FDD\u5B58\u7684\u4FEE\u6539\uFF1F", `<p>${esc5(f2.path)} \u6709\u672A\u4FDD\u5B58\u7684\u4FEE\u6539\u3002\u653E\u5F03\u540E\u4F1A\u6062\u590D\u4E3A\u78C1\u76D8\u4E0A\u7684\u5185\u5BB9\u3002</p>`, done, { confirm: "\u653E\u5F03\u4FEE\u6539", danger: true });
+  if (state.dirty) modal("\u653E\u5F03\u672A\u4FDD\u5B58\u7684\u4FEE\u6539\uFF1F", `<p>${esc6(f2.path)} \u6709\u672A\u4FDD\u5B58\u7684\u4FEE\u6539\u3002\u653E\u5F03\u540E\u4F1A\u6062\u590D\u4E3A\u78C1\u76D8\u4E0A\u7684\u5185\u5BB9\u3002</p>`, done, { confirm: "\u653E\u5F03\u4FEE\u6539", danger: true });
   else if (close2) await done();
   else {
     f2.editing = false;
@@ -20535,9 +20597,9 @@ function renderTasksLive() {
   const snap = state.snapshot, live = snap.sessions.filter((s) => !s.archived && busy(s));
   const sources2 = ["qoder", "workbuddy", "antigravity"].map((id) => {
     const c = snap.catalog[id], status = c?.status ?? "none";
-    return `<div class="task-row"><span class="dot ${status === "ready" ? "completed" : status === "loading" ? "running" : status === "error" ? "failed" : "idle"}"></span><span class="task-main static"><span class="task-title">${sourceNames[id]}</span><span class="task-sub">${status === "loading" ? "\u6B63\u5728\u8BFB\u53D6\u76EE\u5F55\u2026" : status === "needs-component" ? "\u9700\u8981\u4E0B\u8F7D\u7EC4\u4EF6" : status === "ready" ? `${c.models.filter((m) => m.enabled).length} \u4E2A\u6A21\u578B \xB7 ${since(c.checkedAt)}\u66F4\u65B0` : status === "error" ? esc5(c.error) : "\u5C1A\u672A\u8BFB\u53D6"}</span></span><button class="icon-btn sm" data-refresh-source="${id}" title="\u5237\u65B0\u76EE\u5F55" ${status === "loading" ? "disabled" : ""}>${icon("refresh")}</button></div>`;
+    return `<div class="task-row"><span class="dot ${status === "ready" ? "completed" : status === "loading" ? "running" : status === "error" ? "failed" : "idle"}"></span><span class="task-main static"><span class="task-title">${sourceNames[id]}</span><span class="task-sub">${status === "loading" ? "\u6B63\u5728\u8BFB\u53D6\u76EE\u5F55\u2026" : status === "needs-component" ? "\u9700\u8981\u4E0B\u8F7D\u7EC4\u4EF6" : status === "ready" ? `${c.models.filter((m) => m.enabled).length} \u4E2A\u6A21\u578B \xB7 ${since(c.checkedAt)}\u66F4\u65B0` : status === "error" ? esc6(c.error) : "\u5C1A\u672A\u8BFB\u53D6"}</span></span><button class="icon-btn sm" data-refresh-source="${id}" title="\u5237\u65B0\u76EE\u5F55" ${status === "loading" ? "disabled" : ""}>${icon("refresh")}</button></div>`;
   }).join("");
-  el.innerHTML = `<h4>${icon("activity")}\u8FD0\u884C\u4E2D\u7684\u4F1A\u8BDD<span class="count">${live.length}</span></h4>${live.length ? live.map((s) => `<div class="task-row"><span class="dot ${esc5(s.status)}"></span><button class="task-main" data-session="${s.id}"><span class="task-title">${esc5(s.title)}</span><span class="task-sub">${esc5(snap.projects.find((p) => p.id === s.projectId)?.name ?? "")} \xB7 ${esc5(runtime(s.runtimeId)?.name ?? s.runtimeId)} \xB7 <span data-activity="${s.id}">${esc5(activityOf(s).short)}</span> \xB7 <span data-elapsed-from="${esc5(s.updatedAt)}">${elapsed(s.updatedAt)}</span></span></button><button class="icon-btn sm" data-stop-session="${s.id}" title="\u505C\u6B62">${icon("stop")}</button></div>`).join("") : '<div class="task-empty">\u6CA1\u6709\u6B63\u5728\u8FD0\u884C\u7684\u4F1A\u8BDD</div>'}<h4>${icon("layers")}\u6A21\u578B\u76EE\u5F55</h4>${sources2}`;
+  el.innerHTML = `<h4>${icon("activity")}\u8FD0\u884C\u4E2D\u7684\u4F1A\u8BDD<span class="count">${live.length}</span></h4>${live.length ? live.map((s) => `<div class="task-row"><span class="dot ${esc6(s.status)}"></span><button class="task-main" data-session="${s.id}"><span class="task-title">${esc6(s.title)}</span><span class="task-sub">${esc6(snap.projects.find((p) => p.id === s.projectId)?.name ?? "")} \xB7 ${esc6(runtime(s.runtimeId)?.name ?? s.runtimeId)} \xB7 <span data-activity="${s.id}">${esc6(activityOf(s).short)}</span> \xB7 <span data-elapsed-from="${esc6(s.updatedAt)}">${elapsed(s.updatedAt)}</span></span></button><button class="icon-btn sm" data-stop-session="${s.id}" title="\u505C\u6B62">${icon("stop")}</button></div>`).join("") : '<div class="task-empty">\u6CA1\u6709\u6B63\u5728\u8FD0\u884C\u7684\u4F1A\u8BDD</div>'}<h4>${icon("layers")}\u6A21\u578B\u76EE\u5F55</h4>${sources2}`;
 }
 function renderTerminal() {
   const el = $2("#terminal-section");
@@ -20546,7 +20608,7 @@ function renderTerminal() {
   state.terminalBusy = t.running;
   if (!el) return;
   const p = project();
-  el.innerHTML = `<h4>${icon("terminal")}\u7EC8\u7AEF<span class="muted">PowerShell \xB7 ${esc5(p?.name ?? "\u672A\u9009\u62E9\u6587\u4EF6\u5939")}</span><span class="spacer"></span>${state.terminalBusy ? '<button class="btn sm danger" id="stop-terminal">\u505C\u6B62</button>' : ""}<button class="ghost-btn" id="clear-terminal" title="\u6E05\u7A7A\u8F93\u51FA">\u6E05\u7A7A</button></h4><pre class="terminal-output" id="terminal-output"></pre><form class="terminal-input" id="terminal-form"><span class="prompt-sign">\u276F</span><input id="terminal-command" placeholder="${p ? "\u5728\u5F53\u524D\u6587\u4EF6\u5939\u8FD0\u884C\u547D\u4EE4" : "\u5148\u6253\u5F00\u4E00\u4E2A\u6587\u4EF6\u5939"}" autocomplete="off" spellcheck="false" ${state.terminalBusy ? "disabled" : ""}><button class="btn sm" ${state.terminalBusy || !p ? "disabled" : ""}>\u8FD0\u884C</button></form>`;
+  el.innerHTML = `<h4>${icon("terminal")}\u7EC8\u7AEF<span class="muted">PowerShell \xB7 ${esc6(p?.name ?? "\u672A\u9009\u62E9\u6587\u4EF6\u5939")}</span><span class="spacer"></span>${state.terminalBusy ? '<button class="btn sm danger" id="stop-terminal">\u505C\u6B62</button>' : ""}<button class="ghost-btn" id="clear-terminal" title="\u6E05\u7A7A\u8F93\u51FA">\u6E05\u7A7A</button></h4><pre class="terminal-output" id="terminal-output"></pre><form class="terminal-input" id="terminal-form"><span class="prompt-sign">\u276F</span><input id="terminal-command" placeholder="${p ? "\u5728\u5F53\u524D\u6587\u4EF6\u5939\u8FD0\u884C\u547D\u4EE4" : "\u5148\u6253\u5F00\u4E00\u4E2A\u6587\u4EF6\u5939"}" autocomplete="off" spellcheck="false" ${state.terminalBusy ? "disabled" : ""}><button class="btn sm" ${state.terminalBusy || !p ? "disabled" : ""}>\u8FD0\u884C</button></form>`;
   const out = $2("#terminal-output");
   out.textContent = state.terminalText || "";
   out.scrollTop = out.scrollHeight;
@@ -20584,13 +20646,13 @@ function closeSettings() {
 var sourceCard = (id, desc) => sourceCardHtml(id, desc, state.snapshot.catalog[id], state.snapshot.sourceComponents?.find((c) => c.id === id));
 function catalogRows() {
   const q2 = state.catalogSearch.toLowerCase(), rows = models().filter((m) => (state.catalogSource === "all" || m.source === state.catalogSource) && `${m.name} ${m.id} ${m.source}`.toLowerCase().includes(q2));
-  return rows.length ? rows.map((m) => `<tr><td><div class="model-name">${esc5(m.name)}${m.enabled ? "" : '<span class="muted"> \xB7 \u4E0D\u53EF\u7528</span>'}</div><div class="model-id mono">${esc5(m.id)}</div></td><td>${sourceNames[m.source]}</td><td>${m.contexts.length ? m.contexts.map((c) => `<span class="ctx-tag${c.tokens === m.defaultContextTokens ? " default" : ""}">${compact(c.tokens)}</span>`).join("") : '<span class="muted">\u672A\u58F0\u660E</span>'}</td><td>${m.reasoning.length ? m.reasoning.map((e) => `<span class="effort-tag">${esc5(effortName(e))}</span>`).join("") : '<span class="muted">\u9ED8\u8BA4</span>'}</td><td><button class="link-btn" data-use-model="${esc5(m.key)}" ${m.enabled ? "" : "disabled"}>\u7528\u4E8E\u65B0\u4F1A\u8BDD</button></td></tr>`).join("") : '<tr><td colspan="5" class="table-empty">\u6CA1\u6709\u5339\u914D\u7684\u6A21\u578B\u3002\u5237\u65B0\u6765\u6E90\u76EE\u5F55\u540E\uFF0C\u6240\u6709\u53EF\u7528\u6A21\u578B\u90FD\u4F1A\u5217\u5728\u8FD9\u91CC\u3002</td></tr>';
+  return rows.length ? rows.map((m) => `<tr><td><div class="model-name">${esc6(m.name)}${m.enabled ? "" : '<span class="muted"> \xB7 \u4E0D\u53EF\u7528</span>'}</div><div class="model-id mono">${esc6(m.id)}</div></td><td>${sourceNames[m.source]}</td><td>${m.contexts.length ? m.contexts.map((c) => `<span class="ctx-tag${c.tokens === m.defaultContextTokens ? " default" : ""}">${compact(c.tokens)}</span>`).join("") : '<span class="muted">\u672A\u58F0\u660E</span>'}</td><td>${m.reasoning.length ? m.reasoning.map((e) => `<span class="effort-tag">${esc6(effortName(e))}</span>`).join("") : '<span class="muted">\u9ED8\u8BA4</span>'}</td><td><button class="link-btn" data-use-model="${esc6(m.key)}" ${m.enabled ? "" : "disabled"}>\u7528\u4E8E\u65B0\u4F1A\u8BDD</button></td></tr>`).join("") : '<tr><td colspan="5" class="table-empty">\u6CA1\u6709\u5339\u914D\u7684\u6A21\u578B\u3002\u5237\u65B0\u6765\u6E90\u76EE\u5F55\u540E\uFF0C\u6240\u6709\u53EF\u7528\u6A21\u578B\u90FD\u4F1A\u5217\u5728\u8FD9\u91CC\u3002</td></tr>';
 }
 function settingsBody(tab) {
   const snap = state.snapshot, theme = snap.preferences.theme ?? "dark";
   if (tab === "sources") return `<div class="settings-head"><h1>\u6A21\u578B\u6E90</h1><p>\u8BFB\u53D6\u8D26\u6237\u7684\u771F\u5B9E\u53EF\u7528\u76EE\u5F55\u3002\u601D\u8003\u5F3A\u5EA6\u548C\u4E0A\u4E0B\u6587\u7A97\u53E3\u4F7F\u7528\u6765\u6E90\u58F0\u660E\u7684\u80FD\u529B\uFF0C\u672A\u58F0\u660E\u7684\u4FDD\u6301\u672A\u77E5\u3002</p></div>
     <div class="source-grid" id="source-grid">${sourceCard("qoder", "\u72EC\u7ACB SDK \u526F\u672C\uFF0C\u590D\u7528\u5B98\u65B9 CLI \u767B\u5F55\u6001\u3002")}${sourceCard("workbuddy", "\u72EC\u7ACB bridge \u526F\u672C\uFF0C\u590D\u7528\u672C\u673A WorkBuddy \u767B\u5F55\u6001\u3002")}${sourceCard("antigravity", "\u72EC\u7ACB Gemini \u6765\u6E90\uFF0C\u56FA\u5B9A\u7531 Antigravity \u539F\u751F\u6267\u884C\u3002")}</div>
-    <div class="catalog-controls"><label class="search-field">${icon("search")}<input id="catalog-search" placeholder="\u641C\u7D22\u6A21\u578B\u540D\u79F0\u3001ID \u6216\u6765\u6E90" value="${esc5(state.catalogSearch)}" autocomplete="off"></label><select id="catalog-source"><option value="all">\u5168\u90E8\u6765\u6E90</option>${Object.entries(sourceNames).map(([id, name]) => `<option value="${id}" ${state.catalogSource === id ? "selected" : ""}>${name}</option>`).join("")}</select></div>
+    <div class="catalog-controls"><label class="search-field">${icon("search")}<input id="catalog-search" placeholder="\u641C\u7D22\u6A21\u578B\u540D\u79F0\u3001ID \u6216\u6765\u6E90" value="${esc6(state.catalogSearch)}" autocomplete="off"></label><select id="catalog-source"><option value="all">\u5168\u90E8\u6765\u6E90</option>${Object.entries(sourceNames).map(([id, name]) => `<option value="${id}" ${state.catalogSource === id ? "selected" : ""}>${name}</option>`).join("")}</select></div>
     <div class="table-wrap"><table class="catalog-table"><thead><tr><th>\u6A21\u578B / \u4E0A\u6E38 ID</th><th>\u6765\u6E90</th><th>\u4E0A\u4E0B\u6587\u7A97\u53E3</th><th>\u601D\u8003\u5F3A\u5EA6</th><th></th></tr></thead><tbody id="model-rows">${catalogRows()}</tbody></table></div>
     <div class="note">${icon("info")}<span>Antigravity \u6765\u6E90\u7684 Gemini \u56FA\u5B9A\u7531 Antigravity \u6267\u884C\uFF0C\u9009\u62E9\u540E\u81EA\u52A8\u5207\u6362\u5230\u8BE5\u73AF\u5883\u3002\u672C\u5730\u538B\u7F29\u9884\u7B97\u53EA\u5F71\u54CD\u8FD0\u884C\u73AF\u5883\u4F55\u65F6\u538B\u7F29\uFF0C\u4E0D\u8868\u793A\u4E0A\u6E38\u7A97\u53E3\u3002</span></div>`;
   if (tab === "runtimes") return `<div class="settings-head row"><div><h1>\u8FD0\u884C\u73AF\u5883</h1><p>\u4EFB\u52A1\u7531\u539F\u751F Agent \u6267\u884C\uFF0C\u5DE5\u5177\u3001\u6280\u80FD\u3001MCP\u3001\u5B50\u4EE3\u7406\u4E0E\u6743\u9650\u90FD\u4FDD\u7559\u5728\u5404\u81EA\u73AF\u5883\u91CC\u3002\u88C5\u597D\u4EFB\u610F\u4E00\u4E2A\u5C31\u80FD\u4F7F\u7528 Bridge++\uFF0C\u6CA1\u88C5\u7684\u73AF\u5883\u4E0D\u4F1A\u51FA\u73B0\u5728\u5DE5\u4F5C\u53F0\u7684\u53EF\u9009\u9879\u91CC\u3002</p></div><div class="head-actions"><button class="btn" id="open-guide">${icon("spark")}\u5F15\u5BFC</button>${Array.isArray(snap.environments) ? `<button class="btn" id="check-environments">${icon("download")}\u68C0\u67E5\u66F4\u65B0</button>` : ""}<button class="btn" id="refresh-runtimes">${icon("refresh")}\u91CD\u65B0\u68C0\u6D4B</button></div></div>
@@ -20601,19 +20663,26 @@ function settingsBody(tab) {
     const rows = Object.entries(snap.preferences.modelDefaults);
     return `<div class="settings-head"><h1>\u9ED8\u8BA4\u642D\u914D</h1><p>\u5728\u7F16\u8F91\u6846\u7684\u6A21\u578B\u83DC\u5355\u91CC\u70B9\u51FB\u201C\u8BB0\u4F4F\u6B64\u642D\u914D\u201D\uFF0C\u518D\u6B21\u9009\u62E9\u8BE5\u6A21\u578B\u65F6\u4F1A\u81EA\u52A8\u6062\u590D\u601D\u8003\u5F3A\u5EA6\u3001\u7A97\u53E3\u4E0E\u9884\u7B97\u3002</p></div>${rows.length ? `<div class="table-wrap"><table class="catalog-table"><thead><tr><th>\u6A21\u578B</th><th>\u8FD0\u884C\u73AF\u5883</th><th>\u601D\u8003</th><th>\u7A97\u53E3</th><th>\u9884\u7B97</th></tr></thead><tbody>${rows.map(([key, v2]) => {
       const m = models().find((x2) => x2.key === key);
-      return `<tr><td><div class="model-name">${esc5(key.startsWith("native") ? `\u539F\u751F\u6A21\u578B \xB7 ${v2.nativeModel || "\u5F53\u524D\u9ED8\u8BA4"}` : m?.name ?? key)}</div><div class="model-id mono">${esc5(key)}</div></td><td>${esc5(runtime(v2.runtimeId)?.name ?? v2.runtimeId ?? "\u2014")}</td><td>${esc5(v2.reasoning ? effortName(v2.reasoning) : "\u9ED8\u8BA4")}</td><td>${v2.contextTokens ? compact(v2.contextTokens) : "\u2014"}</td><td>${v2.contextBudget ? compact(v2.contextBudget) : "\u2014"}</td></tr>`;
+      return `<tr><td><div class="model-name">${esc6(key.startsWith("native") ? `\u539F\u751F\u6A21\u578B \xB7 ${v2.nativeModel || "\u5F53\u524D\u9ED8\u8BA4"}` : m?.name ?? key)}</div><div class="model-id mono">${esc6(key)}</div></td><td>${esc6(runtime(v2.runtimeId)?.name ?? v2.runtimeId ?? "\u2014")}</td><td>${esc6(v2.reasoning ? effortName(v2.reasoning) : "\u9ED8\u8BA4")}</td><td>${v2.contextTokens ? compact(v2.contextTokens) : "\u2014"}</td><td>${v2.contextBudget ? compact(v2.contextBudget) : "\u2014"}</td></tr>`;
     }).join("")}</tbody></table></div>` : '<div class="note">\u8FD8\u6CA1\u6709\u4FDD\u5B58\u7684\u642D\u914D\u3002</div>'}`;
   }
+  if (tab === "rules") {
+    if (!state.rules && !state.rulesLoading && !state.rulesError) void loadRules();
+    const sourceModels = models().filter((m) => m.enabled && ["qoder", "workbuddy"].includes(m.source)), seen = /* @__PURE__ */ new Map();
+    for (const m of sourceModels) seen.set(sourceName(m), (seen.get(sourceName(m)) ?? 0) + 1);
+    const detectorModels = sourceModels.map((m) => ({ key: m.key, name: seen.get(sourceName(m)) > 1 ? `${sourceName(m)} \xB7 ${m.id}` : sourceName(m), group: sourceNames[m.source] ?? m.source }));
+    return rulesPageHtml(state.rules, { editing: state.rulesEditing, draft: state.rulesDraft, loading: state.rulesSaving, error: state.rulesError, models: detectorModels });
+  }
   if (tab === "shortcuts") return `<div class="settings-head"><h1>\u5FEB\u6377\u952E</h1></div><dl class="kv">${[["Ctrl + N", "\u65B0\u5EFA\u4F1A\u8BDD"], ["Enter", "\u53D1\u9001\u4EFB\u52A1"], ["Shift + Enter", "\u6362\u884C"], ["Ctrl + B", "\u6536\u8D77 / \u5C55\u5F00\u5DE6\u4FA7\u680F"], ["Ctrl + Alt + B", "\u6536\u8D77 / \u5C55\u5F00\u53F3\u4FA7\u9762\u677F"], ["Ctrl + J", "\u6253\u5F00\u4EFB\u52A1\u4E0E\u7EC8\u7AEF"], ["Ctrl + S", "\u4FDD\u5B58\u6B63\u5728\u7F16\u8F91\u7684\u6587\u4EF6"], ["Ctrl + ,", "\u6253\u5F00\u8BBE\u7F6E"], ["Esc", "\u5173\u95ED\u83DC\u5355\u6216\u8BBE\u7F6E"]].map(([k, v2]) => `<dt><kbd>${k}</kbd></dt><dd>${v2}</dd>`).join("")}</dl>`;
-  if (tab === "about") return `<div class="settings-head about"><div class="about-mark">${logo(48)}</div><h1>Bridge++</h1><p>\u628A\u4F60\u7684\u6A21\u578B\u6E90\u63A5\u5230\u719F\u6089\u7684\u539F\u751F Agent \u91CC\uFF0C\u5728\u4E00\u4E2A\u5DE5\u4F5C\u533A\u7BA1\u7406\u4F1A\u8BDD\u3001\u53D8\u66F4\u4E0E\u6587\u4EF6\u3002</p></div><dl class="kv"><dt>\u7248\u672C</dt><dd>${esc5(snap.app.version)}</dd><dt>\u5DE5\u4F5C\u533A\u6570\u636E</dt><dd class="mono">${esc5(snap.app.dataDir)}</dd><dt>\u5DE5\u4F5C\u6587\u4EF6\u5939</dt><dd>${snap.projects.length} \u4E2A</dd><dt>\u5DF2\u4FDD\u5B58\u4F1A\u8BDD</dt><dd>${snap.sessions.length} \u4E2A</dd></dl>${updateSectionHtml(snap.updates)}<div class="note">${icon("info")}<span>Qoder CN \u548C WorkBuddy \u7684 bridge \u5185\u7F6E\u5728 Bridge++ \u91CC\uFF1B\u8981\u8BA9\u5176\u4ED6 Agent \u4F7F\u7528\u8FD9\u4E24\u4E2A\u6A21\u578B\u6E90\uFF0C\u8BF7\u5230\u8BBE\u7F6E \u2192 \u5BF9\u5916\u63A5\u53E3\u3002</span></div>`;
+  if (tab === "about") return `<div class="settings-head about"><div class="about-mark">${logo(48)}</div><h1>Bridge++</h1><p>\u628A\u4F60\u7684\u6A21\u578B\u6E90\u63A5\u5230\u719F\u6089\u7684\u539F\u751F Agent \u91CC\uFF0C\u5728\u4E00\u4E2A\u5DE5\u4F5C\u533A\u7BA1\u7406\u4F1A\u8BDD\u3001\u53D8\u66F4\u4E0E\u6587\u4EF6\u3002</p></div><dl class="kv"><dt>\u7248\u672C</dt><dd>${esc6(snap.app.version)}</dd><dt>\u5DE5\u4F5C\u533A\u6570\u636E</dt><dd class="mono">${esc6(snap.app.dataDir)}</dd><dt>\u5DE5\u4F5C\u6587\u4EF6\u5939</dt><dd>${snap.projects.length} \u4E2A</dd><dt>\u5DF2\u4FDD\u5B58\u4F1A\u8BDD</dt><dd>${snap.sessions.length} \u4E2A</dd></dl>${updateSectionHtml(snap.updates)}<div class="note">${icon("info")}<span>Qoder CN \u548C WorkBuddy \u7684 bridge \u5185\u7F6E\u5728 Bridge++ \u91CC\uFF1B\u8981\u8BA9\u5176\u4ED6 Agent \u4F7F\u7528\u8FD9\u4E24\u4E2A\u6A21\u578B\u6E90\uFF0C\u8BF7\u5230\u8BBE\u7F6E \u2192 \u5BF9\u5916\u63A5\u53E3\u3002</span></div>`;
   return `<div class="settings-head"><h1>\u901A\u7528</h1><p>\u754C\u9762\u5916\u89C2\u4E0E\u5DE5\u4F5C\u533A\u4FE1\u606F\u3002</p></div>
     <h2>\u5916\u89C2</h2><div class="theme-grid">${[["system", "monitor", "\u8DDF\u968F\u7CFB\u7EDF"], ["light", "sun", "\u6D45\u8272"], ["dark", "moon", "\u6DF1\u8272"]].map(([id, ico, label]) => `<button class="theme-card${theme === id ? " active" : ""}" data-theme-choice="${id}"><span class="theme-preview ${id}"><i></i><i></i><i></i></span><span class="theme-label">${icon(ico)}${label}</span></button>`).join("")}</div>
-    <h2>\u5DE5\u4F5C\u533A</h2><dl class="kv"><dt>\u6570\u636E\u76EE\u5F55</dt><dd class="mono">${esc5(snap.app.dataDir)}</dd><dt>\u5DE5\u4F5C\u6587\u4EF6\u5939</dt><dd>${snap.projects.length} \u4E2A</dd><dt>\u4F1A\u8BDD</dt><dd>${snap.sessions.filter((s) => !s.archived).length} \u4E2A\uFF08\u53E6\u6709 ${snap.sessions.filter((s) => s.archived).length} \u4E2A\u5DF2\u5F52\u6863\uFF09</dd><dt>\u7248\u672C</dt><dd>${esc5(snap.app.version)}</dd></dl>`;
+    <h2>\u5DE5\u4F5C\u533A</h2><dl class="kv"><dt>\u6570\u636E\u76EE\u5F55</dt><dd class="mono">${esc6(snap.app.dataDir)}</dd><dt>\u5DE5\u4F5C\u6587\u4EF6\u5939</dt><dd>${snap.projects.length} \u4E2A</dd><dt>\u4F1A\u8BDD</dt><dd>${snap.sessions.filter((s) => !s.archived).length} \u4E2A\uFF08\u53E6\u6709 ${snap.sessions.filter((s) => s.archived).length} \u4E2A\u5DF2\u5F52\u6863\uFF09</dd><dt>\u7248\u672C</dt><dd>${esc6(snap.app.version)}</dd></dl>`;
 }
 function renderSettings() {
   const tab = state.settings, el = $2("#settings");
   if (!tab || !state.snapshot) return;
-  const nav = [["general", "settings", "\u901A\u7528"], ["sources", "layers", "\u6A21\u578B\u6E90"], ["runtimes", "cpu", "\u8FD0\u884C\u73AF\u5883"], ["services", "plug", "\u5BF9\u5916\u63A5\u53E3"], ["defaults", "list", "\u9ED8\u8BA4\u642D\u914D"], ["shortcuts", "keyboard", "\u5FEB\u6377\u952E"], ["about", "info", "\u5173\u4E8E"]];
+  const nav = [["general", "settings", "\u901A\u7528"], ["sources", "layers", "\u6A21\u578B\u6E90"], ["runtimes", "cpu", "\u8FD0\u884C\u73AF\u5883"], ["services", "plug", "\u5BF9\u5916\u63A5\u53E3"], ["defaults", "list", "\u9ED8\u8BA4\u642D\u914D"], ["rules", "bulb", "\u957F\u671F\u8981\u6C42"], ["shortcuts", "keyboard", "\u5FEB\u6377\u952E"], ["about", "info", "\u5173\u4E8E"]];
   el.innerHTML = `<aside class="settings-nav"><div class="settings-top"><button class="icon-btn" id="close-settings" title="\u8FD4\u56DE (Esc)">${icon("arrowLeft")}</button><span>\u8BBE\u7F6E</span></div>${nav.map(([id, ico, label]) => `<button class="settings-tab${tab === id ? " active" : ""}" data-settings-tab="${id}">${icon(ico)}<span>${label}</span></button>`).join("")}</aside><div class="settings-main"><div class="settings-drag"></div><div class="settings-scroll"><div class="settings-body" id="settings-body">${settingsBody(tab)}</div></div></div>`;
   bind("#catalog-search", "input", (e) => {
     state.catalogSearch = e.target.value;
@@ -20623,6 +20692,66 @@ function renderSettings() {
     state.catalogSource = e.target.value;
     $2("#model-rows").innerHTML = catalogRows();
   });
+  bind("#rule-add-text", "keydown", (e) => {
+    if (e.key === "Enter" && !e.isComposing) {
+      e.preventDefault();
+      void action(() => rulesAction("add"));
+    }
+  });
+  bind("#rules-text", "input", (e) => {
+    state.rulesDraft = e.target.value;
+  });
+}
+async function loadRules() {
+  state.rulesLoading = true;
+  try {
+    state.rules = await call("rules:get");
+    state.rulesError = null;
+  } catch (error) {
+    state.rulesError = error.message;
+  } finally {
+    state.rulesLoading = false;
+  }
+  if (state.settings === "rules" && !state.rulesEditing) renderSettings();
+}
+async function rulesAction(kind) {
+  if (kind === "edit") {
+    state.rulesEditing = true;
+    state.rulesDraft = state.rules?.text ?? "";
+    renderSettings();
+    $2("#rules-text")?.focus();
+    return;
+  }
+  if (kind === "cancel-edit") {
+    state.rulesEditing = false;
+    state.rulesDraft = null;
+    renderSettings();
+    return;
+  }
+  if (kind === "add") {
+    const input = $2("#rule-add-text"), text3 = input?.value.trim();
+    if (!text3) {
+      input?.focus();
+      return;
+    }
+    state.rules = await call("rules:add", { text: text3 });
+    renderSettings();
+    toast("\u5DF2\u6DFB\u52A0\u957F\u671F\u8981\u6C42");
+    return;
+  }
+  if (kind === "save-text") {
+    state.rulesSaving = true;
+    renderSettings();
+    try {
+      state.rules = await call("rules:save", { text: $2("#rules-text")?.value ?? state.rulesDraft ?? "" });
+      state.rulesEditing = false;
+      state.rulesDraft = null;
+      toast("\u5DF2\u4FDD\u5B58");
+    } finally {
+      state.rulesSaving = false;
+      renderSettings();
+    }
+  }
 }
 function runtimeCards() {
   const envs = new Map((state.snapshot.environments ?? []).map((e) => [e.id, e]));
@@ -20646,7 +20775,7 @@ function modal(title, body, confirm, { confirm: confirmText = "\u4FDD\u5B58", da
   const el = $2("#modal");
   el.className = "";
   guideOpen = false;
-  el.innerHTML = `<h2>${esc5(title)}</h2><div class="modal-body">${body}</div><div class="modal-actions"><button id="modal-cancel" class="btn">\u53D6\u6D88</button><button id="modal-confirm" class="btn ${danger ? "danger-solid" : "primary"}">${esc5(confirmText)}</button></div>`;
+  el.innerHTML = `<h2>${esc6(title)}</h2><div class="modal-body">${body}</div><div class="modal-actions"><button id="modal-cancel" class="btn">\u53D6\u6D88</button><button id="modal-confirm" class="btn ${danger ? "danger-solid" : "primary"}">${esc6(confirmText)}</button></div>`;
   el.showModal();
   bind("#modal-cancel", "click", () => el.close());
   bind("#modal-confirm", "click", () => void action(async () => {
@@ -20662,12 +20791,12 @@ var releaseDate = (iso) => {
 var percent = (d) => d.total ? Math.min(100, Math.floor(d.received / d.total * 100)) : 0;
 function updateSlotHtml(u) {
   const d = u?.download ?? {}, v2 = u?.latest?.version;
-  if (d.status === "downloaded" && d.version) return `<div class="update-card ready"><span class="uc-icon">${icon("download")}</span><span class="uc-text"><b>\u6709\u65B0\u66F4\u65B0\u5F85\u5B89\u88C5</b><small>V${esc5(d.version)} \u5DF2\u4E0B\u8F7D</small></span><button class="btn primary sm" data-update="install">\u5B89\u88C5</button></div>`;
+  if (d.status === "downloaded" && d.version) return `<div class="update-card ready"><span class="uc-icon">${icon("download")}</span><span class="uc-text"><b>\u6709\u65B0\u66F4\u65B0\u5F85\u5B89\u88C5</b><small>V${esc6(d.version)} \u5DF2\u4E0B\u8F7D</small></span><button class="btn primary sm" data-update="install">\u5B89\u88C5</button></div>`;
   if (u?.status !== "available" || !v2) return "";
-  if (d.status === "downloading") return `<div class="update-card"><span class="uc-icon"><span class="spinner"></span></span><span class="uc-text"><b>\u6B63\u5728\u4E0B\u8F7D V${esc5(v2)}</b><small>${d.total ? `${percent(d)}% \xB7 ${sizeText(d.received) || "0 KB"} / ${sizeText(d.total)}` : "\u6B63\u5728\u8FDE\u63A5\u2026"}</small><span class="uc-bar"><i style="width:${percent(d)}%"></i></span></span><button class="icon-btn sm" data-update="cancel" title="\u53D6\u6D88\u4E0B\u8F7D">${icon("close")}</button></div>`;
+  if (d.status === "downloading") return `<div class="update-card"><span class="uc-icon"><span class="spinner"></span></span><span class="uc-text"><b>\u6B63\u5728\u4E0B\u8F7D V${esc6(v2)}</b><small>${d.total ? `${percent(d)}% \xB7 ${sizeText(d.received) || "0 KB"} / ${sizeText(d.total)}` : "\u6B63\u5728\u8FDE\u63A5\u2026"}</small><span class="uc-bar"><i style="width:${percent(d)}%"></i></span></span><button class="icon-btn sm" data-update="cancel" title="\u53D6\u6D88\u4E0B\u8F7D">${icon("close")}</button></div>`;
   const failed = d.status === "failed" && (!d.version || d.version === v2), asset = u.latest.asset;
-  const sub2 = failed ? `<small class="uc-error" title="${esc5(d.error ?? "")}">\u4E0B\u8F7D\u5931\u8D25${d.error ? `\uFF1A${esc5(d.error)}` : ""}</small>` : `<small>${asset ? esc5(sizeText(asset.size)) : "\u5230\u53D1\u5E03\u9875\u4E0B\u8F7D"}</small>`;
-  return `<div class="update-card"><span class="uc-icon">${icon("arrowUp")}</span><span class="uc-text"><b>\u6709\u65B0\u7248\u672C V${esc5(v2)}</b>${sub2}</span><button class="btn sm" data-update="${asset ? "download" : "page"}">${asset ? failed ? "\u91CD\u8BD5" : "\u4E0B\u8F7D" : "\u67E5\u770B"}</button></div>`;
+  const sub2 = failed ? `<small class="uc-error" title="${esc6(d.error ?? "")}">\u4E0B\u8F7D\u5931\u8D25${d.error ? `\uFF1A${esc6(d.error)}` : ""}</small>` : `<small>${asset ? esc6(sizeText(asset.size)) : "\u5230\u53D1\u5E03\u9875\u4E0B\u8F7D"}</small>`;
+  return `<div class="update-card"><span class="uc-icon">${icon("arrowUp")}</span><span class="uc-text"><b>\u6709\u65B0\u7248\u672C V${esc6(v2)}</b>${sub2}</span><button class="btn sm" data-update="${asset ? "download" : "page"}">${asset ? failed ? "\u91CD\u8BD5" : "\u4E0B\u8F7D" : "\u67E5\u770B"}</button></div>`;
 }
 function renderUpdateSlot() {
   const el = $2("#update-slot");
@@ -20678,10 +20807,10 @@ function renderUpdateSlot() {
 function updateSectionHtml(u) {
   if (!u) return "";
   const d = u.download ?? {}, v2 = u.latest?.version;
-  const line = u.checking ? `<span class="spinner"></span><span>\u6B63\u5728\u68C0\u67E5\u66F4\u65B0\u2026</span>` : u.status === "error" ? `${icon("alert")}<span>\u68C0\u67E5\u5931\u8D25\uFF1A${esc5(u.error ?? "\u672A\u77E5\u539F\u56E0")}</span>` : u.status === "available" && v2 ? `${icon("arrowUp")}<span>\u6709\u65B0\u7248\u672C V${esc5(v2)}${u.latest.publishedAt ? `\uFF08${esc5(releaseDate(u.latest.publishedAt))}\u53D1\u5E03\uFF09` : ""}</span>${u.latest.url ? `<button class="link-btn" data-update="page">\u53D1\u5E03\u8BF4\u660E</button>` : ""}` : u.status === "latest" ? `${icon("check")}<span>\u5DF2\u662F\u6700\u65B0\u7248\u672C</span>` : `${icon("info")}<span>\u8FD8\u6CA1\u6709\u68C0\u67E5\u8FC7\u66F4\u65B0</span>`;
-  const download = d.status === "downloading" ? `<div class="update-line"><span class="spinner"></span><span>\u6B63\u5728\u4E0B\u8F7D V${esc5(d.version ?? v2 ?? "")}${d.total ? ` \xB7 ${percent(d)}%` : ""}</span><span class="uc-bar wide"><i style="width:${percent(d)}%"></i></span><button class="link-btn" data-update="cancel">\u53D6\u6D88</button></div>` : d.status === "downloaded" && d.version ? `<div class="update-line">${icon("download")}<span>V${esc5(d.version)} \u5DF2\u4E0B\u8F7D${u.latest?.version === d.version && !u.latest?.asset?.digest ? "\uFF08\u53D1\u5E03\u6CA1\u6709\u63D0\u4F9B SHA-256\uFF0C\u53EA\u6838\u5BF9\u4E86\u6587\u4EF6\u5927\u5C0F\uFF09" : ""}\u3002\u5B89\u88C5\u65F6\u4F1A\u5173\u95ED Bridge++\uFF0C\u6570\u636E\u548C\u8BBE\u7F6E\u90FD\u4F1A\u4FDD\u7559\u3002</span><button class="btn primary sm" data-update="install">\u5B89\u88C5</button></div>` : d.status === "failed" && d.error ? `<div class="update-line warn">${icon("alert")}<span>\u4E0B\u8F7D\u5931\u8D25\uFF1A${esc5(d.error)}</span>${u.latest?.asset ? `<button class="link-btn" data-update="download">\u91CD\u8BD5</button>` : ""}</div>` : u.status === "available" && u.latest?.asset ? `<div class="update-line"><button class="btn sm" data-update="download">${icon("download")}\u4E0B\u8F7D\u66F4\u65B0\u5305\uFF08${esc5(sizeText(u.latest.asset.size))}\uFF09</button></div>` : "";
+  const line = u.checking ? `<span class="spinner"></span><span>\u6B63\u5728\u68C0\u67E5\u66F4\u65B0\u2026</span>` : u.status === "error" ? `${icon("alert")}<span>\u68C0\u67E5\u5931\u8D25\uFF1A${esc6(u.error ?? "\u672A\u77E5\u539F\u56E0")}</span>` : u.status === "available" && v2 ? `${icon("arrowUp")}<span>\u6709\u65B0\u7248\u672C V${esc6(v2)}${u.latest.publishedAt ? `\uFF08${esc6(releaseDate(u.latest.publishedAt))}\u53D1\u5E03\uFF09` : ""}</span>${u.latest.url ? `<button class="link-btn" data-update="page">\u53D1\u5E03\u8BF4\u660E</button>` : ""}` : u.status === "latest" ? `${icon("check")}<span>\u5DF2\u662F\u6700\u65B0\u7248\u672C</span>` : `${icon("info")}<span>\u8FD8\u6CA1\u6709\u68C0\u67E5\u8FC7\u66F4\u65B0</span>`;
+  const download = d.status === "downloading" ? `<div class="update-line"><span class="spinner"></span><span>\u6B63\u5728\u4E0B\u8F7D V${esc6(d.version ?? v2 ?? "")}${d.total ? ` \xB7 ${percent(d)}%` : ""}</span><span class="uc-bar wide"><i style="width:${percent(d)}%"></i></span><button class="link-btn" data-update="cancel">\u53D6\u6D88</button></div>` : d.status === "downloaded" && d.version ? `<div class="update-line">${icon("download")}<span>V${esc6(d.version)} \u5DF2\u4E0B\u8F7D${u.latest?.version === d.version && !u.latest?.asset?.digest ? "\uFF08\u53D1\u5E03\u6CA1\u6709\u63D0\u4F9B SHA-256\uFF0C\u53EA\u6838\u5BF9\u4E86\u6587\u4EF6\u5927\u5C0F\uFF09" : ""}\u3002\u5B89\u88C5\u65F6\u4F1A\u5173\u95ED Bridge++\uFF0C\u6570\u636E\u548C\u8BBE\u7F6E\u90FD\u4F1A\u4FDD\u7559\u3002</span><button class="btn primary sm" data-update="install">\u5B89\u88C5</button></div>` : d.status === "failed" && d.error ? `<div class="update-line warn">${icon("alert")}<span>\u4E0B\u8F7D\u5931\u8D25\uFF1A${esc6(d.error)}</span>${u.latest?.asset ? `<button class="link-btn" data-update="download">\u91CD\u8BD5</button>` : ""}</div>` : u.status === "available" && u.latest?.asset ? `<div class="update-line"><button class="btn sm" data-update="download">${icon("download")}\u4E0B\u8F7D\u66F4\u65B0\u5305\uFF08${esc6(sizeText(u.latest.asset.size))}\uFF09</button></div>` : "";
   return `<h2>\u66F4\u65B0</h2><div class="update-line">${line}</div>${download}
-    <div class="update-actions"><button class="btn sm" data-update="check" ${u.checking ? "disabled" : ""}>${icon("refresh")}\u68C0\u67E5\u66F4\u65B0</button><span class="muted">${u.checkedAt ? `\u4E0A\u6B21\u68C0\u67E5\uFF1A${esc5(since(u.checkedAt))}` : "\u6BCF\u5929\u7B2C\u4E00\u6B21\u542F\u52A8\u65F6\u81EA\u52A8\u68C0\u67E5"}</span></div>
+    <div class="update-actions"><button class="btn sm" data-update="check" ${u.checking ? "disabled" : ""}>${icon("refresh")}\u68C0\u67E5\u66F4\u65B0</button><span class="muted">${u.checkedAt ? `\u4E0A\u6B21\u68C0\u67E5\uFF1A${esc6(since(u.checkedAt))}` : "\u6BCF\u5929\u7B2C\u4E00\u6B21\u542F\u52A8\u65F6\u81EA\u52A8\u68C0\u67E5"}</span></div>
     <label class="update-auto"><input type="checkbox" data-update-auto ${u.autoDownload ? "checked" : ""}><span><b>\u81EA\u52A8\u4E0B\u8F7D\u66F4\u65B0\u5305</b><small>\u6709\u65B0\u7248\u672C\u65F6\u5728\u540E\u53F0\u4E0B\u8F7D\uFF0C\u4E0B\u8F7D\u5B8C\u5728\u5DE6\u4E0B\u89D2\u63D0\u793A\u5B89\u88C5</small></span></label>`;
 }
 async function installUpdate(force) {
@@ -20689,7 +20818,7 @@ async function installUpdate(force) {
     await call("update:install", { force });
   } catch (error) {
     if (error.code !== "sessions_running" || force) throw error;
-    setTimeout(() => modal("\u5B89\u88C5\u66F4\u65B0", `<p>${esc5(error.message)}\u3002</p><p>\u4ECD\u8981\u73B0\u5728\u5B89\u88C5\u5417\uFF1F</p>`, () => installUpdate(true), { confirm: "\u4E2D\u65AD\u4EFB\u52A1\u5E76\u5B89\u88C5", danger: true }), 0);
+    setTimeout(() => modal("\u5B89\u88C5\u66F4\u65B0", `<p>${esc6(error.message)}\u3002</p><p>\u4ECD\u8981\u73B0\u5728\u5B89\u88C5\u5417\uFF1F</p>`, () => installUpdate(true), { confirm: "\u4E2D\u65AD\u4EFB\u52A1\u5E76\u5B89\u88C5", danger: true }), 0);
   }
 }
 async function updateAction(kind) {
@@ -20699,7 +20828,7 @@ async function updateAction(kind) {
     return;
   }
   if (kind === "install") {
-    modal("\u5B89\u88C5\u66F4\u65B0", `<p>\u5C06\u5173\u95ED Bridge++ \u5E76\u8FD0\u884C V${esc5(u?.download?.version ?? "")} \u7684\u5B89\u88C5\u7A0B\u5E8F\u3002\u6570\u636E\u548C\u8BBE\u7F6E\u90FD\u4F1A\u4FDD\u7559\uFF0C\u88C5\u597D\u540E\u81EA\u52A8\u6253\u5F00\u3002</p><p class="q-note">\u5BF9\u5916\u63A5\u53E3\u4F1A\u5728\u5B89\u88C5\u65F6\u6682\u505C\uFF0C\u88C5\u5B8C\u81EA\u52A8\u6062\u590D\u3002</p>`, () => installUpdate(false), { confirm: "\u5173\u95ED\u5E76\u5B89\u88C5" });
+    modal("\u5B89\u88C5\u66F4\u65B0", `<p>\u5C06\u5173\u95ED Bridge++ \u5E76\u8FD0\u884C V${esc6(u?.download?.version ?? "")} \u7684\u5B89\u88C5\u7A0B\u5E8F\u3002\u6570\u636E\u548C\u8BBE\u7F6E\u90FD\u4F1A\u4FDD\u7559\uFF0C\u88C5\u597D\u540E\u81EA\u52A8\u6253\u5F00\u3002</p><p class="q-note">\u5BF9\u5916\u63A5\u53E3\u4F1A\u5728\u5B89\u88C5\u65F6\u6682\u505C\uFF0C\u88C5\u5B8C\u81EA\u52A8\u6062\u590D\u3002</p>`, () => installUpdate(false), { confirm: "\u5173\u95ED\u5E76\u5B89\u88C5" });
     return;
   }
   if (kind === "check") {
@@ -20742,9 +20871,9 @@ var FEEDBACK_KINDS = {
   rebind: "\u6362\u6A21\u578B\u6216\u53C2\u6570"
 };
 function feedbackSummaryHtml(p) {
-  const chips = (group) => Object.entries(group?.byKind ?? {}).filter(([, n]) => n).map(([k, n]) => `<span class="fb-chip">${esc5(FEEDBACK_KINDS[k] ?? k)} ${n}</span>`).join("");
+  const chips = (group) => Object.entries(group?.byKind ?? {}).filter(([, n]) => n).map(([k, n]) => `<span class="fb-chip">${esc6(FEEDBACK_KINDS[k] ?? k)} ${n}</span>`).join("");
   const all = chips(p.errors) + chips(p.corrections);
-  return `<div class="fb-counts"><span><b>${p.turns ?? 0}</b> \u8F6E</span><span><b>${p.errors?.total ?? 0}</b> \u5904\u62A5\u9519</span><span><b>${p.corrections?.total ?? 0}</b> \u6B21\u7EA0\u6B63</span><span class="muted">\u7EA6 ${esc5(sizeText(p.bytes) || "1 KB")}${p.truncated ? "\uFF0C\u6700\u65E9\u7684\u8BB0\u5F55\u5DF2\u622A\u65AD" : ""}</span></div>${all ? `<div class="fb-chips">${all}</div>` : ""}`;
+  return `<div class="fb-counts"><span><b>${p.turns ?? 0}</b> \u8F6E</span><span><b>${p.errors?.total ?? 0}</b> \u5904\u62A5\u9519</span><span><b>${p.corrections?.total ?? 0}</b> \u6B21\u7EA0\u6B63</span><span class="muted">\u7EA6 ${esc6(sizeText(p.bytes) || "1 KB")}${p.truncated ? "\uFF0C\u6700\u65E9\u7684\u8BB0\u5F55\u5DF2\u622A\u65AD" : ""}</span></div>${all ? `<div class="fb-chips">${all}</div>` : ""}`;
 }
 async function openFeedback() {
   const s = session();
@@ -20771,7 +20900,7 @@ async function openFeedback() {
       if (box) box.innerHTML = feedbackSummaryHtml(p);
     } catch (e) {
       const box = el();
-      if (box) box.innerHTML = `<div class="fb-loading">${icon("alert")}<span>${esc5(e.message)}</span></div>`;
+      if (box) box.innerHTML = `<div class="fb-loading">${icon("alert")}<span>${esc6(e.message)}</span></div>`;
     }
   };
   bind("#fb-conversation", "change", (e) => {
@@ -21021,7 +21150,7 @@ async function openNative() {
 function renameSession() {
   const s = session();
   if (!s) return;
-  modal("\u91CD\u547D\u540D\u4F1A\u8BDD", `<input id="session-title" value="${esc5(s.title)}" maxlength="100" autocomplete="off">`, async () => {
+  modal("\u91CD\u547D\u540D\u4F1A\u8BDD", `<input id="session-title" value="${esc6(s.title)}" maxlength="100" autocomplete="off">`, async () => {
     await call("session:rename", { sessionId: s.id, title: $2("#session-title").value });
     await snapshot();
     renderFolders();
@@ -21034,7 +21163,7 @@ function renameSession() {
 function archiveSession(id) {
   const s = state.snapshot.sessions.find((x2) => x2.id === id);
   if (!s) return;
-  modal("\u5F52\u6863\u4F1A\u8BDD", `<p>\u201C${esc5(s.title)}\u201D\u4F1A\u4ECE\u5217\u8868\u4E2D\u9690\u85CF\uFF0C\u4F1A\u8BDD\u8BB0\u5F55\u4ECD\u4FDD\u7559\u5728\u5DE5\u4F5C\u533A\u6570\u636E\u76EE\u5F55\u91CC\u3002</p>`, async () => {
+  modal("\u5F52\u6863\u4F1A\u8BDD", `<p>\u201C${esc6(s.title)}\u201D\u4F1A\u4ECE\u5217\u8868\u4E2D\u9690\u85CF\uFF0C\u4F1A\u8BDD\u8BB0\u5F55\u4ECD\u4FDD\u7559\u5728\u5DE5\u4F5C\u533A\u6570\u636E\u76EE\u5F55\u91CC\u3002</p>`, async () => {
     await call("session:archive", { sessionId: id });
     if (state.sessionId === id) {
       state.sessionId = null;
@@ -21050,10 +21179,10 @@ function openRecovery(s) {
   const model = modelOf(s.selection);
   if (!model?.enabled) throw new Error("\u8BF7\u5148\u5237\u65B0\u6A21\u578B\u6E90\uFF0C\u7B49\u540C\u4E00\u6A21\u578B\u91CD\u65B0\u53EF\u7528\u540E\u518D\u786E\u8BA4");
   const selected = s.selection, hasContext = model.contexts.some((c) => c.tokens === selected.contextTokens);
-  modal("\u91CD\u65B0\u786E\u8BA4\u6A21\u578B\u4E0E\u53C2\u6570", `<p>\u7EE7\u7EED\u4F7F\u7528 ${esc5(sourceNames[model.source])} \xB7 ${esc5(model.name)}<br><span class="mono">\u6A21\u578B ID\uFF1A${esc5(model.id)}</span><br>\u786E\u8BA4\u540E\u4FDD\u7559\u5F53\u524D\u8FD0\u884C\u73AF\u5883\u3001\u539F\u751F\u4F1A\u8BDD\u548C\u5386\u53F2\u8BB0\u5F55\u3002</p>
-    <label for="rebind-reasoning">\u601D\u8003\u5F3A\u5EA6</label><select id="rebind-reasoning"><option value="">\u6765\u6E90\u9ED8\u8BA4</option>${model.reasoning.map((e) => `<option value="${esc5(e)}" ${selected.reasoning === e ? "selected" : ""}>${esc5(effortName(e))}</option>`).join("")}</select>
+  modal("\u91CD\u65B0\u786E\u8BA4\u6A21\u578B\u4E0E\u53C2\u6570", `<p>\u7EE7\u7EED\u4F7F\u7528 ${esc6(sourceNames[model.source])} \xB7 ${esc6(model.name)}<br><span class="mono">\u6A21\u578B ID\uFF1A${esc6(model.id)}</span><br>\u786E\u8BA4\u540E\u4FDD\u7559\u5F53\u524D\u8FD0\u884C\u73AF\u5883\u3001\u539F\u751F\u4F1A\u8BDD\u548C\u5386\u53F2\u8BB0\u5F55\u3002</p>
+    <label for="rebind-reasoning">\u601D\u8003\u5F3A\u5EA6</label><select id="rebind-reasoning"><option value="">\u6765\u6E90\u9ED8\u8BA4</option>${model.reasoning.map((e) => `<option value="${esc6(e)}" ${selected.reasoning === e ? "selected" : ""}>${esc6(effortName(e))}</option>`).join("")}</select>
     <label for="rebind-context">\u4E0A\u4E0B\u6587\u7A97\u53E3</label><select id="rebind-context">${model.contexts.length ? "" : '<option value="">\u539F\u751F\u9ED8\u8BA4</option>'}${model.contexts.map((c) => `<option value="${c.tokens}" ${(hasContext ? selected.contextTokens : defaultContext(model)) === c.tokens ? "selected" : ""}>${compact(c.tokens)}${c.tokens === model.defaultContextTokens ? "\uFF08\u9ED8\u8BA4\uFF09" : ""}</option>`).join("")}</select>
-    <label for="rebind-budget">\u672C\u5730\u538B\u7F29\u9884\u7B97\uFF08\u53EF\u7559\u7A7A\uFF0C\u4F8B\u5982 200K\u30010.5M\uFF09</label><input id="rebind-budget" type="text" inputmode="decimal" autocomplete="off" spellcheck="false" placeholder="\u4E0D\u8BBE\u7F6E" value="${esc5(selected.contextBudget ? formatTokens(selected.contextBudget) : "")}">`, async () => {
+    <label for="rebind-budget">\u672C\u5730\u538B\u7F29\u9884\u7B97\uFF08\u53EF\u7559\u7A7A\uFF0C\u4F8B\u5982 200K\u30010.5M\uFF09</label><input id="rebind-budget" type="text" inputmode="decimal" autocomplete="off" spellcheck="false" placeholder="\u4E0D\u8BBE\u7F6E" value="${esc6(selected.contextBudget ? formatTokens(selected.contextBudget) : "")}">`, async () => {
     const context = $2("#rebind-context").value, contextTokens = context ? Number(context) : null, check = budgetCheck($2("#rebind-budget").value, { max: budgetMax(model, contextTokens) });
     if (!check.ok) throw new Error(`\u672C\u5730\u538B\u7F29\u9884\u7B97\uFF1A${check.text}`);
     await call("session:rebind", { sessionId: s.id, selection: { ...selected, identity: model.identity, reasoning: $2("#rebind-reasoning").value || void 0, contextTokens, contextBudget: check.value } });
@@ -21105,7 +21234,7 @@ function answerQuestion(approvalId) {
     }, { confirm: "\u53D1\u9001\u56DE\u7B54" });
     return;
   }
-  modal("\u56DE\u7B54 Agent \u7684\u95EE\u9898", `${summary ? `<p class="question-text">${esc5(summary)}</p>` : ""}<p class="muted">\u6309\u539F\u751F\u534F\u8BAE\u586B\u5199 answers \u5BF9\u8C61\uFF08JSON\uFF09\u3002\u590D\u6742\u4EA4\u4E92\u4E5F\u53EF\u4EE5\u5728\u539F\u751F\u754C\u9762\u4E2D\u5B8C\u6210\u3002</p><textarea id="question-answer" rows="7" placeholder="{}" spellcheck="false"></textarea>`, async () => {
+  modal("\u56DE\u7B54 Agent \u7684\u95EE\u9898", `${summary ? `<p class="question-text">${esc6(summary)}</p>` : ""}<p class="muted">\u6309\u539F\u751F\u534F\u8BAE\u586B\u5199 answers \u5BF9\u8C61\uFF08JSON\uFF09\u3002\u590D\u6742\u4EA4\u4E92\u4E5F\u53EF\u4EE5\u5728\u539F\u751F\u754C\u9762\u4E2D\u5B8C\u6210\u3002</p><textarea id="question-answer" rows="7" placeholder="{}" spellcheck="false"></textarea>`, async () => {
     const answer = JSON.parse($2("#question-answer").value || "{}");
     await call("session:approve", { sessionId: state.sessionId, approvalId, choice: "approve", answer });
   }, { confirm: "\u53D1\u9001\u56DE\u7B54" });
@@ -21284,6 +21413,43 @@ document.addEventListener("click", (e) => {
     void action(() => updateAction(el.dataset.update));
     return;
   }
+  if (el = hit("[data-rules]")) {
+    void action(() => rulesAction(el.dataset.rules));
+    return;
+  }
+  if (el = hit("[data-rule-delete]")) {
+    const id2 = el.dataset.ruleDelete;
+    void action(async () => {
+      state.rules = await call("rules:delete", { id: id2 });
+      renderSettings();
+      toast("\u5DF2\u5220\u9664");
+    });
+    return;
+  }
+  if (el = hit("[data-rule-undo]")) {
+    const id2 = el.dataset.ruleUndo;
+    el.disabled = true;
+    void action(async () => {
+      try {
+        const view = await call("rules:undo", { id: id2 });
+        if (state.rules) state.rules = view;
+        toast("\u5DF2\u64A4\u9500\u8FD9\u6761\u957F\u671F\u8981\u6C42");
+      } finally {
+        el.disabled = false;
+      }
+    });
+    return;
+  }
+  if (el = hit("[data-open-rules]")) {
+    openSettings("rules");
+    return;
+  }
+  if (el = hit("[data-rule-session]")) {
+    const id2 = el.dataset.ruleSession;
+    closeSettings();
+    void action(() => openSession(id2));
+    return;
+  }
   if (el = hit("[data-source-install]")) {
     void action(() => call("source:install", { id: el.dataset.sourceInstall }));
     return;
@@ -21357,7 +21523,7 @@ document.addEventListener("click", (e) => {
       const r = await call("bridgeService:connect", { id: id2, target }), moved = r?.defaultMigration?.to, env = [r?.requiredEnv].flat().filter(Boolean);
       await serviceCall(null, null);
       if (env.length) {
-        modal(`\u8FD8\u5DEE\u4E00\u6B65\u63A5\u5165 ${name}`, `<p class="modal-text">${esc5(r.message ?? `\u8BF7\u628A\u672C\u63A5\u53E3\u7684\u5BC6\u94A5\u8BBE\u4E3A\u73AF\u5883\u53D8\u91CF ${env.join("\u3001")}\uFF0C\u518D\u91CD\u65B0\u6253\u5F00 ${name}\u3002`)}</p>`, () => {
+        modal(`\u8FD8\u5DEE\u4E00\u6B65\u63A5\u5165 ${name}`, `<p class="modal-text">${esc6(r.message ?? `\u8BF7\u628A\u672C\u63A5\u53E3\u7684\u5BC6\u94A5\u8BBE\u4E3A\u73AF\u5883\u53D8\u91CF ${env.join("\u3001")}\uFF0C\u518D\u91CD\u65B0\u6253\u5F00 ${name}\u3002`)}</p>`, () => {
         }, { confirm: "\u77E5\u9053\u4E86" });
         return;
       }
@@ -21372,7 +21538,7 @@ document.addEventListener("click", (e) => {
   }
   if (el = hit("[data-svc-disconnect]")) {
     const [id2, target] = el.dataset.svcDisconnect.split("|"), name = { dsh: "DeepSeek Harness", kimi: "Kimi Code", codex: "Codex CLI" }[target] ?? target;
-    modal(`\u65AD\u5F00 ${name}`, `<p class="modal-text">\u4F1A\u4ECE ${esc5(name)} \u7684\u914D\u7F6E\u91CC\u79FB\u9664\u8FD9\u4E2A\u63A5\u53E3\u548C\u5B83\u7684\u5BC6\u94A5\uFF0C\u5176\u4ED6\u914D\u7F6E\u4E0D\u53D8\u3002\u4FEE\u6539\u524D\u4F1A\u7559\u4E00\u4EFD\u5907\u4EFD\u3002</p>`, async () => {
+    modal(`\u65AD\u5F00 ${name}`, `<p class="modal-text">\u4F1A\u4ECE ${esc6(name)} \u7684\u914D\u7F6E\u91CC\u79FB\u9664\u8FD9\u4E2A\u63A5\u53E3\u548C\u5B83\u7684\u5BC6\u94A5\uFF0C\u5176\u4ED6\u914D\u7F6E\u4E0D\u53D8\u3002\u4FEE\u6539\u524D\u4F1A\u7559\u4E00\u4EFD\u5907\u4EFD\u3002</p>`, async () => {
       const r = await call("bridgeService:disconnect", { id: id2, target });
       await serviceCall(null, null, r?.changed === false ? `${name} \u91CC\u6CA1\u6709\u8FD9\u4E2A\u63A5\u53E3` : r?.message ?? `\u5DF2\u65AD\u5F00 ${name}`);
     }, { confirm: "\u65AD\u5F00", danger: true });
@@ -21881,7 +22047,7 @@ document.addEventListener("drop", (e) => {
 function openLightbox(url, name) {
   const el = $2("#lightbox"), src = mediaUrl(url);
   if (!el || !src) return;
-  el.innerHTML = `<div class="lightbox-bar"><span class="lightbox-name">${esc5(name ?? "")}</span><button class="icon-btn" data-media-reveal="${esc5(src)}" title="\u5728\u6587\u4EF6\u5939\u4E2D\u663E\u793A">${icon("folder")}</button><button class="icon-btn" data-media-save="${esc5(src)}" data-media-name="${esc5(name ?? "")}" title="\u53E6\u5B58\u4E3A\u2026">${icon("download")}</button><button class="icon-btn" id="lightbox-close" title="\u5173\u95ED (Esc)">${icon("close")}</button></div><img src="${esc5(src)}" alt="${esc5(name ?? "")}">`;
+  el.innerHTML = `<div class="lightbox-bar"><span class="lightbox-name">${esc6(name ?? "")}</span><button class="icon-btn" data-media-reveal="${esc6(src)}" title="\u5728\u6587\u4EF6\u5939\u4E2D\u663E\u793A">${icon("folder")}</button><button class="icon-btn" data-media-save="${esc6(src)}" data-media-name="${esc6(name ?? "")}" title="\u53E6\u5B58\u4E3A\u2026">${icon("download")}</button><button class="icon-btn" id="lightbox-close" title="\u5173\u95ED (Esc)">${icon("close")}</button></div><img src="${esc6(src)}" alt="${esc6(name ?? "")}">`;
   el.showModal();
 }
 document.addEventListener("mousemove", (e) => {
@@ -21902,6 +22068,25 @@ document.addEventListener("change", (e) => {
     const id = t.dataset.svcProfile;
     t.blur();
     void action(() => serviceCall("bridgeService:configure", { id, defaultProfile: t.value }));
+    return;
+  }
+  if (t.matches?.("[data-rules-auto]")) {
+    const enabled = t.checked;
+    void action(async () => {
+      state.rules = await call("rules:auto", { enabled });
+      renderSettings();
+      toast(enabled ? "\u5DF2\u5F00\u542F\u81EA\u52A8\u8BB0\u5F55\u957F\u671F\u8981\u6C42" : "\u5DF2\u5173\u95ED\u81EA\u52A8\u8BB0\u5F55\u957F\u671F\u8981\u6C42");
+    });
+    return;
+  }
+  if (t.matches?.("[data-rules-detector]")) {
+    const model = t.value;
+    t.blur();
+    void action(async () => {
+      state.rules = await call("rules:detector", { model });
+      renderSettings();
+      toast(model === "session" ? "\u8BC6\u522B\u6539\u4E3A\u8DDF\u968F\u4F1A\u8BDD\u5F53\u524D\u6A21\u578B" : "\u5DF2\u66F4\u6362\u8BC6\u522B\u7528\u7684\u6A21\u578B");
+    });
     return;
   }
   if (t.matches?.("[data-update-auto]")) {
@@ -21982,6 +22167,12 @@ window.workbench.onEvent((event) => {
       renderUpdateSlot();
       if (state.settings === "about") refreshSettingsLive();
     }
+    return;
+  }
+  if (event.type === "rules-change") {
+    if (state.settings === "rules") {
+      if (!state.rulesEditing) void loadRules();
+    } else state.rules = null;
     return;
   }
   if (event.type === "catalog-diff") {

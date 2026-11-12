@@ -11,6 +11,7 @@ import {ProviderService} from './services/providers.mjs';
 import {findCodex,nativeNode,shouldRefreshCodex} from './services/runtime-paths.mjs';
 import {Gateway} from './services/gateway.mjs';
 import {Sessions} from './services/sessions.mjs';
+import {agentRulesMethods} from './services/agent-rules.mjs';
 import {nativeModels} from './services/native-models.mjs';
 import {refreshAntigravitySource,applyAntigravityMediaEvidence} from './services/antigravity-source.mjs';
 import {Terminals} from './services/terminals.mjs';
@@ -61,6 +62,7 @@ function verifyCaller(event){if(event.sender!==window?.webContents||event.sender
 function id(value){if(typeof value!=='string'||value.length>200)throw new Error('Invalid identifier');return value;}
 function argsObject(args){if(!args||typeof args!=='object'||Array.isArray(args)||Buffer.byteLength(JSON.stringify(args))>3*1024*1024)throw new Error('Invalid request');return args;}
 const methods={
+  ...agentRulesMethods(()=>sessions.agentRules),
   async snapshot(){return workbenchSnapshot({store,sourceComponents,modelServices,environments,runtimes,attachmentCapabilityService,boot,appVersion:app.getVersion(),appUpdates});},
   ...sourceComponentMethods(()=>sourceComponents,url=>shell.openExternal(url)),
   ...fileOperationMethods(()=>store,{shell,createWindow:options=>{const preview=new BrowserWindow({...options,parent:window});nativeWindows.add(preview);preview.on('closed',()=>nativeWindows.delete(preview));return preview;}}),
