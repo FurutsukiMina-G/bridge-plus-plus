@@ -2,10 +2,11 @@ import {icon} from './icons.js';
 
 /* 设置 › 长期要求, and the transcript line for a requirement Bridge++ recorded on its own.
    The view comes from rules:get: {path,text,items:[{id,text,at,sessionId,sessionTitle,auto}],injected,overflow,
-   autoRecord,detector:{model:'session'|<model key>,fallback,available},updatedAt}. Pure functions: no DOM, no state. */
+   autoRecord,detector:{model:'deepseek'|'session'|<model key>,deepseek:{qoder,workbuddy},available},updatedAt}.
+   Pure functions: no DOM, no state. */
 
 const esc=value=>String(value??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'})[c]);
-const MODEL_NAMES={'qoder:qfmodel':'Q-Qwen3.8-Flash','workbuddy:hy4free':'W-Hy4'};
+const MODEL_NAMES={'qoder:dfmodel':'Q-DeepSeek-Flash','workbuddy:deepseek-v4.1-flash':'W-DeepSeek-V4.1-Flash'};
 const SOURCE_NAMES={qoder:'Qoder',workbuddy:'WorkBuddy'};
 export const modelName=key=>MODEL_NAMES[key]??String(key??'').split(':').pop();
 const sourceOf=key=>SOURCE_NAMES[String(key??'').split(':')[0]]??String(key??'').split(':')[0];
@@ -16,20 +17,25 @@ export function ruleTime(iso){
   return`${d.getMonth()+1} 月 ${d.getDate()} 日 ${String(d.getHours()).padStart(2,'0')}:${String(d.getMinutes()).padStart(2,'0')}`;
 }
 
-/** Which model judges each message. Default: the session's own model, as a light auxiliary request. */
-function detectorNote(view){
-  const d=view.detector??{},fallback=d.fallback?`${modelName(d.fallback)}（${sourceOf(d.fallback)}）`:'Q-Qwen3.8-Flash';
-  const who=!d.model||d.model==='session'
-    ?`你发的每条消息由这个会话正在用的模型顺带判断（辅助请求、调低思考强度），消息不会发给别的模型源；会话用原生模型（不经过 Bridge++ 模型源）时改用 ${esc(fallback)}。`
-    :`你发的每条消息由 ${esc(modelName(d.model))} 判断，会发给 ${esc(sourceOf(d.model))}；它不可用时改用 ${esc(fallback)}。`;
-  return`${who}有长期要求就直接记下，并在对话里提示，可以撤销；都不可用时跳过，不影响任务。${d.available===false?' <b class="warn-text">现在没有可用的识别模型。</b>':''}`;
+/** Which model judges each message. Default: DeepSeek Flash on the session's own model source, as a light auxiliary request. */
+function detectorNote(view,models=[]){
+  const d=view.detector??{},name=key=>models.find(m=>m.key===key)?.name??modelName(key);
+  const q=d.deepseek?.qoder,w=d.deepseek?.workbuddy,native=w??q;
+  const nativeText=native?`${esc(name(native))}（${esc(sourceOf(native))}）`:'DeepSeek Flash';
+  const own=[q&&`用 Qoder 模型的会话交给 ${esc(name(q))}`,w&&`用 WorkBuddy 模型的交给 ${esc(name(w))}`].filter(Boolean).join('，');
+  const who=!d.model||d.model==='deepseek'
+    ?`你发的每条消息由 DeepSeek Flash 判断（辅助请求、调低思考强度）${own?`：${own}`:''}，消息不会多发给别的模型源；会话用原生模型（不经过 Bridge++ 模型源）时交给 ${nativeText}。`
+    :d.model==='session'
+      ?`你发的每条消息由这个会话正在用的模型顺带判断（辅助请求、调低思考强度），消息不会发给别的模型源；会话用原生模型（不经过 Bridge++ 模型源）时交给 ${nativeText}。`
+      :`你发的每条消息由 ${esc(name(d.model))} 判断，会发给 ${esc(sourceOf(d.model))}。`;
+  return`${who}有长期要求就直接记下，并在对话里提示，可以撤销。识别模型用不了时改用 DeepSeek Flash（先用会话所在模型源的，再用另一个），都不可用就跳过，不影响任务。${d.available===false?' <b class="warn-text">现在没有可用的识别模型。</b>':''}`;
 }
 /** models: [{key,name,group}] of the Bridge++ model sources, for the detector picker. */
 function detectorPicker(view,models=[]){
-  const current=view.detector?.model??'session',known=models.some(m=>m.key===current);
+  const current=view.detector?.model??'deepseek',known=models.some(m=>m.key===current),preset=current==='deepseek'||current==='session';
   const groups=[...new Set(models.map(m=>m.group))];
   const options=groups.map(g=>`<optgroup label="${esc(g)}">${models.filter(m=>m.group===g).map(m=>`<option value="${esc(m.key)}"${m.key===current?' selected':''}>${esc(m.name)}</option>`).join('')}</optgroup>`).join('');
-  return`<label class="rules-detector"><span>识别用的模型</span><select data-rules-detector><option value="session"${current==='session'?' selected':''}>跟随会话当前模型（默认）</option>${!known&&current!=='session'?`<option value="${esc(current)}" selected>${esc(modelName(current))}（现在不可用）</option>`:''}${options}</select></label>`;
+  return`<label class="rules-detector"><span>识别用的模型</span><select data-rules-detector><option value="deepseek"${current==='deepseek'?' selected':''}>DeepSeek Flash（默认）</option><option value="session"${current==='session'?' selected':''}>跟随会话当前模型</option>${!known&&!preset?`<option value="${esc(current)}" selected>${esc(modelName(current))}（现在不可用）</option>`:''}${options}</select></label>`;
 }
 
 function itemHtml(item,view){
@@ -48,7 +54,7 @@ export function rulesPageHtml(view,{editing=false,draft=null,loading=false,error
   const head=`<div class="settings-head"><h1>长期要求</h1><p>你在工作中提出的长期要求记在 Bridge++ 自己的 AGENTS.md 里，所有环境和模型都能看到：Codex（模型源的模型）和 Claude Code 放进它们的全局指令，其他环境在每个新会话的第一条消息前附上。改动对之后新开的会话生效。</p></div>`;
   if(!view)return head+(error?`<div class="note warn">${icon('alert')}<span>读取失败：${esc(error)}</span></div>`:`<div class="rules-loading"><span class="spinner"></span><span>正在读取…</span></div>`);
   const items=Array.isArray(view.items)?view.items:[];
-  const auto=`<label class="update-auto rules-auto"><input type="checkbox" data-rules-auto ${view.autoRecord?'checked':''}><span><b>自动记录长期要求</b><small>${detectorNote(view)}</small></span></label>${view.autoRecord?detectorPicker(view,models):''}`;
+  const auto=`<label class="update-auto rules-auto"><input type="checkbox" data-rules-auto ${view.autoRecord?'checked':''}><span><b>自动记录长期要求</b><small>${detectorNote(view,models)}</small></span></label>${view.autoRecord?detectorPicker(view,models):''}`;
   if(editing)return`${head}${auto}
     <div class="rules-editor"><div class="rules-editor-head"><b>编辑全文</b><small>以“- ”开头的每一行是一条要求；行尾的注释记录来源，可以删。</small></div>
     <textarea id="rules-text" spellcheck="false">${esc(draft??view.text??'')}</textarea>

@@ -265,9 +265,12 @@ export async function createBridgeServer(config: Config, options: {
         const derived='client_cache_usage' in turn&&['session_prefix_estimate','credits_inverse'].includes(String(turn.client_cache_usage));
         const cached=usage?.prompt_tokens_details?.cached_tokens;
         // Respect cacheUsage=none: a persistent SDK prefix is not an observed hit.
+        // Qoder's own metering for this request (after discounts); Bridge++ adds it up per session.
+        const creditsDelta=(turn as {credits_delta?:unknown}).credits_delta;
         const bridgeUsage={cached_tokens:typeof cached==='number'?cached:mode==='none'?null:estimate,
           cache_status:typeof cached==='number'?(derived?'estimated':'reported'):mode!=='none'&&estimate!==null?'estimated':'not_reported',
-          accounting:'usage_accounting' in turn?turn.usage_accounting:null,correction_calls:decisionRecovery?.correctionCalls??0};
+          accounting:'usage_accounting' in turn?turn.usage_accounting:null,correction_calls:decisionRecovery?.correctionCalls??0,
+          credits:typeof creditsDelta==='number'&&Number.isFinite(creditsDelta)&&creditsDelta>=0?creditsDelta:null};
         if (selectedPool && pooled && 'tool_calls' in answer.choices[0]!.message) {
           for (const call of answer.choices[0]!.message.tool_calls ?? []) selectedPool.bindTool(call.id, pooled.record);
         }

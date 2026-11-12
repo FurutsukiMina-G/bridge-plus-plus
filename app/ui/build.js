@@ -3569,7 +3569,8 @@ function shape(v2) {
     window: v2.window ?? null,
     cacheStatus: status,
     firstTokenMs: v2.firstTokenMs ?? null,
-    durationMs: v2.durationMs ?? null
+    durationMs: v2.durationMs ?? null,
+    credits: v2.credits ?? null
   };
 }
 function readUsage(raw) {
@@ -3593,7 +3594,8 @@ function readUsage(raw) {
     window: pick(u.context_window),
     cacheStatus: u.cache_status,
     firstTokenMs: pick(u.first_token_ms),
-    durationMs: pick(u.duration_ms)
+    durationMs: pick(u.duration_ms),
+    credits: pick(u.credits)
   });
   if ("input_tokens" in u || "output_tokens" in u) {
     const read = pick(u.cache_read_input_tokens), write = pick(u.cache_creation_input_tokens), base = pick(u.input_tokens);
@@ -3618,6 +3620,7 @@ var SessionMetrics = class {
   clear() {
     this.requests = [];
     this.cumulative = null;
+    this.cumulativeLog = [];
     this.window = null;
     this.samples = [];
     this.segment = null;
@@ -3639,6 +3642,7 @@ var SessionMetrics = class {
       if (!usage) return;
       if (event.scope === "native-session") {
         this.cumulative = usage;
+        this.cumulativeLog.push({ at: t, usage });
         return;
       }
       const segment = this.segment;
@@ -3697,6 +3701,21 @@ var SessionMetrics = class {
       side ??= { value: r.rate, estimated: r.rateEstimated, live: false };
     }
     return side;
+  }
+  /**
+   * What the session used up to `at` (a turn's end): every request journaled by then, side requests
+   * (auto-review, titles, long-term-rule detection) included. Credits are what Qoder metered per
+   * request; WorkBuddy reports none, so `creditsPartial` says some requests are not in the sum.
+   * Native runtimes that only report a running session figure use the latest one before `at`.
+   */
+  totalUntil(at2) {
+    const end = Number.isFinite(at2) ? at2 : Infinity, rows = this.requests.filter((r) => r.at <= end);
+    if (!rows.length) {
+      const snap = this.cumulativeLog.filter((c) => c.at <= end).at(-1)?.usage;
+      return snap ? { requests: null, input: snap.input, output: snap.output, credits: null, creditsPartial: false } : null;
+    }
+    const sum = (key) => rows.some((r) => r[key] !== null) ? rows.reduce((n, r) => n + (r[key] ?? 0), 0) : null, priced = rows.filter((r) => r.credits !== null);
+    return { requests: rows.length, input: sum("input"), output: sum("output"), credits: priced.length ? priced.reduce((n, r) => n + r.credits, 0) : null, creditsPartial: priced.length > 0 && priced.length < rows.length };
   }
   turn(turnId) {
     const rows = this.requests.filter((r) => r.turnId === turnId);
@@ -4202,7 +4221,7 @@ function foldSummary(run, running2) {
 
 // app/ui/rules.js
 var esc2 = (value) => String(value ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
-var MODEL_NAMES = { "qoder:qfmodel": "Q-Qwen3.8-Flash", "workbuddy:hy4free": "W-Hy4" };
+var MODEL_NAMES = { "qoder:dfmodel": "Q-DeepSeek-Flash", "workbuddy:deepseek-v4.1-flash": "W-DeepSeek-V4.1-Flash" };
 var SOURCE_NAMES = { qoder: "Qoder", workbuddy: "WorkBuddy" };
 var modelName = (key) => MODEL_NAMES[key] ?? String(key ?? "").split(":").pop();
 var sourceOf = (key) => SOURCE_NAMES[String(key ?? "").split(":")[0]] ?? String(key ?? "").split(":")[0];
@@ -4211,16 +4230,19 @@ function ruleTime(iso) {
   if (Number.isNaN(d.getTime())) return "";
   return `${d.getMonth() + 1} \u6708 ${d.getDate()} \u65E5 ${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
 }
-function detectorNote(view) {
-  const d = view.detector ?? {}, fallback = d.fallback ? `${modelName(d.fallback)}\uFF08${sourceOf(d.fallback)}\uFF09` : "Q-Qwen3.8-Flash";
-  const who = !d.model || d.model === "session" ? `\u4F60\u53D1\u7684\u6BCF\u6761\u6D88\u606F\u7531\u8FD9\u4E2A\u4F1A\u8BDD\u6B63\u5728\u7528\u7684\u6A21\u578B\u987A\u5E26\u5224\u65AD\uFF08\u8F85\u52A9\u8BF7\u6C42\u3001\u8C03\u4F4E\u601D\u8003\u5F3A\u5EA6\uFF09\uFF0C\u6D88\u606F\u4E0D\u4F1A\u53D1\u7ED9\u522B\u7684\u6A21\u578B\u6E90\uFF1B\u4F1A\u8BDD\u7528\u539F\u751F\u6A21\u578B\uFF08\u4E0D\u7ECF\u8FC7 Bridge++ \u6A21\u578B\u6E90\uFF09\u65F6\u6539\u7528 ${esc2(fallback)}\u3002` : `\u4F60\u53D1\u7684\u6BCF\u6761\u6D88\u606F\u7531 ${esc2(modelName(d.model))} \u5224\u65AD\uFF0C\u4F1A\u53D1\u7ED9 ${esc2(sourceOf(d.model))}\uFF1B\u5B83\u4E0D\u53EF\u7528\u65F6\u6539\u7528 ${esc2(fallback)}\u3002`;
-  return `${who}\u6709\u957F\u671F\u8981\u6C42\u5C31\u76F4\u63A5\u8BB0\u4E0B\uFF0C\u5E76\u5728\u5BF9\u8BDD\u91CC\u63D0\u793A\uFF0C\u53EF\u4EE5\u64A4\u9500\uFF1B\u90FD\u4E0D\u53EF\u7528\u65F6\u8DF3\u8FC7\uFF0C\u4E0D\u5F71\u54CD\u4EFB\u52A1\u3002${d.available === false ? ' <b class="warn-text">\u73B0\u5728\u6CA1\u6709\u53EF\u7528\u7684\u8BC6\u522B\u6A21\u578B\u3002</b>' : ""}`;
+function detectorNote(view, models2 = []) {
+  const d = view.detector ?? {}, name = (key) => models2.find((m) => m.key === key)?.name ?? modelName(key);
+  const q2 = d.deepseek?.qoder, w2 = d.deepseek?.workbuddy, native = w2 ?? q2;
+  const nativeText = native ? `${esc2(name(native))}\uFF08${esc2(sourceOf(native))}\uFF09` : "DeepSeek Flash";
+  const own = [q2 && `\u7528 Qoder \u6A21\u578B\u7684\u4F1A\u8BDD\u4EA4\u7ED9 ${esc2(name(q2))}`, w2 && `\u7528 WorkBuddy \u6A21\u578B\u7684\u4EA4\u7ED9 ${esc2(name(w2))}`].filter(Boolean).join("\uFF0C");
+  const who = !d.model || d.model === "deepseek" ? `\u4F60\u53D1\u7684\u6BCF\u6761\u6D88\u606F\u7531 DeepSeek Flash \u5224\u65AD\uFF08\u8F85\u52A9\u8BF7\u6C42\u3001\u8C03\u4F4E\u601D\u8003\u5F3A\u5EA6\uFF09${own ? `\uFF1A${own}` : ""}\uFF0C\u6D88\u606F\u4E0D\u4F1A\u591A\u53D1\u7ED9\u522B\u7684\u6A21\u578B\u6E90\uFF1B\u4F1A\u8BDD\u7528\u539F\u751F\u6A21\u578B\uFF08\u4E0D\u7ECF\u8FC7 Bridge++ \u6A21\u578B\u6E90\uFF09\u65F6\u4EA4\u7ED9 ${nativeText}\u3002` : d.model === "session" ? `\u4F60\u53D1\u7684\u6BCF\u6761\u6D88\u606F\u7531\u8FD9\u4E2A\u4F1A\u8BDD\u6B63\u5728\u7528\u7684\u6A21\u578B\u987A\u5E26\u5224\u65AD\uFF08\u8F85\u52A9\u8BF7\u6C42\u3001\u8C03\u4F4E\u601D\u8003\u5F3A\u5EA6\uFF09\uFF0C\u6D88\u606F\u4E0D\u4F1A\u53D1\u7ED9\u522B\u7684\u6A21\u578B\u6E90\uFF1B\u4F1A\u8BDD\u7528\u539F\u751F\u6A21\u578B\uFF08\u4E0D\u7ECF\u8FC7 Bridge++ \u6A21\u578B\u6E90\uFF09\u65F6\u4EA4\u7ED9 ${nativeText}\u3002` : `\u4F60\u53D1\u7684\u6BCF\u6761\u6D88\u606F\u7531 ${esc2(name(d.model))} \u5224\u65AD\uFF0C\u4F1A\u53D1\u7ED9 ${esc2(sourceOf(d.model))}\u3002`;
+  return `${who}\u6709\u957F\u671F\u8981\u6C42\u5C31\u76F4\u63A5\u8BB0\u4E0B\uFF0C\u5E76\u5728\u5BF9\u8BDD\u91CC\u63D0\u793A\uFF0C\u53EF\u4EE5\u64A4\u9500\u3002\u8BC6\u522B\u6A21\u578B\u7528\u4E0D\u4E86\u65F6\u6539\u7528 DeepSeek Flash\uFF08\u5148\u7528\u4F1A\u8BDD\u6240\u5728\u6A21\u578B\u6E90\u7684\uFF0C\u518D\u7528\u53E6\u4E00\u4E2A\uFF09\uFF0C\u90FD\u4E0D\u53EF\u7528\u5C31\u8DF3\u8FC7\uFF0C\u4E0D\u5F71\u54CD\u4EFB\u52A1\u3002${d.available === false ? ' <b class="warn-text">\u73B0\u5728\u6CA1\u6709\u53EF\u7528\u7684\u8BC6\u522B\u6A21\u578B\u3002</b>' : ""}`;
 }
 function detectorPicker(view, models2 = []) {
-  const current = view.detector?.model ?? "session", known = models2.some((m) => m.key === current);
+  const current = view.detector?.model ?? "deepseek", known = models2.some((m) => m.key === current), preset = current === "deepseek" || current === "session";
   const groups = [...new Set(models2.map((m) => m.group))];
   const options = groups.map((g) => `<optgroup label="${esc2(g)}">${models2.filter((m) => m.group === g).map((m) => `<option value="${esc2(m.key)}"${m.key === current ? " selected" : ""}>${esc2(m.name)}</option>`).join("")}</optgroup>`).join("");
-  return `<label class="rules-detector"><span>\u8BC6\u522B\u7528\u7684\u6A21\u578B</span><select data-rules-detector><option value="session"${current === "session" ? " selected" : ""}>\u8DDF\u968F\u4F1A\u8BDD\u5F53\u524D\u6A21\u578B\uFF08\u9ED8\u8BA4\uFF09</option>${!known && current !== "session" ? `<option value="${esc2(current)}" selected>${esc2(modelName(current))}\uFF08\u73B0\u5728\u4E0D\u53EF\u7528\uFF09</option>` : ""}${options}</select></label>`;
+  return `<label class="rules-detector"><span>\u8BC6\u522B\u7528\u7684\u6A21\u578B</span><select data-rules-detector><option value="deepseek"${current === "deepseek" ? " selected" : ""}>DeepSeek Flash\uFF08\u9ED8\u8BA4\uFF09</option><option value="session"${current === "session" ? " selected" : ""}>\u8DDF\u968F\u4F1A\u8BDD\u5F53\u524D\u6A21\u578B</option>${!known && !preset ? `<option value="${esc2(current)}" selected>${esc2(modelName(current))}\uFF08\u73B0\u5728\u4E0D\u53EF\u7528\uFF09</option>` : ""}${options}</select></label>`;
 }
 function itemHtml(item, view) {
   const injected = !Array.isArray(view.injected) || view.injected.includes(item.id);
@@ -4236,7 +4258,7 @@ function rulesPageHtml(view, { editing = false, draft = null, loading = false, e
   const head = `<div class="settings-head"><h1>\u957F\u671F\u8981\u6C42</h1><p>\u4F60\u5728\u5DE5\u4F5C\u4E2D\u63D0\u51FA\u7684\u957F\u671F\u8981\u6C42\u8BB0\u5728 Bridge++ \u81EA\u5DF1\u7684 AGENTS.md \u91CC\uFF0C\u6240\u6709\u73AF\u5883\u548C\u6A21\u578B\u90FD\u80FD\u770B\u5230\uFF1ACodex\uFF08\u6A21\u578B\u6E90\u7684\u6A21\u578B\uFF09\u548C Claude Code \u653E\u8FDB\u5B83\u4EEC\u7684\u5168\u5C40\u6307\u4EE4\uFF0C\u5176\u4ED6\u73AF\u5883\u5728\u6BCF\u4E2A\u65B0\u4F1A\u8BDD\u7684\u7B2C\u4E00\u6761\u6D88\u606F\u524D\u9644\u4E0A\u3002\u6539\u52A8\u5BF9\u4E4B\u540E\u65B0\u5F00\u7684\u4F1A\u8BDD\u751F\u6548\u3002</p></div>`;
   if (!view) return head + (error ? `<div class="note warn">${icon("alert")}<span>\u8BFB\u53D6\u5931\u8D25\uFF1A${esc2(error)}</span></div>` : `<div class="rules-loading"><span class="spinner"></span><span>\u6B63\u5728\u8BFB\u53D6\u2026</span></div>`);
   const items = Array.isArray(view.items) ? view.items : [];
-  const auto = `<label class="update-auto rules-auto"><input type="checkbox" data-rules-auto ${view.autoRecord ? "checked" : ""}><span><b>\u81EA\u52A8\u8BB0\u5F55\u957F\u671F\u8981\u6C42</b><small>${detectorNote(view)}</small></span></label>${view.autoRecord ? detectorPicker(view, models2) : ""}`;
+  const auto = `<label class="update-auto rules-auto"><input type="checkbox" data-rules-auto ${view.autoRecord ? "checked" : ""}><span><b>\u81EA\u52A8\u8BB0\u5F55\u957F\u671F\u8981\u6C42</b><small>${detectorNote(view, models2)}</small></span></label>${view.autoRecord ? detectorPicker(view, models2) : ""}`;
   if (editing) return `${head}${auto}
     <div class="rules-editor"><div class="rules-editor-head"><b>\u7F16\u8F91\u5168\u6587</b><small>\u4EE5\u201C- \u201D\u5F00\u5934\u7684\u6BCF\u4E00\u884C\u662F\u4E00\u6761\u8981\u6C42\uFF1B\u884C\u5C3E\u7684\u6CE8\u91CA\u8BB0\u5F55\u6765\u6E90\uFF0C\u53EF\u4EE5\u5220\u3002</small></div>
     <textarea id="rules-text" spellcheck="false">${esc2(draft ?? view.text ?? "")}</textarea>
@@ -19308,7 +19330,18 @@ function renderTopbar() {
   const title = s ? `<span class="crumb-sep">/</span><button class="title-btn" id="rename-session" title="\u91CD\u547D\u540D\u4F1A\u8BDD">${esc6(s.title)}</button>` : p ? '<span class="crumb-sep">/</span><span class="title-muted">\u65B0\u4F1A\u8BDD</span>' : '<span class="title-muted">Bridge++</span>';
   const actions = s ? `${hasNativeUi(s.runtimeId) ? `<button class="ghost-btn" id="native-session" title="\u5728\u539F\u751F\u5B8C\u6574\u754C\u9762\u4E2D\u7EE7\u7EED">${icon("external")}<span>\u539F\u751F\u754C\u9762</span></button>` : ""}<button class="icon-btn" id="session-more" title="\u66F4\u591A">${icon("more")}</button>` : "";
   const right = ui.right ? "" : `<button class="icon-btn" id="toggle-right" title="\u5C55\u5F00\u53F3\u4FA7\u9762\u677F (Ctrl+Alt+B)">${icon("panelRight")}</button>`;
-  $2("#topbar").innerHTML = `<div class="topbar-left">${left}${crumb}${title}</div><div class="topbar-right">${actions}${right}</div>`;
+  $2("#topbar").innerHTML = `<div class="topbar-left">${left}${crumb}${title}${topBalances()}</div><div class="topbar-right">${actions}${right}</div>`;
+}
+var balanceLoading = /* @__PURE__ */ new Set();
+function topBalances() {
+  const chips = ["qoder", "workbuddy"].map((source) => {
+    const a3 = state.snapshot?.catalog?.[source]?.account;
+    if (!a3 || !Number.isFinite(a3.balance)) return "";
+    const n = a3.balance >= 1e3 ? Math.round(a3.balance).toLocaleString("zh-CN") : Number(a3.balance.toFixed(1)).toString();
+    const tip = `${sourceNames[source] ?? source} ${a3.unit ?? "\u79EF\u5206"}\u4F59\u989D${a3.fetchedAt ? `\uFF0C${since(a3.fetchedAt)}\u66F4\u65B0` : ""}${a3.error ? `\uFF1B\u4E0A\u6B21\u8BFB\u53D6\u5931\u8D25\uFF1A${a3.error}` : ""}\u3002\u70B9\u51FB\u91CD\u65B0\u8BFB\u53D6`;
+    return `<button class="top-balance${balanceLoading.has(source) ? " loading" : ""}${a3.error ? " stale" : ""}" data-balance-refresh="${source}" title="${esc6(tip)}"><span class="tb-name">${source === "qoder" ? "Qoder" : "WorkBuddy"}</span>${esc6(n)}</button>`;
+  }).filter(Boolean);
+  return chips.length ? `<span class="top-balances"><span class="tb-label">\u4F59\u989D</span>${chips.join("")}</span>` : "";
 }
 function renderView() {
   const s = session(), view = $2("#view");
@@ -19923,6 +19956,18 @@ function turnEndBlock(e) {
   parts.push(...turnExtras(e.stats));
   return `<div class="turn-end ${esc6(e.status)}"><span>${parts.map(esc6).join(" \xB7 ")}</span></div>`;
 }
+var creditText = (v2) => v2 >= 100 ? String(Math.round(v2)) : String(Number(v2.toFixed(v2 < 10 ? 2 : 1)));
+function sessionTotalHtml(total) {
+  if (!total || total.input == null && total.output == null && total.credits == null) return "";
+  const parts = [
+    ...total.requests ? [`${total.requests} \u6B21\u8BF7\u6C42`] : [],
+    ...total.input != null ? [`\u8F93\u5165 ${compact(total.input)}`] : [],
+    ...total.output != null ? [`\u8F93\u51FA ${compact(total.output)}`] : [],
+    ...total.credits != null ? [`\u79EF\u5206 ${total.creditsPartial ? "\u2265" : ""}${creditText(total.credits)}`] : []
+  ];
+  const tip = "\u8FD9\u4E2A\u4F1A\u8BDD\u5230\u672C\u8F6E\u7ED3\u675F\u4E3A\u6B62\u7684\u5168\u90E8\u8BF7\u6C42\uFF0C\u5305\u62EC\u81EA\u52A8\u5BA1\u67E5\u3001\u6807\u9898\u3001\u957F\u671F\u8981\u6C42\u8BC6\u522B\u8FD9\u4E9B\u8F85\u52A9\u8BF7\u6C42\u3002\u79EF\u5206\u662F Qoder \u6309\u8BF7\u6C42\u56DE\u62A5\u7684\u5B9E\u9645\u6263\u5206\uFF08\u5DF2\u542B\u6298\u6263\uFF09\uFF1BWorkBuddy \u4E0D\u6309\u8BF7\u6C42\u56DE\u62A5\u79EF\u5206\uFF0C\u4E0D\u7B97\u5728\u5185\u3002";
+  return `<div class="turn-total" title="${esc6(tip)}">\u672C\u4F1A\u8BDD\u7D2F\u8BA1 ${parts.map(esc6).join(" \xB7 ")}</div>`;
+}
 function renderChat(quiet = false) {
   const chat = $2("#chat"), scroller = $2("#scroller");
   if (!chat || !scroller) return;
@@ -19998,6 +20043,8 @@ function renderChat(quiet = false) {
       const note = e.status === "completed" ? "" : stopNote(e.reason, said);
       if (note) add(`stop:${e.id}`, `<div class="event-note error">${icon("alert")}<span>${esc6(note)}</span></div>`);
       add(`end:${e.id}`, turnEndBlock(e));
+      const total = sessionTotalHtml(metrics.totalUntil(Date.parse(e.at ?? "")));
+      if (total) add(`total:${e.id}`, total);
     }
   }
   if (state.historyLoading) add("loading", '<div class="empty-chat">\u6B63\u5728\u8BFB\u53D6\u4F1A\u8BDD\u8BB0\u5F55\u2026</div>');
@@ -20062,6 +20109,7 @@ function refreshBalances() {
     void call("provider:account", { source }).then((account) => {
       if (!account || !state.snapshot?.catalog?.[source]) return;
       state.snapshot.catalog[source].account = account;
+      renderTopbar();
       const list = menu?.kind === "model" ? $2("#menu-list") : null;
       if (list) list.innerHTML = modelListHtml();
     }).catch(() => {
@@ -20236,12 +20284,6 @@ function priceTag(m) {
   const soon = p.next ? `<span class="mi-tag price soon" title="${esc6(tip)}">${p.next.wait < 60 ? `${p.next.wait} \u5206\u949F\u540E` : `${p.next.start} \u8D77`}${esc6(windowWord(p.next))} ${factorText(p.base * p.next.factor)}</span>` : "";
   return `<span class="mi-tag price${original ? " deal" : ""}" title="${esc6(tip)}">${factorText(p.value)}${original ? `<s>${factorText(original)}</s>` : ""}</span>${peak}${soon}`;
 }
-function balanceText(source) {
-  const a3 = state.snapshot?.catalog?.[source]?.account;
-  if (!a3 || !Number.isFinite(a3.balance)) return "";
-  const n = a3.balance >= 1e3 ? Math.round(a3.balance).toLocaleString("zh-CN") : Number(a3.balance.toFixed(1)).toString();
-  return `<span class="mg-balance" title="${esc6(`${a3.unit ?? "\u79EF\u5206"}\u4F59\u989D${a3.fetchedAt ? `\uFF0C${since(a3.fetchedAt)}\u66F4\u65B0` : ""}`)}">\u4F59\u989D ${esc6(n)}</span>`;
-}
 function modelItemHtml(m) {
   return `<button class="menu-item model-item${m.key === state.modelKey ? " selected" : ""}" data-model-key="${esc6(m.key)}"><span class="mi-main"><span class="mi-name">${esc6(sourceName(m))}</span><span class="mi-sub mono">${esc6(m.id)}</span></span><span class="mi-tags">${priceTag(m)}${m.reasoning.some((e) => e !== "none") ? '<span class="mi-tag">\u601D\u8003</span>' : ""}${m.contextMaximum ? `<span class="mi-tag">${compact(m.contextMaximum)}</span>` : ""}</span>${m.key === state.modelKey ? icon("check", "mi-check") : ""}</button>`;
 }
@@ -20252,7 +20294,7 @@ function modelListHtml() {
     const list = all.filter((m) => !q2 || `${sourceName(m)} ${m.name} ${m.id}`.toLowerCase().includes(q2));
     if (!list.length) return "";
     const open2 = !!q2 || openGroups.has(source), chosen = all.find((m) => m.key === state.modelKey);
-    return `<div class="model-group${open2 ? " open" : ""}"><button class="model-group-head" data-model-group="${source}" aria-expanded="${open2}">${icon("chevronRight", "mg-caret")}<span class="mg-name">${esc6(sourceNames[source])}</span><span class="mg-count">${q2 ? `${list.length}/${all.length}` : all.length} \u4E2A</span>${balanceText(source)}${chosen && !open2 ? `<span class="mg-chosen" title="\u5F53\u524D\u9009\u62E9">${icon("check")}${esc6(sourceName(chosen))}</span>` : ""}</button>${open2 ? `<div class="model-group-body">${list.map(modelItemHtml).join("")}</div>` : ""}</div>`;
+    return `<div class="model-group${open2 ? " open" : ""}"><button class="model-group-head" data-model-group="${source}" aria-expanded="${open2}">${icon("chevronRight", "mg-caret")}<span class="mg-name">${esc6(sourceNames[source])}</span><span class="mg-count">${q2 ? `${list.length}/${all.length}` : all.length} \u4E2A</span>${chosen && !open2 ? `<span class="mg-chosen" title="\u5F53\u524D\u9009\u62E9">${icon("check")}${esc6(sourceName(chosen))}</span>` : ""}</button>${open2 ? `<div class="model-group-body">${list.map(modelItemHtml).join("")}</div>` : ""}</div>`;
   }).join("");
   const native = !gatewayOnly(env) && (!q2 || "\u539F\u751F native".includes(q2)) ? `<div class="menu-label">\u539F\u751F</div><button class="menu-item model-item${state.modelKey === "native" ? " selected" : ""}" data-model-key="native"><span class="mi-main"><span class="mi-name">\u539F\u751F\u6A21\u578B\u8BBE\u7F6E</span><span class="mi-sub">\u4F7F\u7528 ${esc6(runtime(env)?.name ?? "")} \u81EA\u5DF1\u7684\u6A21\u578B\u4E0E\u767B\u5F55</span></span>${state.modelKey === "native" ? icon("check", "mi-check") : ""}</button>` : "";
   return groups + native || `<div class="menu-empty">${models().length ? "\u6CA1\u6709\u5339\u914D\u7684\u6A21\u578B" : "\u8FD8\u6CA1\u6709\u6A21\u578B\u76EE\u5F55\u3002\u8BF7\u5230\u8BBE\u7F6E \u2192 \u6A21\u578B\u6E90\u4E0B\u8F7D\u7EC4\u4EF6\u5E76\u767B\u5F55\u3002"}</div>`;
@@ -21444,6 +21486,23 @@ document.addEventListener("click", (e) => {
     openSettings("rules");
     return;
   }
+  if (el = hit("[data-balance-refresh]")) {
+    const source = el.dataset.balanceRefresh;
+    if (balanceLoading.has(source)) return;
+    balanceLoading.add(source);
+    renderTopbar();
+    void action(async () => {
+      try {
+        const account = await call("provider:account", { source, force: true });
+        if (account && state.snapshot?.catalog?.[source]) state.snapshot.catalog[source].account = account;
+        if (account?.error) toast(`${sourceNames[source] ?? source} \u4F59\u989D\u8BFB\u53D6\u5931\u8D25\uFF1A${account.error}`, true);
+      } finally {
+        balanceLoading.delete(source);
+        renderTopbar();
+      }
+    });
+    return;
+  }
   if (el = hit("[data-rule-session]")) {
     const id2 = el.dataset.ruleSession;
     closeSettings();
@@ -22085,7 +22144,7 @@ document.addEventListener("change", (e) => {
     void action(async () => {
       state.rules = await call("rules:detector", { model });
       renderSettings();
-      toast(model === "session" ? "\u8BC6\u522B\u6539\u4E3A\u8DDF\u968F\u4F1A\u8BDD\u5F53\u524D\u6A21\u578B" : "\u5DF2\u66F4\u6362\u8BC6\u522B\u7528\u7684\u6A21\u578B");
+      toast(model === "deepseek" ? "\u8BC6\u522B\u6539\u7528 DeepSeek Flash" : model === "session" ? "\u8BC6\u522B\u6539\u4E3A\u8DDF\u968F\u4F1A\u8BDD\u5F53\u524D\u6A21\u578B" : "\u5DF2\u66F4\u6362\u8BC6\u522B\u7528\u7684\u6A21\u578B");
     });
     return;
   }
@@ -22114,6 +22173,10 @@ document.addEventListener("change", (e) => {
 });
 var refreshing = false;
 var refreshAgain = false;
+var catalogStamp = () => ["qoder", "workbuddy"].map((source) => {
+  const c = state.snapshot?.catalog?.[source];
+  return `${c?.checkedAt ?? ""}|${c?.account?.fetchedAt ?? ""}`;
+}).join(",");
 async function refreshFromBackend() {
   if (refreshing) {
     refreshAgain = true;
@@ -22121,8 +22184,12 @@ async function refreshFromBackend() {
   }
   refreshing = true;
   try {
-    const wasChecking = state.snapshot?.startup?.environments === "checking";
+    const wasChecking = state.snapshot?.startup?.environments === "checking", stamp = catalogStamp();
     await snapshot();
+    if (menu?.kind === "model" && !state.menuSearch && catalogStamp() !== stamp) {
+      const list = $2("#menu-list");
+      if (list) list.innerHTML = modelListHtml();
+    }
     if (wasChecking && state.snapshot.startup?.environments !== "checking") {
       capCache.clear();
       if (!guideShown && !state.snapshot.runtimes.some(usable)) openGuide();

@@ -5,16 +5,18 @@ import {mkdir,open,readdir,rename,rm,stat} from 'node:fs/promises';
 import {join} from 'node:path';
 import {withIdleResponse} from './download-stream.mjs';
 
-const VERSION=/^(\d+)\.(\d+)\.(\d+)$/;
-const SETUP=/^Bridge\+\+-Setup-(\d+\.\d+\.\d+)\.exe$/;
+// x.y.z, or x.y.z-rN for the Nth revision of that release (0.1.23-r1 is newer than 0.1.23,
+// older than 0.1.24). Builds before 0.1.23-r1 only read x.y.z and report an -rN tag as unreadable.
+const VERSION=/^(\d+)\.(\d+)\.(\d+)(?:-r(\d+))?$/;
+const SETUP=/^Bridge\+\+-Setup-(\d+\.\d+\.\d+(?:-r\d+)?)\.exe$/;
 const DIGEST=/^sha256:([a-f0-9]{64})$/i;
 
-function parts(value){const match=VERSION.exec(typeof value==='string'?value:'');return match?[Number(match[1]),Number(match[2]),Number(match[3])]:null;}
+function parts(value){const match=VERSION.exec(typeof value==='string'?value:'');return match?[Number(match[1]),Number(match[2]),Number(match[3]),Number(match[4]??0)]:null;}
 
 export function compareVersions(a,b){
   const left=parts(a),right=parts(b);
   if(!left||!right)return 0;
-  for(let index=0;index<3;index++)if(left[index]!==right[index])return left[index]>right[index]?1:-1;
+  for(let index=0;index<4;index++)if(left[index]!==right[index])return left[index]>right[index]?1:-1;
   return 0;
 }
 

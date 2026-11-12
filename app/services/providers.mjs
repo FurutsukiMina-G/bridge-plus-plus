@@ -56,10 +56,12 @@ export class ProviderService extends EventEmitter {
   }
   async init(){if(this.components)for(const {id}of SOURCE_DEFINITIONS)await this.componentReady(id);return this;}
   async componentReady(source){if(!this.components)return true;try{await this.components.environment(source);return true;}catch{await this.store.mutate(s=>{s.catalog[source]={status:'needs-component',models:[],error:componentRequired(source).message,checkedAt:new Date().toISOString()};});return false;}}
-  refresh(source){if(this.closed)return Promise.reject(new Error('Model source service closed'));if(!['qoder','workbuddy'].includes(source))return Promise.reject(new Error('Unknown model source'));if(this.refreshing.has(source))return this.refreshing.get(source);const task=this.refreshOne(source).finally(()=>{if(this.refreshing.get(source)===task)this.refreshing.delete(source);});this.refreshing.set(source,task);return task;}
-  async refreshOne(source){
+  // A background refresh (the periodic re-read behind the balance) shows no loading
+  // state and, when it fails, leaves the listed catalog and its status untouched.
+  refresh(source,{background=false}={}){if(this.closed)return Promise.reject(new Error('Model source service closed'));if(!['qoder','workbuddy'].includes(source))return Promise.reject(new Error('Unknown model source'));if(this.refreshing.has(source))return this.refreshing.get(source);const task=this.refreshOne(source,{background}).finally(()=>{if(this.refreshing.get(source)===task)this.refreshing.delete(source);});this.refreshing.set(source,task);return task;}
+  async refreshOne(source,{background=false}={}){
     if(!await this.componentReady(source))return [];
-    const prior=this.store.state.catalog[source],entry={status:'loading',checkedAt:new Date().toISOString(),models:prior?.models??[],...(prior?.account?{account:prior.account}:{})};await this.store.mutate(s=>{s.catalog[source]=entry;});
+    const prior=this.store.state.catalog[source],entry={status:'loading',checkedAt:new Date().toISOString(),models:prior?.models??[],...(prior?.account?{account:prior.account}:{})};if(!background)await this.store.mutate(s=>{s.catalog[source]=entry;});
     const dir=join(this.store.root,'providers',source);await mkdir(dir,{recursive:true});
     try{
       const result=await this.runWorker(source,'catalog',{},90000),normalize=source==='qoder'?normalizeQoder:normalizeWorkbuddy,fetchedAt=new Date().toISOString();
@@ -70,7 +72,7 @@ export class ProviderService extends EventEmitter {
       await this.store.mutate(s=>{s.catalog[source]={status:'ready',checkedAt:new Date().toISOString(),models,...account?{account}:{}};});
       const diff=catalogDiff(entry.models,models);if(diff)this.emit('catalog-diff',{source,...diff});
       return models;
-    }catch(e){const error=new Error(failureText(e)||'模型来源刷新失败，未提供具体原因');await this.store.mutate(s=>{s.catalog[source]={...entry,status:'error',error:error.message};});throw error;}
+    }catch(e){const error=new Error(failureText(e)||'模型来源刷新失败，未提供具体原因');if(!background)await this.store.mutate(s=>{s.catalog[source]={...entry,status:'error',error:error.message};});throw error;}
   }
   settleAccount(source,result,fetchedAt){
     const normalized=source==='qoder'?normalizeQoderAccount(result?.account,fetchedAt):normalizeWorkbuddyAccount(result?.account,fetchedAt);
@@ -92,8 +94,20 @@ export class ProviderService extends EventEmitter {
     const current=this.store.state.catalog?.[source]?.account,fresh=current&&!current.error&&Date.now()-(Date.parse(current.fetchedAt||'')||0)<300000;
     if(!force&&fresh)return Promise.resolve(current);
     if(this.accounting.has(source))return this.accounting.get(source);
-    const task=this.queryAccount(source).finally(()=>{if(this.accounting.get(source)===task)this.accounting.delete(source);});
+    const task=this.readAccount(source).finally(()=>{if(this.accounting.get(source)===task)this.accounting.delete(source);});
     this.accounting.set(source,task);return task;
+  }
+  // Prices, promotions and free periods change while Bridge++ runs, and the catalog
+  // was otherwise only read at startup. Once a catalog is listed, every balance read
+  // re-reads it too: the same worker session returns the balance anyway, so the
+  // price tags are as fresh as the balance (menu opened, turn finished).
+  async readAccount(source){
+    const listed=this.store.state.catalog?.[source];
+    if(listed?.models?.length&&['ready','error'].includes(listed.status)){
+      try{await this.refresh(source,{background:true});return this.store.state.catalog?.[source]?.account??null;}
+      catch{/* The listed catalog stays as it was; read the balance alone. */}
+    }
+    return this.queryAccount(source);
   }
   async queryAccount(source){
     if(!await this.componentReady(source))return this.store.state.catalog?.[source]?.account??null;

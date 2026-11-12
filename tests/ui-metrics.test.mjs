@@ -4,7 +4,8 @@ import {readUsage,estimateTokens,SessionMetrics} from '../app/ui/metrics.js';
 
 test('usage readers normalize gateway, Codex, Anthropic and pi-ai layouts with cached tokens inside the prompt',()=>{
   assert.deepEqual(readUsage({prompt_tokens:20000,completion_tokens:500,cached_tokens:15000,cache_status:'reported',context_window:200000,first_token_ms:300,duration_ms:2300}),
-    {input:20000,output:500,cached:15000,reasoning:null,window:200000,cacheStatus:'reported',firstTokenMs:300,durationMs:2300});
+    {input:20000,output:500,cached:15000,reasoning:null,window:200000,cacheStatus:'reported',firstTokenMs:300,durationMs:2300,credits:null});
+  assert.equal(readUsage({prompt_tokens:100,completion_tokens:5,credits:0.36}).credits,0.36,'Qoder metering rides along');
   assert.equal(readUsage({prompt_tokens:100,completion_tokens:5,prompt_tokens_details:{cached_tokens:64}}).cached,64);
   assert.equal(readUsage({prompt_tokens:100,completion_tokens:5,cached_tokens:50,cache_status:'estimated'}).cacheStatus,'estimated');
   const codex=readUsage({last:{inputTokens:31200,cachedInputTokens:27648,outputTokens:420,reasoningOutputTokens:180},modelContextWindow:1000000});
@@ -72,4 +73,27 @@ test('speed and the turn cache ratio follow the main conversation too, falling b
   const only=new SessionMetrics();only.feed({type:'usage',at,turnId:'t9',data:{prompt_tokens:6000,completion_tokens:1000,cached_tokens:3000,cache_status:'reported',auxiliary:true,first_token_ms:100,duration_ms:600}});
   assert.equal(only.rate().value,2000);
   assert.equal(only.turn('t9').cacheRatio,0.5);
+});
+
+test('session totals add every request up to a turn end, side requests and partial credits included',()=>{
+  const m=new SessionMetrics(),at=ms=>new Date(Date.UTC(2026,10,12,12,0,0)+ms).toISOString(),end=ms=>Date.parse(at(ms));
+  assert.equal(m.totalUntil(end(0)),null);
+  m.feed({type:'usage',turnId:'t1',at:at(1000),data:{prompt_tokens:10000,completion_tokens:200,credits:0.3}});
+  m.feed({type:'usage',turnId:'t1',at:at(2000),data:{prompt_tokens:12000,completion_tokens:300,credits:0.36}});
+  m.feed({type:'turn-end',turnId:'t1',at:at(2500)});
+  // The long-term-rule check of the first message lands after the turn ended; it counts toward the next total.
+  m.feed({type:'usage',at:at(3000),data:{prompt_tokens:800,completion_tokens:40,auxiliary:true,credits:0.02}});
+  m.feed({type:'usage',turnId:'t2',at:at(4000),data:{prompt_tokens:13000,completion_tokens:100}});
+  const first=m.totalUntil(end(2500));
+  assert.deepEqual({...first,credits:Number(first.credits.toFixed(2))},{requests:2,input:22000,output:500,credits:0.66,creditsPartial:false});
+  const second=m.totalUntil(end(4500));
+  assert.equal(second.requests,4);assert.equal(second.input,35800);assert.equal(second.output,640);
+  assert.equal(Number(second.credits.toFixed(2)),0.68);assert.equal(second.creditsPartial,true,'a request without metering is outside the credit sum');
+  const tokensOnly=new SessionMetrics();tokensOnly.feed({type:'usage',turnId:'w',at:at(1000),data:{prompt_tokens:500,completion_tokens:20}});
+  assert.deepEqual(tokensOnly.totalUntil(end(2000)),{requests:1,input:500,output:20,credits:null,creditsPartial:false});
+  // Native runtimes report a running session figure: each turn end shows the one current at that time.
+  const native=new SessionMetrics();
+  native.feed({type:'usage',scope:'native-session',at:at(1000),data:{last:{inputTokens:5000,outputTokens:100}}});
+  native.feed({type:'usage',scope:'native-session',at:at(3000),data:{last:{inputTokens:9000,outputTokens:300}}});
+  assert.equal(native.totalUntil(end(2000)).input,5000);assert.equal(native.totalUntil(end(4000)).output,300);assert.equal(native.totalUntil(end(500)),null);
 });

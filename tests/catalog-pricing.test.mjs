@@ -29,12 +29,17 @@ test('Qoder idle-time promotion keeps its window, timezone, factor and localized
   assert.equal(model.raw.promotion.active,false,'raw is preserved verbatim');
 });
 
-test('Qoder free flags follow isFree, a zero factor and the limited-time tag',()=>{
-  const flash=qoderModel({value:'qfmodel',displayName:'Qwen3.8-Flash',isFree:true,priceFactor:0.1,tags:['limited_time_free'],promotion:{...offPeak,badge:{zh:'限时免费'}}});
-  assert.equal(flash.pricing.free,true);
-  assert.equal(flash.pricing.limited,true);
+test('Qoder free means a zero factor; isFree alone never makes a billed model free',()=>{
+  // The live 11-12 catalog: Qwen3.8-Flash keeps isFree after its free period while billing ×0.1, which is what Qoder's picker shows.
+  const flash=qoderModel({value:'qfmodel',displayName:'Qwen3.8-Flash',isFree:true,priceFactor:0.1,promotion:{...offPeak,before_promotion_price_factor:0.1}});
+  assert.equal(flash.pricing.free,false,'isFree with a ×0.1 factor bills');
+  assert.equal(flash.pricing.base,0.1);
   assert.equal(flash.pricing.windows.length,1);
+  const limited=qoderModel({value:'qfmodel',displayName:'Qwen3.8-Flash',isFree:true,priceFactor:0,tags:['limited_time_free'],promotion:{...offPeak,badge:{zh:'限时免费'}}});
+  assert.equal(limited.pricing.free,true,'a limited-time free model declares a zero factor');
+  assert.equal(limited.pricing.limited,true);
   assert.equal(qoderModel({priceFactor:0}).pricing.free,true,'priceFactor 0 is free');
+  assert.equal(qoderModel({isFree:true,priceFactor:undefined}).pricing.free,false,'no declared factor is not free');
   assert.equal(qoderModel({isFree:false,priceFactor:0.8}).pricing.free,false);
   assert.equal(qoderModel({isFree:undefined,priceFactor:0.1}).pricing.free,false,'undefined isFree is not free');
 });
@@ -148,6 +153,40 @@ test('a failed account read keeps the previous numbers and records the reason',a
   const account=await service.account('qoder',{force:true});
   assert.equal(account.balance,42,'the last known balance survives a failure');
   assert.match(account.error,/网络不可用/);
+});
+
+test('a balance read re-reads a listed catalog quietly, so a free period that ends upstream shows',async t=>{
+  let price=0;
+  const {store,service}=await providerFixture(t,(source,action)=>action==='catalog'?{models:[{value:'qfmodel',displayName:'Qwen3.8-Flash',isEnabled:true,isFree:true,priceFactor:price,tags:price===0?['limited_time_free']:[]}],account:qoderUsage,accountError:null}:{models:null,account:qoderUsage,accountError:null});
+  await service.refresh('qoder');
+  assert.equal(store.state.catalog.qoder.models[0].pricing.free,true,'listed while the free period ran');
+  const statuses=[];store.on('change',()=>statuses.push(store.state.catalog.qoder?.status));
+  price=0.1;
+  const account=await service.account('qoder',{force:true});
+  assert.equal(account.balance,9);
+  assert.deepEqual(service.calls.map(c=>c.action),['catalog','catalog'],'the balance comes with the catalog');
+  const model=store.state.catalog.qoder.models[0];
+  assert.equal(model.pricing.free,false);assert.equal(model.pricing.base,0.1);
+  assert.ok(!statuses.includes('loading'),'no loading state while the menu shows the list');
+  assert.equal(store.state.catalog.qoder.status,'ready');
+});
+
+test('a failed background catalog read keeps the listed catalog and reads the balance alone',async t=>{
+  let fail=false;
+  const {store,service}=await providerFixture(t,(source,action)=>{
+    if(action==='catalog'&&fail)throw new Error('上游超时');
+    return action==='catalog'?{models:[{value:'qfmodel',displayName:'Qwen3.8-Flash',priceFactor:0.1}],account:qoderUsage,accountError:null}:{models:null,account:{...qoderUsage,userQuota:{total:10,used:2,remaining:8}},accountError:null};
+  });
+  await service.refresh('qoder');
+  const before=store.state.catalog.qoder;
+  fail=true;
+  const account=await service.account('qoder',{force:true});
+  assert.equal(account.balance,8,'the balance alone was read');
+  assert.deepEqual(service.calls.map(c=>c.action),['catalog','catalog','account']);
+  const after=store.state.catalog.qoder;
+  assert.equal(after.status,'ready');assert.equal(after.error,undefined,'a background failure is not shown as a source error');
+  assert.equal(after.checkedAt,before.checkedAt,'a failed re-read does not count as fresh');
+  assert.deepEqual(after.models.map(m=>m.id),['qfmodel']);
 });
 
 async function sessionFixture(t,account){

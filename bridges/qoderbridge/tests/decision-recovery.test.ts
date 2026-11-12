@@ -57,6 +57,7 @@ for(const cacheUsage of ['none','estimate'] as const)test(`HTTP ${cacheUsage} ca
   try{const r=await fetch(`http://127.0.0.1:${(server.address() as AddressInfo).port}/v1/chat/completions`,{method:'POST',headers:{authorization:'Bearer fixture','content-type':'application/json'},body:JSON.stringify(req)}),body=await r.json();
     assert.equal(r.status,200);assert.equal(calls,2);assert.equal(body.usage.prompt_tokens,110);assert.equal(body.bridge_usage.accounting.prompt_tokens,210);
     assert.equal(body.bridge_usage.cached_tokens,cacheUsage==='none'?null:100);assert.equal(body.bridge_usage.cache_status,cacheUsage==='none'?'not_reported':'estimated');
+    assert.equal(body.bridge_usage.credits,0.2,'both decision attempts were metered');
   }finally{server.closeAllConnections();await new Promise<void>(r=>server.close(()=>r()));}
 });
 

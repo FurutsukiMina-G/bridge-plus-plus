@@ -5,7 +5,10 @@ const unique=values=>[...new Set(values)];
 export const modelKey=(source,id)=>`${source}:${id}`;
 export function fingerprint(value){return createHash('sha256').update(JSON.stringify(value)).digest('hex').slice(0,20);}
 // Pricing is lifted from what the source declares. Nothing is inferred: a missing
-// factor is null, never 1. Qoder marks a zero factor as free exactly like its client.
+// factor is null, never 1. Free means a declared zero factor, which is all Qoder's
+// own model picker shows: its `isFree` flag only steers the client's side queries and
+// stays set on models that bill (Qwen3.8-Flash carries it at ×0.1, drawn from the
+// account's Qwen credits), so it never makes a model free here.
 const amount=value=>typeof value==='number'&&Number.isFinite(value)?value:null;
 const localizedText=value=>{for(const key of ['zh','cn_zh','en'])if(typeof value?.[key]==='string'&&value[key].trim())return value[key].trim();return null;};
 const OFF_PEAK_RULE='idle_time_model_credit_discount';
@@ -20,7 +23,7 @@ export function qoderPricing(raw,fetchedAt){
     if(factor!==null&&typeof promotion.window_start==='string'&&promotion.window_start&&typeof promotion.window_end==='string'&&promotion.window_end&&typeof promotion.timezone==='string'&&promotion.timezone)windows.push({start:promotion.window_start,end:promotion.window_end,timezone:promotion.timezone,factor,label:localizedText(promotion.badge)});
   }
   // An original price only means something next to a declared current price.
-  return {base,original:base!==null&&original!==null&&original!==base?original:null,free:raw?.isFree===true||base===0,
+  return {base,original:base!==null&&original!==null&&original!==base?original:null,free:base===0,
     limited:Array.isArray(raw?.tags)&&raw.tags.includes('limited_time_free'),windows,
     peak:DEEPSEEK_TARIFF_MODELS.has(raw?.value)?peakPricing():null,badge:promotion?localizedText(promotion.description):null,unit:'credits',fetchedAt};
 }

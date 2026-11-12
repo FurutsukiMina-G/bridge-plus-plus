@@ -59,6 +59,17 @@ test('gateway usage is emitted once before terminal delivery and estimates remai
   const events=[],output=[];const response={write:text=>{if(text.includes('"finish_reason":"stop"'))assert.equal(events.length,1);output.push(text);return true;},end(){}};
   await relayCompletion(upstream,response,{signal:new AbortController().signal,includeUsage:false,model:'fixture',contextWindow:200000,onUsage:async event=>{await new Promise(r=>setTimeout(r,5));events.push(event);}});
   assert.equal(events.length,1);assert.equal(events[0].data.cached_tokens,80);assert.equal(events[0].data.cache_status,'estimated');assert.equal(events[0].data.context_window,200000);assert.match(output.join(''),/中文/);assert.doesNotMatch(output.join(''),/"usage"|bridge_usage|cached_tokens/);
+  assert.equal('credits' in events[0].data,false,'no metering, no credits field');
+});
+
+test('gateway usage carries the bridge credit metering into the session event and never to the client',async()=>{
+  for(const [credits,expected] of [[0.36,0.36],[0,0],[-1,undefined],[null,undefined],['0.5',undefined]]){
+    const frames=[{choices:[{delta:{content:'ok'},finish_reason:'stop'}]},{choices:[],usage:{prompt_tokens:100,completion_tokens:20},bridge_usage:{credits}}];
+    const upstream=new Response(frames.map(f=>'data: '+JSON.stringify(f)+'\n\n').join('')+'data: [DONE]\n\n',{headers:{'content-type':'text/event-stream'}});
+    const events=[],output=[];
+    await relayCompletion(upstream,{write:text=>{output.push(text);return true;},end(){}},{signal:new AbortController().signal,includeUsage:false,model:'fixture',onUsage:async event=>{events.push(event);}});
+    assert.equal(events.length,1);assert.equal(events[0].data.credits,expected,String(credits));assert.doesNotMatch(output.join(''),/credits/);
+  }
 });
 
 test('identity verification is single-flight and bounded; an expired failed check does not trust stale data',async()=>{

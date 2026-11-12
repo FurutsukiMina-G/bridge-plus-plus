@@ -10,10 +10,14 @@ import {AgentRules,agentRulesMethods,parseRules,selectRules,normalizeRule,stripR
 import {workbenchSnapshot} from '../app/services/workbench-snapshot.mjs';
 
 const deferred=()=>{let resolve;return {promise:new Promise(r=>resolve=r),resolve:value=>resolve(value)};};
-async function fixture(t,options={}){await mkdir('.runtime/tests',{recursive:true});const root=await mkdtemp(resolve('.runtime/tests/agent-rules-')),store=await new Store(root).open();store.state.sessions.push({id:'s1',title:'规则来源'});const rules=new AgentRules(store,options);t.after(async()=>{await rules.close();await store.close();});return {root,store,rules};}
+async function fixture(t,options={}){await mkdir('.runtime/tests',{recursive:true});const root=await mkdtemp(resolve('.runtime/tests/agent-rules-')),store=await new Store(root).open();store.state.sessions.push({id:'s1',title:'规则来源'});store.state.catalog=listed();const rules=new AgentRules(store,options);t.after(async()=>{await rules.close();await store.close();});return {root,store,rules};}
 async function drained(rules){while(rules.jobs.size)await Promise.all([...rules.jobs.values()].map(j=>j.promise));}
-const models=[normalizeQoder({value:'qfmodel',displayName:'Q-Qwen3.8-Flash',supportsToolCall:true}),normalizeWorkbuddy({id:'hy4free',name:'Qwen3.8-Flash',supportsToolCall:true})];
-const providers={get:key=>models.find(m=>m.key===key)};
+// The DeepSeek Flash the detector picks on each source, and catalog neighbours it must never pick: an older Flash, a Pro, a Qwen.
+const models=[normalizeQoder({value:'dfmodel',displayName:'DeepSeek-Flash',supportsToolCall:true}),normalizeWorkbuddy({id:'deepseek-v4.1-flash',name:'DeepSeek-V4.1-Flash',supportsToolCall:true})];
+const others=[normalizeWorkbuddy({id:'deepseek-v4-flash',name:'Deepseek-V4-Flash',supportsToolCall:true}),normalizeWorkbuddy({id:'deepseek-v4-pro',name:'DeepSeek-V4-Pro',supportsToolCall:true}),normalizeQoder({value:'qfmodel',displayName:'Qwen3.8-Flash',supportsToolCall:true})];
+const listed=()=>Object.fromEntries(['qoder','workbuddy'].map(source=>[source,{status:'ready',models:[...others,...models].filter(m=>m.source===source)}]));
+const providers={get:key=>[...models,...others].find(m=>m.key===key)};
+const FLASH={workbuddy:'workbuddy:deepseek-v4.1-flash',qoder:'qoder:dfmodel'};
 const gateway={register:async(model,variant)=>({baseURL:'http://127.0.0.1:1/'+model.source,key:'fixture',model:variant.id})};
 const response=text=>({ok:true,json:async()=>({choices:[{message:{content:text}}]})});
 
@@ -52,17 +56,17 @@ test('detector prompt and JSON validation enforce conservative long-term extract
 test('detector uses the exact primary model with auxiliary headers, existing rules and deduplication',async t=>{
   const calls=[],{rules,store}=await fixture(t,{providers,gateway,fetchImpl:async(url,options)=>{calls.push({url,...options});return response('{"rules":[{"text":"回复用中文"},{"text":"每次先检查测试"}]}');}});
   await rules.append('回复用中文');rules.observe(store.session('s1'),'记住，以后每次先检查测试');await drained(rules);
-  assert.equal(calls.length,1);assert.ok(calls[0].url.endsWith('/qoder/chat/completions'));assert.equal(calls[0].headers['x-bridge-auxiliary'],'1');assert.equal(calls[0].headers['x-bridge-effort'],'none,low,minimal,medium');
-  const body=JSON.parse(calls[0].body);assert.equal(body.max_tokens,400);assert.equal(body.stream,false);assert.equal(body.model.includes(Buffer.from('qfmodel').toString('base64url')),true);assert.deepEqual(JSON.parse(body.messages[1].content).existingRules,['回复用中文']);assert.equal((await rules.read()).items.length,2);
+  assert.equal(calls.length,1);assert.ok(calls[0].url.endsWith('/workbuddy/chat/completions'),'a session without a source model asks WorkBuddy first');assert.equal(calls[0].headers['x-bridge-auxiliary'],'1');assert.equal(calls[0].headers['x-bridge-effort'],'none,low,minimal,medium');
+  const body=JSON.parse(calls[0].body);assert.equal(body.max_tokens,400);assert.equal(body.stream,false);assert.equal(body.model.includes(Buffer.from('deepseek-v4.1-flash').toString('base64url')),true);assert.deepEqual(JSON.parse(body.messages[1].content).existingRules,['回复用中文']);assert.equal((await rules.read()).items.length,2);
   assert.equal((await store.events('s1')).filter(e=>e.source==='long-term-rule').length,1);
 });
 test('detector skips opted-out, attachment-only, slash, short and globally disabled messages without a request',async t=>{
   let count=0;const {rules,store}=await fixture(t,{providers,gateway,fetchImpl:async()=>{count++;return response('{"rules":[]}');}}),s=store.session('s1');
   for(const text of ['', '  ', '/remember hello', 'a b c'])rules.observe(s,text);s.recordRules=false;rules.observe(s,'以后回复用中文');delete s.recordRules;await rules.auto(false);rules.observe(s,'记住以后用中文');await drained(rules);assert.equal(count,0);assert.equal(rules.stats.skipped,6);
 });
-test('detector falls back only to the specified free model, and counts unavailability, malformed JSON and timeouts',async t=>{
-  const calls=[],{rules,store}=await fixture(t,{providers,gateway,fetchImpl:async url=>{calls.push(url);if(url.includes('/qoder/'))throw new Error('unavailable');return response('{"rules":[{"text":"回复用中文"}]}');}});
-  rules.observe(store.session('s1'),'记住以后回复用中文');await drained(rules);assert.equal(calls.length,2);assert.ok(calls[1].includes('/workbuddy/'));assert.equal((await rules.read()).items.length,1);
+test('detector falls back to the other source\'s DeepSeek Flash, and counts unavailability, malformed JSON and timeouts',async t=>{
+  const calls=[],{rules,store}=await fixture(t,{providers,gateway,fetchImpl:async url=>{calls.push(url);if(url.includes('/workbuddy/'))throw new Error('unavailable');return response('{"rules":[{"text":"回复用中文"}]}');}});
+  rules.observe(store.session('s1'),'记住以后回复用中文');await drained(rules);assert.equal(calls.length,2);assert.ok(calls[1].includes('/qoder/'));assert.equal((await rules.read()).items.length,1);
   rules.providers={get:()=>null};rules.observe(store.session('s1'),'以后每次先运行检查');await drained(rules);assert.equal(rules.stats.skipped,1);
   rules.providers=providers;rules.fetchImpl=async()=>response('invalid');rules.observe(store.session('s1'),'以后每次先运行检查');await drained(rules);assert.equal(rules.stats.failed,1);
   rules.timeoutMs=15;rules.fetchImpl=async(_url,{signal})=>new Promise((_,reject)=>signal.addEventListener('abort',()=>reject(signal.reason),{once:true}));rules.observe(store.session('s1'),'以后每次先运行检查');await drained(rules);assert.equal(rules.stats.failed,2);
@@ -115,34 +119,49 @@ test('snapshot includes rule count, preference and update time without exposing 
 
 const sessionModel=normalizeQoder({value:'session-model',displayName:'Session model',supportsToolCall:true,context_config:{small:{token_count:8192,is_default:true},large:{token_count:32768}},thinking_config:{enabled:{efforts:{high:{is_default:true}}}}});
 const fixedModel=normalizeWorkbuddy({id:'fixed-model',name:'Fixed model',supportsToolCall:true,contextWindow:65536});
-const detectorProviders={get:key=>[sessionModel,fixedModel,...models].find(model=>model.key===key)};
+const detectorProviders={get:key=>[sessionModel,fixedModel,...models,...others].find(model=>model.key===key)};
 async function detectorFixture(t,options={}){
   const registrations=[],requests=[],f=await fixture(t,{providers:detectorProviders,gateway:{register:async(model,variant,selection)=>{registrations.push({model,variant,selection});return {baseURL:'http://127.0.0.1:1/'+model.id,key:'fixture'};}},fetchImpl:async(url,options)=>{requests.push({url,...options});return response('{"rules":[]}');},...options});
   return {...f,registrations,requests};
 }
-test('detector defaults to the current session model and context window without inheriting reasoning or local budget',async t=>{
-  const {rules,store,registrations,requests}=await detectorFixture(t),session=store.session('s1');
+test('detector defaults to the newest DeepSeek Flash on the session\'s own source, WorkBuddy first for native sessions',async t=>{
+  const {rules,store,registrations}=await detectorFixture(t),session=store.session('s1');
+  assert.deepEqual((await rules.read()).detector,{model:'deepseek',deepseek:FLASH,available:true});
+  for(const [selection,expected] of [[{modelKey:sessionModel.key,identity:sessionModel.identity,contextTokens:32768},FLASH.qoder],[{modelKey:fixedModel.key,identity:fixedModel.identity},FLASH.workbuddy],[{modelKey:'native'},FLASH.workbuddy],[{modelKey:'antigravity:gemini-fixture'},FLASH.workbuddy]]){
+    registrations.length=0;session.selection=selection;rules.observe(session,'记住以后用中文回复');await drained(rules);assert.deepEqual(registrations.map(row=>row.model.key),[expected]);
+  }
+  assert.notEqual(registrations[0].selection.contextTokens,32768,'a different model never borrows the session window');
+  // The session source's DeepSeek Flash fails: the other source's answers.
+  registrations.length=0;session.selection={modelKey:sessionModel.key,identity:sessionModel.identity};rules.fetchImpl=async url=>{if(url.includes('/dfmodel/'))throw new Error('unavailable');return response('{"rules":[]}');};
+  rules.observe(session,'以后每次检查测试');await drained(rules);assert.deepEqual(registrations.map(row=>row.model.key),[FLASH.qoder,FLASH.workbuddy]);
+  // A newer DeepSeek Flash listed upstream takes over by itself; one that is not usable is passed over.
+  const newer=normalizeWorkbuddy({id:'deepseek-v4.2-flash',name:'DeepSeek-V4.2-Flash',supportsToolCall:true});store.state.catalog.workbuddy.models.push(newer);
+  assert.equal((await rules.read()).detector.deepseek.workbuddy,FLASH.workbuddy,'not usable until the source resolves it');
+  rules.providers={get:key=>[newer,...models,...others].find(model=>model.key===key)};assert.equal((await rules.read()).detector.deepseek.workbuddy,'workbuddy:deepseek-v4.2-flash');
+});
+test('following the session model uses its context window without inheriting reasoning or local budget',async t=>{
+  const {rules,store,registrations,requests}=await detectorFixture(t),session=store.session('s1');await rules.detector('session');
   session.selection={modelKey:sessionModel.key,identity:sessionModel.identity,contextTokens:32768,contextBudget:4096,reasoning:'high'};
-  assert.deepEqual((await rules.read()).detector,{model:'session',fallback:'qoder:qfmodel',available:true});
+  assert.deepEqual((await rules.read()).detector,{model:'session',deepseek:FLASH,available:true});
   rules.observe(session,'记住以后用中文回复');await drained(rules);assert.equal(registrations.length,1);assert.equal(registrations[0].model.key,sessionModel.key);assert.equal(registrations[0].selection.contextTokens,32768);assert.equal(registrations[0].selection.contextBudget,null);assert.equal(registrations[0].selection.reasoning,undefined);assert.equal(requests[0].headers['x-bridge-auxiliary'],'1');assert.equal(requests[0].headers['x-bridge-effort'],'none,low,minimal,medium');
   session.selection={modelKey:fixedModel.key,identity:fixedModel.identity};rules.observe(session,'以后每次先检查测试');await drained(rules);assert.equal(registrations[1].model.key,fixedModel.key);
 });
-test('native, Antigravity and unavailable session models fall back through the exact free-model chain',async t=>{
-  const {rules,store,registrations}=await detectorFixture(t),session=store.session('s1');
-  for(const selection of [{modelKey:'native'},{modelKey:'antigravity:gemini-fixture'},{modelKey:'qoder:missing'}, {modelKey:sessionModel.key,identity:'changed-upstream-identity'}]){session.selection=selection;rules.observe(session,'记住以后用中文回复');await drained(rules);assert.equal(registrations.at(-1).model.key,'qoder:qfmodel');}
-  rules.fetchImpl=async url=>{if(url.includes('/qfmodel/'))throw new Error('unavailable');return response('{"rules":[]}');};rules.observe(session,'以后每次检查测试');await drained(rules);assert.equal(registrations.at(-1).model.key,'workbuddy:hy4free');
+test('following the session: native, Antigravity and unusable session models fall back to DeepSeek Flash',async t=>{
+  const {rules,store,registrations}=await detectorFixture(t),session=store.session('s1');await rules.detector('session');
+  for(const [selection,expected] of [[{modelKey:'native'},FLASH.workbuddy],[{modelKey:'antigravity:gemini-fixture'},FLASH.workbuddy],[{modelKey:'qoder:missing'},FLASH.qoder],[{modelKey:sessionModel.key,identity:'changed-upstream-identity'},FLASH.qoder]]){session.selection=selection;rules.observe(session,'记住以后用中文回复');await drained(rules);assert.equal(registrations.at(-1).model.key,expected);}
+  rules.fetchImpl=async url=>{if(url.includes('/dfmodel/'))throw new Error('unavailable');return response('{"rules":[]}');};rules.observe(session,'以后每次检查测试');await drained(rules);assert.equal(registrations.at(-1).model.key,FLASH.workbuddy);
   rules.providers={get:()=>null};rules.observe(session,'以后每次检查测试');await drained(rules);assert.equal(rules.stats.skipped,1);assert.equal((await rules.read()).detector.available,false);
 });
 test('failed session-model requests fall back and duplicate model keys are attempted only once',async t=>{
-  const {rules,store,registrations}=await detectorFixture(t),session=store.session('s1');session.selection={modelKey:sessionModel.key,identity:sessionModel.identity};
-  rules.fetchImpl=async url=>{if(url.includes('/session-model/'))throw new Error('unavailable');return response('{"rules":[]}');};rules.observe(session,'记住以后用中文回复');await drained(rules);assert.deepEqual(registrations.map(row=>row.model.key),[sessionModel.key,'qoder:qfmodel']);
-  registrations.length=0;session.selection={modelKey:'qoder:qfmodel',identity:models[0].identity};rules.fetchImpl=async url=>{if(url.includes('/qfmodel/'))throw new Error('unavailable');return response('{"rules":[]}');};rules.observe(session,'记住以后用中文回复');await drained(rules);assert.deepEqual(registrations.map(row=>row.model.key),['qoder:qfmodel','workbuddy:hy4free']);
+  const {rules,store,registrations}=await detectorFixture(t),session=store.session('s1');await rules.detector('session');session.selection={modelKey:sessionModel.key,identity:sessionModel.identity};
+  rules.fetchImpl=async url=>{if(url.includes('/session-model/'))throw new Error('unavailable');return response('{"rules":[]}');};rules.observe(session,'记住以后用中文回复');await drained(rules);assert.deepEqual(registrations.map(row=>row.model.key),[sessionModel.key,FLASH.qoder]);
+  registrations.length=0;session.selection={modelKey:FLASH.qoder,identity:models[0].identity};rules.fetchImpl=async url=>{if(url.includes('/dfmodel/'))throw new Error('unavailable');return response('{"rules":[]}');};rules.observe(session,'记住以后用中文回复');await drained(rules);assert.deepEqual(registrations.map(row=>row.model.key),[FLASH.qoder,FLASH.workbuddy]);
 });
 test('fixed detector model overrides the session selection and uses defaults, with ordered fallback on errors or missing models',async t=>{
   const {rules,store,registrations}=await detectorFixture(t),session=store.session('s1'),methods=agentRulesMethods(()=>rules);session.selection={modelKey:sessionModel.key,identity:sessionModel.identity,contextTokens:32768};
-  const view=await methods['rules:detector']({model:fixedModel.key});assert.deepEqual(view.detector,{model:fixedModel.key,fallback:'qoder:qfmodel',available:true});rules.observe(session,'记住以后用中文回复');await drained(rules);assert.equal(registrations[0].model.key,fixedModel.key);assert.equal(registrations[0].selection.contextTokens,65536);
-  registrations.length=0;rules.fetchImpl=async url=>{if(url.includes('/fixed-model/')||url.includes('/qfmodel/'))throw new Error('unavailable');return response('{"rules":[]}');};rules.observe(session,'以后每次检查测试');await drained(rules);assert.deepEqual(registrations.map(row=>row.model.key),[fixedModel.key,'qoder:qfmodel','workbuddy:hy4free']);
-  registrations.length=0;rules.providers=providers;rules.fetchImpl=async()=>response('{"rules":[]}');rules.observe(session,'以后每次检查测试');await drained(rules);assert.equal(registrations[0].model.key,'qoder:qfmodel');assert.equal((await rules.read()).detector.model,fixedModel.key);
+  const view=await methods['rules:detector']({model:fixedModel.key});assert.deepEqual(view.detector,{model:fixedModel.key,deepseek:FLASH,available:true});rules.observe(session,'记住以后用中文回复');await drained(rules);assert.equal(registrations[0].model.key,fixedModel.key);assert.equal(registrations[0].selection.contextTokens,65536);
+  registrations.length=0;rules.fetchImpl=async url=>{if(url.includes('/fixed-model/')||url.includes('/dfmodel/'))throw new Error('unavailable');return response('{"rules":[]}');};rules.observe(session,'以后每次检查测试');await drained(rules);assert.deepEqual(registrations.map(row=>row.model.key),[fixedModel.key,FLASH.qoder,FLASH.workbuddy]);
+  registrations.length=0;rules.providers=providers;rules.fetchImpl=async()=>response('{"rules":[]}');rules.observe(session,'以后每次检查测试');await drained(rules);assert.equal(registrations[0].model.key,FLASH.qoder);assert.equal((await rules.read()).detector.model,fixedModel.key);
 });
 test('detector IPC rejects unknown or non-source keys without changing the saved preference, and accepts known disabled keys',async t=>{
   const {rules,store}=await detectorFixture(t),methods=agentRulesMethods(()=>rules);await methods['rules:detector']({model:fixedModel.key});
@@ -150,6 +169,7 @@ test('detector IPC rejects unknown or non-source keys without changing the saved
   assert.equal(store.state.preferences.rulesDetectorModel,fixedModel.key);
   rules.providers={get:key=>key===fixedModel.key?{...fixedModel,enabled:false}:null};assert.equal((await methods['rules:detector']({model:fixedModel.key})).detector.available,false);
   assert.equal((await methods['rules:detector']({model:'session'})).detector.model,'session');
+  assert.equal((await methods['rules:detector']({model:'deepseek'})).detector.model,'deepseek');assert.equal(store.state.preferences.rulesDetectorModel,'deepseek');
 });
 test('detector preference survives store reopen and remains live despite cached rule contents',async t=>{
   const {rules,store,root}=await detectorFixture(t);await rules.append('回复用中文');await rules.detector(fixedModel.key);await rules.close();await store.close();

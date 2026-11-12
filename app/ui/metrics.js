@@ -13,7 +13,7 @@ function shape(v){
   if(v.input===null&&v.output===null)return null;
   const status=v.cached===null||v.cached===undefined?'not_reported':v.cacheStatus==='estimated'?'estimated':'reported';
   return{input:v.input,output:v.output,cached:status==='not_reported'?null:v.cached,reasoning:v.reasoning??null,
-    window:v.window??null,cacheStatus:status,firstTokenMs:v.firstTokenMs??null,durationMs:v.durationMs??null};
+    window:v.window??null,cacheStatus:status,firstTokenMs:v.firstTokenMs??null,durationMs:v.durationMs??null,credits:v.credits??null};
 }
 
 /**
@@ -34,7 +34,7 @@ export function readUsage(raw){
   if('prompt_tokens' in u||'completion_tokens' in u)return shape({input:pick(u.prompt_tokens),output:pick(u.completion_tokens),
     cached:pick(u.cached_tokens,u.prompt_tokens_details?.cached_tokens),
     reasoning:pick(u.reasoning_tokens,u.completion_tokens_details?.reasoning_tokens),window:pick(u.context_window),
-    cacheStatus:u.cache_status,firstTokenMs:pick(u.first_token_ms),durationMs:pick(u.duration_ms)});
+    cacheStatus:u.cache_status,firstTokenMs:pick(u.first_token_ms),durationMs:pick(u.duration_ms),credits:pick(u.credits)});
   if('input_tokens' in u||'output_tokens' in u){
     const read=pick(u.cache_read_input_tokens),write=pick(u.cache_creation_input_tokens),base=pick(u.input_tokens);
     return shape({input:base===null?null:base+(read??0)+(write??0),output:pick(u.output_tokens),cached:read});
@@ -52,7 +52,7 @@ export function readUsage(raw){
 export class SessionMetrics{
   constructor(){this.clear();}
   clear(){
-    this.requests=[];this.cumulative=null;this.window=null;this.samples=[];this.segment=null;this.lastDeltaAt=null;
+    this.requests=[];this.cumulative=null;this.cumulativeLog=[];this.window=null;this.samples=[];this.segment=null;this.lastDeltaAt=null;
   }
   feed(event){
     const t=Date.parse(event.at??'')||Date.now();
@@ -66,7 +66,7 @@ export class SessionMetrics{
     }else if(event.type==='usage'){
       const usage=readUsage(event.data);
       if(!usage)return;
-      if(event.scope==='native-session'){this.cumulative=usage;return;}
+      if(event.scope==='native-session'){this.cumulative=usage;this.cumulativeLog.push({at:t,usage});return;}
       const segment=this.segment;this.segment=null;
       let rate=null,estimated=false;
       if(usage.output&&usage.durationMs){
@@ -120,6 +120,21 @@ export class SessionMetrics{
       side??={value:r.rate,estimated:r.rateEstimated,live:false};
     }
     return side;
+  }
+  /**
+   * What the session used up to `at` (a turn's end): every request journaled by then, side requests
+   * (auto-review, titles, long-term-rule detection) included. Credits are what Qoder metered per
+   * request; WorkBuddy reports none, so `creditsPartial` says some requests are not in the sum.
+   * Native runtimes that only report a running session figure use the latest one before `at`.
+   */
+  totalUntil(at){
+    const end=Number.isFinite(at)?at:Infinity,rows=this.requests.filter(r=>r.at<=end);
+    if(!rows.length){
+      const snap=this.cumulativeLog.filter(c=>c.at<=end).at(-1)?.usage;
+      return snap?{requests:null,input:snap.input,output:snap.output,credits:null,creditsPartial:false}:null;
+    }
+    const sum=key=>rows.some(r=>r[key]!==null)?rows.reduce((n,r)=>n+(r[key]??0),0):null,priced=rows.filter(r=>r.credits!==null);
+    return{requests:rows.length,input:sum('input'),output:sum('output'),credits:priced.length?priced.reduce((n,r)=>n+r.credits,0):null,creditsPartial:priced.length>0&&priced.length<rows.length};
   }
   turn(turnId){
     const rows=this.requests.filter(r=>r.turnId===turnId);

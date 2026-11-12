@@ -29,6 +29,25 @@ test('release versions compare by three numeric segments and local days are cale
   assert.equal(localDay(NOW),'2026-11-11');
 });
 
+test('a revision -rN sorts after its release and before the next one; other suffixes stay unreadable',()=>{
+  assert.equal(compareVersions('0.1.23-r1','0.1.23'),1);
+  assert.equal(compareVersions('0.1.23','0.1.23-r1'),-1);
+  assert.equal(compareVersions('0.1.23-r2','0.1.23-r1'),1);
+  assert.equal(compareVersions('0.1.23-r1','0.1.23-r1'),0);
+  assert.equal(compareVersions('0.1.24','0.1.23-r9'),1);
+  assert.equal(compareVersions('0.1.23-r10','0.1.23-r9'),1,'numeric, not text');
+  for(const odd of ['0.1.23-beta','0.1.23-r','0.1.23r1','0.1.23-r1.1'])assert.equal(compareVersions(odd,'0.1.22'),0,odd);
+});
+
+test('an -rN release with its installer is offered over the release it revises',async()=>{
+  const store=await makeStore(),bytes=Uint8Array.of(4,5,6),asset=assetFor('0.1.23-r1',bytes);
+  const view=await new AppUpdates({store,userData:store.root,currentVersion:'0.1.23',fetch:async()=>json(release('0.1.23-r1',asset)),spawn:()=>{throw new Error('unexpected spawn');},now:()=>NOW,isPackaged:false,sessionsRunning:()=>false,checkTimeoutMs:2000}).check({manual:true});
+  assert.equal(view.status,'available');assert.equal(view.latest.version,'0.1.23-r1');assert.equal(view.latest.tag,'v0.1.23-r1');assert.equal(view.latest.asset.name,'Bridge++-Setup-0.1.23-r1.exe');
+  const store2=await makeStore();
+  const same=await new AppUpdates({store:store2,userData:store2.root,currentVersion:'0.1.23-r1',fetch:async()=>json(release('0.1.23-r1',asset)),spawn:()=>{throw new Error('unexpected spawn');},now:()=>NOW,isPackaged:false,sessionsRunning:()=>false,checkTimeoutMs:2000}).check({manual:true});
+  assert.equal(same.status,'latest');
+});
+
 test('a matching installer asset on a GitHub host makes the release available',async()=>{
   const store=await makeStore(),bytes=Uint8Array.of(1,2,3),asset=assetFor('0.1.23',bytes);
   const updates=updater(store,{fetch:async()=>json(release('0.1.23',asset))});

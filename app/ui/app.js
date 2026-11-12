@@ -301,7 +301,19 @@ function renderTopbar(){
   const title=s?`<span class="crumb-sep">/</span><button class="title-btn" id="rename-session" title="重命名会话">${esc(s.title)}</button>`:p?'<span class="crumb-sep">/</span><span class="title-muted">新会话</span>':'<span class="title-muted">Bridge++</span>';
   const actions=s?`${hasNativeUi(s.runtimeId)?`<button class="ghost-btn" id="native-session" title="在原生完整界面中继续">${icon('external')}<span>原生界面</span></button>`:''}<button class="icon-btn" id="session-more" title="更多">${icon('more')}</button>`:'';
   const right=ui.right?'':`<button class="icon-btn" id="toggle-right" title="展开右侧面板 (Ctrl+Alt+B)">${icon('panelRight')}</button>`;
-  $('#topbar').innerHTML=`<div class="topbar-left">${left}${crumb}${title}</div><div class="topbar-right">${actions}${right}</div>`;
+  $('#topbar').innerHTML=`<div class="topbar-left">${left}${crumb}${title}${topBalances()}</div><div class="topbar-right">${actions}${right}</div>`;
+}
+/** Both sources' credit balances beside the session title, when their SDKs report them; a click re-reads one. */
+const balanceLoading=new Set();
+function topBalances(){
+  const chips=['qoder','workbuddy'].map(source=>{
+    const a=state.snapshot?.catalog?.[source]?.account;
+    if(!a||!Number.isFinite(a.balance))return'';
+    const n=a.balance>=1000?Math.round(a.balance).toLocaleString('zh-CN'):Number(a.balance.toFixed(1)).toString();
+    const tip=`${sourceNames[source]??source} ${a.unit??'积分'}余额${a.fetchedAt?`，${since(a.fetchedAt)}更新`:''}${a.error?`；上次读取失败：${a.error}`:''}。点击重新读取`;
+    return`<button class="top-balance${balanceLoading.has(source)?' loading':''}${a.error?' stale':''}" data-balance-refresh="${source}" title="${esc(tip)}"><span class="tb-name">${source==='qoder'?'Qoder':'WorkBuddy'}</span>${esc(n)}</button>`;
+  }).filter(Boolean);
+  return chips.length?`<span class="top-balances"><span class="tb-label">余额</span>${chips.join('')}</span>`:'';
 }
 
 /* ---------- main view and composer ---------- */
@@ -824,6 +836,15 @@ function turnEndBlock(e){
   parts.push(...turnExtras(e.stats));
   return`<div class="turn-end ${esc(e.status)}"><span>${parts.map(esc).join(' · ')}</span></div>`;
 }
+const creditText=v=>v>=100?String(Math.round(v)):String(Number(v.toFixed(v<10?2:1)));
+/** The session's running total under each turn end. */
+function sessionTotalHtml(total){
+  if(!total||total.input==null&&total.output==null&&total.credits==null)return'';
+  const parts=[...total.requests?[`${total.requests} 次请求`]:[],...total.input!=null?[`输入 ${compact(total.input)}`]:[],...total.output!=null?[`输出 ${compact(total.output)}`]:[],
+    ...total.credits!=null?[`积分 ${total.creditsPartial?'≥':''}${creditText(total.credits)}`]:[]];
+  const tip='这个会话到本轮结束为止的全部请求，包括自动审查、标题、长期要求识别这些辅助请求。积分是 Qoder 按请求回报的实际扣分（已含折扣）；WorkBuddy 不按请求回报积分，不算在内。';
+  return`<div class="turn-total" title="${esc(tip)}">本会话累计 ${parts.map(esc).join(' · ')}</div>`;
+}
 /** `quiet` renders blocks that were already there (opening a session, rebuilding the view) without entrance animation. */
 function renderChat(quiet=false){
   const chat=$('#chat'),scroller=$('#scroller');
@@ -892,6 +913,8 @@ function renderChat(quiet=false){
       const note=e.status==='completed'?'':stopNote(e.reason,said);
       if(note)add(`stop:${e.id}`,`<div class="event-note error">${icon('alert')}<span>${esc(note)}</span></div>`);
       add(`end:${e.id}`,turnEndBlock(e));
+      // Its own block: the transcript keeps one element per block.
+      const total=sessionTotalHtml(metrics.totalUntil(Date.parse(e.at??'')));if(total)add(`total:${e.id}`,total);
     }
   }
   if(state.historyLoading)add('loading','<div class="empty-chat">正在读取会话记录…</div>');
@@ -948,7 +971,7 @@ function refreshBalances(){
     balanceAsked.set(source,Date.now());
     void call('provider:account',{source}).then(account=>{
       if(!account||!state.snapshot?.catalog?.[source])return;
-      state.snapshot.catalog[source].account=account;
+      state.snapshot.catalog[source].account=account;renderTopbar();
       const list=menu?.kind==='model'?$('#menu-list'):null;if(list)list.innerHTML=modelListHtml();
     }).catch(()=>{});
   }
@@ -1081,13 +1104,6 @@ function priceTag(m){
   const soon=p.next?`<span class="mi-tag price soon" title="${esc(tip)}">${p.next.wait<60?`${p.next.wait} 分钟后`:`${p.next.start} 起`}${esc(windowWord(p.next))} ${factorText(p.base*p.next.factor)}</span>`:'';
   return`<span class="mi-tag price${original?' deal':''}" title="${esc(tip)}">${factorText(p.value)}${original?`<s>${factorText(original)}</s>`:''}</span>${peak}${soon}`;
 }
-/** Remaining credits of a source, when its SDK reports them. */
-function balanceText(source){
-  const a=state.snapshot?.catalog?.[source]?.account;
-  if(!a||!Number.isFinite(a.balance))return'';
-  const n=a.balance>=1000?Math.round(a.balance).toLocaleString('zh-CN'):Number(a.balance.toFixed(1)).toString();
-  return`<span class="mg-balance" title="${esc(`${a.unit??'积分'}余额${a.fetchedAt?`，${since(a.fetchedAt)}更新`:''}`)}">余额 ${esc(n)}</span>`;
-}
 function modelItemHtml(m){
   return`<button class="menu-item model-item${m.key===state.modelKey?' selected':''}" data-model-key="${esc(m.key)}"><span class="mi-main"><span class="mi-name">${esc(sourceName(m))}</span><span class="mi-sub mono">${esc(m.id)}</span></span><span class="mi-tags">${priceTag(m)}${m.reasoning.some(e=>e!=='none')?'<span class="mi-tag">思考</span>':''}${m.contextMaximum?`<span class="mi-tag">${compact(m.contextMaximum)}</span>`:''}</span>${m.key===state.modelKey?icon('check','mi-check'):''}</button>`;
 }
@@ -1099,7 +1115,7 @@ function modelListHtml(){
     if(!list.length)return'';
     // A search shows every match; otherwise a group stays closed until it is opened.
     const open=!!q||openGroups.has(source),chosen=all.find(m=>m.key===state.modelKey);
-    return`<div class="model-group${open?' open':''}"><button class="model-group-head" data-model-group="${source}" aria-expanded="${open}">${icon('chevronRight','mg-caret')}<span class="mg-name">${esc(sourceNames[source])}</span><span class="mg-count">${q?`${list.length}/${all.length}`:all.length} 个</span>${balanceText(source)}${chosen&&!open?`<span class="mg-chosen" title="当前选择">${icon('check')}${esc(sourceName(chosen))}</span>`:''}</button>${open?`<div class="model-group-body">${list.map(modelItemHtml).join('')}</div>`:''}</div>`;
+    return`<div class="model-group${open?' open':''}"><button class="model-group-head" data-model-group="${source}" aria-expanded="${open}">${icon('chevronRight','mg-caret')}<span class="mg-name">${esc(sourceNames[source])}</span><span class="mg-count">${q?`${list.length}/${all.length}`:all.length} 个</span>${chosen&&!open?`<span class="mg-chosen" title="当前选择">${icon('check')}${esc(sourceName(chosen))}</span>`:''}</button>${open?`<div class="model-group-body">${list.map(modelItemHtml).join('')}</div>`:''}</div>`;
   }).join('');
   const native=!gatewayOnly(env)&&(!q||'原生 native'.includes(q))?`<div class="menu-label">原生</div><button class="menu-item model-item${state.modelKey==='native'?' selected':''}" data-model-key="native"><span class="mi-main"><span class="mi-name">原生模型设置</span><span class="mi-sub">使用 ${esc(runtime(env)?.name??'')} 自己的模型与登录</span></span>${state.modelKey==='native'?icon('check','mi-check'):''}</button>`:'';
   return groups+native||`<div class="menu-empty">${models().length?'没有匹配的模型':'还没有模型目录。请到设置 → 模型源下载组件并登录。'}</div>`;
@@ -1912,6 +1928,12 @@ document.addEventListener('click',e=>{
   if((el=hit('[data-rule-delete]'))){const id=el.dataset.ruleDelete;void action(async()=>{state.rules=await call('rules:delete',{id});renderSettings();toast('已删除');});return;}
   if((el=hit('[data-rule-undo]'))){const id=el.dataset.ruleUndo;el.disabled=true;void action(async()=>{try{const view=await call('rules:undo',{id});if(state.rules)state.rules=view;toast('已撤销这条长期要求');}finally{el.disabled=false;}});return;}
   if((el=hit('[data-open-rules]'))){openSettings('rules');return;}
+  if((el=hit('[data-balance-refresh]'))){
+    const source=el.dataset.balanceRefresh;if(balanceLoading.has(source))return;
+    balanceLoading.add(source);renderTopbar();
+    void action(async()=>{try{const account=await call('provider:account',{source,force:true});if(account&&state.snapshot?.catalog?.[source])state.snapshot.catalog[source].account=account;if(account?.error)toast(`${sourceNames[source]??source} 余额读取失败：${account.error}`,true);}finally{balanceLoading.delete(source);renderTopbar();}});
+    return;
+  }
   if((el=hit('[data-rule-session]'))){const id=el.dataset.ruleSession;closeSettings();void action(()=>openSession(id));return;}
   if((el=hit('[data-source-install]'))){void action(()=>call('source:install',{id:el.dataset.sourceInstall}));return;}
   if((el=hit('[data-source-cancel]'))){void action(()=>call('source:cancel',{id:el.dataset.sourceCancel}));return;}
@@ -2137,19 +2159,22 @@ document.addEventListener('change',e=>{
   const t=e.target;
   if(t.matches?.('[data-svc-profile]')){const id=t.dataset.svcProfile;t.blur();void action(()=>serviceCall('bridgeService:configure',{id,defaultProfile:t.value}));return;}
   if(t.matches?.('[data-rules-auto]')){const enabled=t.checked;void action(async()=>{state.rules=await call('rules:auto',{enabled});renderSettings();toast(enabled?'已开启自动记录长期要求':'已关闭自动记录长期要求');});return;}
-  if(t.matches?.('[data-rules-detector]')){const model=t.value;t.blur();void action(async()=>{state.rules=await call('rules:detector',{model});renderSettings();toast(model==='session'?'识别改为跟随会话当前模型':'已更换识别用的模型');});return;}
+  if(t.matches?.('[data-rules-detector]')){const model=t.value;t.blur();void action(async()=>{state.rules=await call('rules:detector',{model});renderSettings();toast(model==='deepseek'?'识别改用 DeepSeek Flash':model==='session'?'识别改为跟随会话当前模型':'已更换识别用的模型');});return;}
   if(t.matches?.('[data-update-auto]')){const enabled=t.checked;void action(async()=>{await call('update:auto-download',{enabled});toast(enabled?'已开启自动下载更新包':'已关闭自动下载更新包');await snapshot();refreshSettingsLive();renderUpdateSlot();});return;}
   if(t.matches?.('[data-svc-autostart]')){const id=t.dataset.svcAutostart,enabled=t.checked;void action(async()=>{try{await call('bridgeService:autostart',{id,enabled});toast(enabled?'已开启开机启动':'已关闭开机启动');}finally{await serviceCall(null,null);}});}
 });
 
 // One snapshot at a time: changes that arrive while it is in flight are folded into a single follow-up.
 let refreshing=false,refreshAgain=false;
+/** Changes whenever a source's catalog or balance is re-read, so an open model menu can reprice at once. */
+const catalogStamp=()=>['qoder','workbuddy'].map(source=>{const c=state.snapshot?.catalog?.[source];return`${c?.checkedAt??''}|${c?.account?.fetchedAt??''}`;}).join(',');
 async function refreshFromBackend(){
   if(refreshing){refreshAgain=true;return;}
   refreshing=true;
   try{
-    const wasChecking=state.snapshot?.startup?.environments==='checking';
+    const wasChecking=state.snapshot?.startup?.environments==='checking',stamp=catalogStamp();
     await snapshot();
+    if(menu?.kind==='model'&&!state.menuSearch&&catalogStamp()!==stamp){const list=$('#menu-list');if(list)list.innerHTML=modelListHtml();}
     if(wasChecking&&state.snapshot.startup?.environments!=='checking'){
       capCache.clear();
       if(!guideShown&&!state.snapshot.runtimes.some(usable))openGuide();

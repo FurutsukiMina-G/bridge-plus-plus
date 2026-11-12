@@ -8,9 +8,9 @@ const view={
     {id:'r_1',text:'回复用中文',at:'2026-11-12T08:05:00Z',sessionId:'s-1',sessionTitle:'修复 <b>登录</b>',auto:true},
     {id:'r_2',text:'改代码前先说明方案',at:null,sessionId:null,auto:false},
   ],
-  injected:['r_1'],overflow:false,autoRecord:true,detector:{model:'session',fallback:'qoder:qfmodel',available:true},updatedAt:'2026-11-12T08:05:00Z'
+  injected:['r_1'],overflow:false,autoRecord:true,detector:{model:'deepseek',deepseek:{qoder:'qoder:dfmodel',workbuddy:'workbuddy:deepseek-v4.1-flash'},available:true},updatedAt:'2026-11-12T08:05:00Z'
 };
-const models=[{key:'qoder:qfmodel',name:'Q-Qwen3.8-Flash',group:'Qoder CN'},{key:'workbuddy:deepseek-v4.1-flash',name:'W-DeepSeek-V4.1-Flash',group:'WorkBuddy'}];
+const models=[{key:'qoder:dfmodel',name:'Q-DeepSeek-Flash',group:'Qoder CN'},{key:'qoder:qfmodel',name:'Q-Qwen3.8-Flash',group:'Qoder CN'},{key:'workbuddy:deepseek-v4.1-flash',name:'W-DeepSeek-V4.1-Flash',group:'WorkBuddy'}];
 
 test('rules page lists items with origin, source session and the not-injected tag, escaped',()=>{
   const html=rulesPageHtml(view,{models});
@@ -24,15 +24,23 @@ test('rules page lists items with origin, source session and the not-injected ta
   assert.match(html,/2 条/);
 });
 
-test('detector defaults to the session model and lists source models; an unknown fixed model stays visible',()=>{
+test('detector defaults to DeepSeek Flash on the session source and lists source models; an unknown fixed model stays visible',()=>{
   const html=rulesPageHtml(view,{models});
-  assert.match(html,/<option value="session" selected>跟随会话当前模型（默认）<\/option>/);
-  assert.match(html,/<optgroup label="Qoder CN"><option value="qoder:qfmodel">Q-Qwen3.8-Flash<\/option>/);
-  assert.match(html,/这个会话正在用的模型/);assert.match(html,/Q-Qwen3.8-Flash（Qoder）/);
-  const fixed=rulesPageHtml({...view,detector:{model:'workbuddy:deepseek-v4.1-flash',fallback:'qoder:qfmodel',available:true}},{models});
+  assert.match(html,/<option value="deepseek" selected>DeepSeek Flash（默认）<\/option><option value="session">跟随会话当前模型<\/option>/);
+  assert.match(html,/<optgroup label="Qoder CN"><option value="qoder:dfmodel">Q-DeepSeek-Flash<\/option>/);
+  assert.match(html,/用 Qoder 模型的会话交给 Q-DeepSeek-Flash，用 WorkBuddy 模型的交给 W-DeepSeek-V4.1-Flash/);
+  assert.match(html,/原生模型（不经过 Bridge\+\+ 模型源）时交给 W-DeepSeek-V4.1-Flash（WorkBuddy）/);
+  assert.doesNotMatch(html,/免费/);
+  const session=rulesPageHtml({...view,detector:{...view.detector,model:'session'}},{models});
+  assert.match(session,/<option value="session" selected>/);assert.match(session,/这个会话正在用的模型/);assert.match(session,/时交给 W-DeepSeek-V4.1-Flash（WorkBuddy）/);
+  const onlyQoder=rulesPageHtml({...view,detector:{model:'deepseek',deepseek:{qoder:'qoder:dfmodel',workbuddy:null},available:true}},{models});
+  assert.match(onlyQoder,/时交给 Q-DeepSeek-Flash（Qoder）/);assert.doesNotMatch(onlyQoder,/用 WorkBuddy 模型的/);
+  const fixed=rulesPageHtml({...view,detector:{...view.detector,model:'workbuddy:deepseek-v4.1-flash'}},{models});
   assert.match(fixed,/<option value="workbuddy:deepseek-v4.1-flash" selected>/);assert.match(fixed,/会发给 WorkBuddy/);
-  const gone=rulesPageHtml({...view,detector:{model:'qoder:retired',fallback:'qoder:qfmodel',available:false}},{models});
+  const gone=rulesPageHtml({...view,detector:{model:'qoder:retired',deepseek:{qoder:null,workbuddy:null},available:false}},{models});
   assert.match(gone,/<option value="qoder:retired" selected>retired（现在不可用）<\/option>/);assert.match(gone,/现在没有可用的识别模型/);
+  // An older view without a model reads as the default.
+  assert.match(rulesPageHtml({...view,detector:{available:true}},{models}),/<option value="deepseek" selected>/);
   // With auto-record off the picker is hidden.
   assert.doesNotMatch(rulesPageHtml({...view,autoRecord:false},{models}),/data-rules-detector/);
 });
@@ -59,5 +67,5 @@ test('transcript notice offers undo until it is undone',()=>{
 
 test('helpers',()=>{
   assert.equal(ruleTime('not a date'),'');assert.match(ruleTime('2026-11-12T08:05:00Z'),/^11 月 12 日 \d\d:05$/);
-  assert.equal(modelName('qoder:qfmodel'),'Q-Qwen3.8-Flash');assert.equal(modelName('workbuddy:glm-5.3'),'glm-5.3');
+  assert.equal(modelName('qoder:dfmodel'),'Q-DeepSeek-Flash');assert.equal(modelName('workbuddy:glm-5.3'),'glm-5.3');
 });
