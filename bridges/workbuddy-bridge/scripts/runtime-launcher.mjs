@@ -17,7 +17,7 @@ function stop(){if(timer)return;child.stdin.end();timer=setTimeout(()=>child.kil
 // WorkBuddy desktop's stream-json runtime can keep its sidecars alive after
 // producing the terminal result. Bound that shutdown independently of the SDK.
 const lines=createInterface({input:child.stdout});
-lines.on('line',line=>{try{if(JSON.parse(line).type==='result')stop();}catch{}});
+lines.on('line',line=>{try{if(JSON.parse(line).type==='result'&&process.env.WORKBUDDY_BRIDGE_HOLD!=='1')stop();}catch{}});
 process.stdin.on('end',stop);process.stdin.on('close',stop);
 process.on('SIGTERM',stop);process.on('SIGINT',stop);
 child.on('error',()=>process.exit(1));

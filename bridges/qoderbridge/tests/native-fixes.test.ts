@@ -112,7 +112,7 @@ test('a keyed request with rewritten history still rebuilds the old session',asy
     await waitFor(()=>runtimes.length===2&&runtimes[1]!.prompts.length===1);
     assert.equal(runtimes[0]!.closed,1);
     runtimes[1]!.final('two');const second=await secondPending;
-    assert.equal(second.report.native.rebuild_reason,'history_mismatch');
+    assert.equal(second.report.native.rebuild_reason,'history_rewritten');
     assert.equal(second.report.native.window,'new');
   }finally{pool.closeAll();}
 });

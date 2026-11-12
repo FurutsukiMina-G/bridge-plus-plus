@@ -24,7 +24,7 @@ test('M1: a compacted request carrying a waiting session tool id closes it; an u
     assert.equal(runtimeA.closed,1,'the waiting runtime is closed once its results arrive in a rewritten history');
     const resolved=await handlers[0]!;assert.equal(resolved.isError,true);assert.equal(resolved.content[0]!.text,'Host session is not available.');
     runtimes[2]!.final('C done');const third=await pendingC;
-    assert.equal(third.report.native.rebuild_reason,'history_mismatch');
+    assert.equal(third.report.native.rebuild_reason,'history_rewritten');
     assert.equal(third.report.native.window,'new');
     assert.equal(pool.stats().native.awaiting,0);
   }finally{pool.closeAll();}

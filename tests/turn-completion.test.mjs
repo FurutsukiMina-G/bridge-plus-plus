@@ -8,6 +8,7 @@ import {bridgePromptConfig} from '../app/services/runtime-prompts.mjs';
 import {SdkTransport} from '../bridges/workbuddy-bridge/src/sdk-transport.mjs';
 import {relayCompletion} from '../app/services/gateway-usage.mjs';
 import {dshEvent} from '../app/runtimes/dsh.mjs';
+import {holdFixture,collectHold,hostResults} from './fixtures/workbuddy-hold.mjs';
 const {createBridgeServer,PUBLIC_MODEL}=await tsImport('../bridges/qoderbridge/src/server.ts',import.meta.url);
 const tools=[{type:'function',function:{name:'Read',parameters:{type:'object',properties:{path:{type:'string'}},required:['path'],additionalProperties:false}}}];
 const request={model:PUBLIC_MODEL,messages:[{role:'user',content:'审查示例项目，读取必要文件，然后给出实际检查结果。'}],tools};
@@ -64,9 +65,9 @@ test('Qoder repeated announcements exhaust once and never produce a successful f
 test('Qoder planning-only answer does not force an action',async t=>{
   const fixture=await qoder(t,[announcement]),result=await fixture.send({messages:[{role:'user',content:'审查前只给计划即可，不要使用工具。'}]});assert.equal(result.status,200);assert.equal((await result.json()).choices[0].message.content,announcement);assert.equal(fixture.seen.length,1);
 });
-for(const native of [false,true])for(const recover of [false,true])test(`WorkBuddy ${native?'native':'JSON'} progress ${recover?'recovers into a validated host call':'cannot fall back to completed'}`,async t=>{
+for(const native of [false,true])for(const recover of [false,true])test(`WorkBuddy ${native?'replay':'JSON'} progress ${recover?'recovers into a validated host call':'cannot fall back to completed'}`,async t=>{
   const runtime=await directory(),seen=[];
-  const transport=new SdkTransport({runtime,cliPath:process.execPath,decisionRetries:1,toolMode:native?'native':'json',...bridgePromptConfig('kimi').workbuddy},{get:async()=>({accessToken:'fixture',uid:'fixture',domain:'www.workbuddy.cn'})},{run:async function*({options}){
+  const transport=new SdkTransport({runtime,cliPath:process.execPath,decisionRetries:1,toolMode:native?'replay':'json',...bridgePromptConfig('kimi').workbuddy},{get:async()=>({accessToken:'fixture',uid:'fixture',domain:'www.workbuddy.cn'})},{run:async function*({options}){
     seen.push(options);yield {type:'system',subtype:'init',model:'fixture',session_id:'same-fixture',mcp_servers:native?[{name:'host',status:'connected'}]:[]};
     const next=recover&&seen.length===2;
     const text=next?(native?'':JSON.stringify({action:'tool_calls',calls:[{name:'Read',arguments:{path:'fixture.txt'}}]})):native?announcement:JSON.stringify({action:'final',content:announcement});
@@ -78,6 +79,33 @@ for(const native of [false,true])for(const recover of [false,true])test(`WorkBud
   if(recover){assert.match(wire,/"finish_reason":"tool_calls"/);assert.match(wire,/data: \[DONE\]/);}
   else{assert.match(wire,/unfinished_turn/);assert.doesNotMatch(wire,/data: \[DONE\]/);await (await transport.chat(body,new AbortController().signal)).text();assert.equal(seen.length,2,'Identical failed HTTP replay must not invoke the SDK again');}
 });
+for(const recover of [false,true])test(`WorkBuddy default hold progress ${recover?'recovers into a validated host call':'cannot fall back to completed'}`,async t=>{
+  const config=bridgePromptConfig('kimi').workbuddy;
+  const fixture=await holdFixture(t,config,(session,_prompt,turn)=>{
+    if(recover&&turn===2)return session.toolStep([{id:'held-progress-call',name:'mcp__host__Read',input:{path:'fixture.txt'}}]);
+    session.final(announcement);
+  },{nativeInvalidRounds:2});
+  const body={...request,model:'fixture',max_tokens:1000},response=await fixture.chat(body);
+  if(recover){
+    const first=await collectHold(response,tools),message=first.result.choices[0].message;
+    assert.equal(first.result.choices[0].finish_reason,'tool_calls');assert.equal(first.metrics.native.invalid_calls,1);
+    assert.deepEqual(message.tool_calls,[{id:'held-progress-call',type:'function',function:{name:'Read',arguments:'{"path":"fixture.txt"}'}}]);
+    assert.doesNotMatch(first.wire,new RegExp(announcement));assert.doesNotMatch(first.wire,/"finish_reason":"stop"/);
+    const final=await collectHold(await fixture.chat(hostResults(body,message)),tools);
+    assert.equal(final.result.choices[0].message.content,'Complete fixture answer.');assert.equal(final.result.choices[0].finish_reason,'stop');
+    assert.deepEqual(fixture.sessions[0].handlerResults.map(result=>result.content[0].text),['host-result-0']);
+  }else{
+    const wire=await response.text();assert.match(wire,/"code":"unfinished_turn"/);
+    assert.doesNotMatch(wire,/"finish_reason":"stop"|data: \[DONE\]/);assert.doesNotMatch(wire,new RegExp(announcement));
+    assert.equal(response.bridgeMetrics.native.invalid_calls,2);
+  }
+  assert.equal(fixture.sessions.length,1);const session=fixture.sessions[0];
+  assert.equal(session.prompts.length,2,'Correction must stay in the same V2 session; tool results must not add another send');
+  assert.equal(session.options.resume,undefined);assert.equal(session.options.model,'fixture');
+  assert.ok(session.options.systemPrompt.startsWith(config.hostPrompts.native+'\n\n'));
+  assert.match(session.prompts[1],/only announced the next action/);
+});
+
 test('backend status events identify tool preparation, retries and native DSH plans',async()=>{
   const frames=[{choices:[{delta:{bridge_event:{name:'llm/retry-started',data:{retry:1}}},finish_reason:null}]},{choices:[{delta:{tool_calls:[{index:0,id:'a',function:{name:'Read',arguments:'{'}}]},finish_reason:null}]},{choices:[{delta:{tool_calls:[{index:0,function:{arguments:'}'}}]},finish_reason:'tool_calls'}]}];
   const response=new Response(frames.map(x=>'data: '+JSON.stringify(x)+'\n\n').join('')+'data: [DONE]\n\n',{headers:{'content-type':'text/event-stream'}}),events=[],output=[];

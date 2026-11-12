@@ -14,7 +14,7 @@ export const digest=value=>createHash('sha256').update(JSON.stringify(stable(val
 export function evictionCandidate(records,scope){
   const rows=[...records],roots=new Set(),seen=new Set();
   for(const r of rows)if(r.bridgeScope!==undefined&&!seen.has(r.scope)){seen.add(r.scope);roots.add(r);}
-  return rows.filter(r=>!r.busy&&!roots.has(r)).sort((a,b)=>Number(b.scope===scope)-Number(a.scope===scope)||a.touched-b.touched)[0];
+  return rows.filter(r=>!r.busy).sort((a,b)=>Number(roots.has(a))-Number(roots.has(b))||Number(b.scope===scope)-Number(a.scope===scope)||a.touched-b.touched)[0];
 }
 // A host may tag stored message blocks with <acp tokens="..." type="text">m00001</acp> on later turns.
 // Only that exact bookkeeping form at the start of a message is ignored; ordinary text is untouched.
@@ -53,7 +53,7 @@ export class ContextPool {
       try{process.kill(owner.pid,0);}catch(error){if(error.code==='ESRCH')await this.remove({id:entry.name,dir});}
     }
   }
-  stats(){return {sessions:this.records.size,locks:this.locks.size,mode:'sdk-resume',idleMs:this.cfg.sessionIdleMs??3600000,maxSessions:this.cfg.maxSessions??8};}
+  stats(){return {sessions:this.records.size,locks:this.locks.size,mode:'sdk-resume',idleMs:this.cfg.sessionIdleMs??3600000,maxSessions:this.cfg.maxSessions??24,busy:[...this.records.values()].filter(r=>r.busy).length,awaiting:0,idle:[...this.records.values()].filter(r=>!r.busy).length};}
   async remove(record){
     this.records.delete(record.id);for(const map of [this.clients,this.tools])for(const [k,v]of map)if(v===record.id)map.delete(k);
     this.onRemove?.(record);
@@ -83,7 +83,7 @@ export class ContextPool {
       const ids=[m.tool_call_id,...(m.tool_calls??[]).map(c=>c.id)].filter(Boolean);
       owner=ids.map(id=>this.tools.get(scope+':'+id)).find(Boolean);if(owner)break;
     }
-    let diagnosticReset=null;
+    let diagnosticReset=null,rebuildReason=null;
     if(scoped){
       const related=[...this.records.values()].filter(r=>r.scope===scope&&r.clientKey===body.prompt_cache_key&&!r.busy&&Date.now()-r.touched<(this.cfg.sessionIdleMs??3600000));
       const candidates=related.filter(r=>
@@ -96,6 +96,7 @@ export class ContextPool {
     }
     const lockKey=client??this.records.get(owner)?.lockKey??randomUUID();const prior=this.locks.get(lockKey)??Promise.resolve();let unlock;
     const gate=new Promise(r=>{unlock=r;});const tail=prior.then(()=>gate);this.locks.set(lockKey,tail);
+    let externalRelease;
     let owns=false,record=scoped?this.records.get(owner):undefined;
     if(record)record.busy=true; // reserve before yielding, so parallel branches get separate lanes
     const release=()=>{if(record){record.busy=false;record.touched=Date.now();}unlock();if(this.locks.get(lockKey)===tail)this.locks.delete(lockKey);};
@@ -104,23 +105,25 @@ export class ContextPool {
       if(this.closed)throw new BridgeError(503,'shutting_down','Context pool closed');
       if(client)owner=this.clients.get(client);
       record=this.records.get(owner);let reset=diagnosticReset,pruned=null;
+      if(record?.cancelled){await this.remove(record);record=null;rebuildReason='retry_after_cancel';}
       if(record){
         const same=record.requestHash===requestHash;
         const prefix=record.history.length<=hashes.length&&record.history.every((h,i)=>h===hashes[i]);
         if(!same&&!prefix)pruned=canPrune(record);
         if(record.scope!==scope||(!same&&!prefix&&!pruned)||Date.now()-record.touched>(this.cfg.sessionIdleMs??3600000)){
-          reset=resetFor(record);
+          reset=resetFor(record);rebuildReason=Date.now()-record.touched>(this.cfg.sessionIdleMs??3600000)?'expired':'history_rewritten';
           await this.remove(record);record=null;
-        }else if(!record.sessionId&&!same){await this.remove(record);record=null;reset={reason:'sdk_session_id_unavailable'};}
+        }else if(!record.sessionId&&!same){await this.remove(record);record=null;rebuildReason='superseded';reset={reason:'sdk_session_id_unavailable'};}
       }
       if(!record){
         await this.sweep();
-        while(this.records.size>=(this.cfg.maxSessions??8)){
+        externalRelease=await this.externalMakeRoom?.();
+        while(this.records.size>=(this.cfg.maxSessions??24)){
           const idle=evictionCandidate(this.records.values(),scope);
-          if(!idle)throw new BridgeError(429,'sessions_busy','All context slots are active');await this.remove(idle);
+          if(!idle){const counts={busy:[...this.records.values()].filter(r=>r.busy).length,awaiting:0,idle:[...this.records.values()].filter(r=>!r.busy).length};throw new BridgeError(429,'sessions_busy',`All context slots are active (busy=${counts.busy}, awaiting=${counts.awaiting}, idle=${counts.idle})`,counts);}await this.remove(idle);
         }
         const id=randomUUID();record={id,scope,bridgeScope:body.bridge_scope,lockKey,clientKey:body.prompt_cache_key,dir:join(this.cfg.runtime,'sdk',id),sessionId:null,history:[],toolSignature:null,touched:Date.now(),busy:true};
-        this.records.set(id,record);
+        this.records.set(id,record);externalRelease?.();externalRelease=undefined;
         try{await mkdir(record.dir,{recursive:true});await writeFile(join(record.dir,'.bridge-owner.json'),JSON.stringify({pid:process.pid}),{mode:0o600});}
         catch(error){await this.remove(record);throw error;}
         if(client)this.clients.set(client,id);
@@ -132,21 +135,16 @@ export class ContextPool {
       const delta=reused?messages.slice(pruned?pruned.delta_start:record.history.length):messages;
       let echo=null,echoCharactersAvoided=0,nativeEcho={calls:0,characters:0,truncated:false};
       if(reused&&record.echo==='native'&&record.message?.tool_calls?.length){
-        let truncated=false;
-        const shorten=value=>{
-          if(typeof value==='string'&&value.length>600){truncated=true;return `${value.slice(0,600)}…(shortened here; the host received all ${value.length} characters)`;}
-          if(Array.isArray(value))return value.map(shorten);
-          if(value&&typeof value==='object')return Object.fromEntries(Object.entries(value).map(([key,item])=>[key,shorten(item)]));
-          return value;
-        };
-        // The bridge serialized these arguments itself; a parse failure still must not fail the request.
-        const args=text=>{try{return shorten(JSON.parse(text));}catch{return shorten(String(text));}};
+        const args=text=>{try{return JSON.parse(text);}catch{return String(text);}};
         const calls=record.message.tool_calls.map(c=>({id:c.id,name:c.function.name,received_input:args(c.function.arguments)}));
-        const content='These are all calls from your preceding reply that the host actually received and executed. The runtime transcript may show only some of them, with different IDs, followed by Max turns (1) exceeded; that is only a host-handoff marker, not a limit on you. The tool results below correspond to these calls by ID. received_input is the host\'s receipt of each call, not the call format: write arguments directly as the tool schema\'s fields, never inside a wrapper key. If you intended more calls that are absent here, the host did not receive them; resend them now if needed, keeping independent calls in the same reply.';
-        const render=detailed=>({role:'assistant',host_received_calls:calls.map((call,index)=>index<detailed?call:{id:call.id,name:call.name}),content});
-        let detailed=calls.length;echo=render(detailed);
-        while(JSON.stringify(echo).length>6000&&detailed>0){truncated=true;echo=render(--detailed);}
-        nativeEcho={calls:calls.length,characters:JSON.stringify(echo).length,truncated};
+        const content="These are all calls from your preceding reply that the host actually received and executed. The runtime transcript may show only some of them, with different IDs, followed by Max turns (1) exceeded; that is only a host-handoff marker, not a limit on you. The tool results below correspond to these calls by ID. received_input is the host's receipt of each call, not the call format: write arguments directly as the tool schema's fields, never inside a wrapper key. If you intended more calls that are absent here, the host did not receive them; resend them now if needed, keeping independent calls in the same reply.";
+        echo={role:'assistant',host_received_calls:calls,content};
+        if(JSON.stringify(echo).length>6000){
+          const text=JSON.stringify(calls),pieces=[];
+          for(let at=0;at<text.length;){let end=Math.min(at+5000,text.length);if(/[\uD800-\uDBFF]/.test(text[end-1]??''))end--;pieces.push(text.slice(at,end));at=end;}
+          echo=pieces.map((data,index)=>({role:'assistant',host_received_calls_json_chunk:{index:index+1,total:pieces.length,data},content:content+' Concatenate data in index order to recover the complete JSON receipt.'}));
+        }
+        nativeEcho={calls:calls.length,characters:JSON.stringify(echo).length,truncated:false,...(Array.isArray(echo)?{segments:echo.length}:{})};
       }else if(reused&&record.echo!==false&&record.message?.tool_calls?.length){
         echo={role:'assistant',prior_decision_calls:record.message.tool_calls.map(c=>({id:c.id,name:c.function.name,arguments_sha256:digest(c.function.arguments)})),content:'Host assigned these IDs to your preceding validated decision; arguments are unchanged. Only the following tool results describe execution.'};
         echoCharactersAvoided=JSON.stringify(record.message).length;
@@ -154,15 +152,23 @@ export class ContextPool {
         else{echo=record.message;echoCharactersAvoided=0;}
       }
       const toolSignature=digest(body.tools??[]),toolsReused=reused&&record.toolSignature===toolSignature;
-      return {record,messages:echo?[echo,...delta]:delta,replay:replay?record.response:null,reused,toolsReused,
-        metrics:{historyMode:reused?'delta':'full',sentMessageCount:delta.length,toolsReused,echoCharactersAvoided,nativeEcho,reset:reset?{...reset,firstChangedIndex:reset.first_changed_index,previousMessages:reset.previous_message_count,currentMessages:reset.current_message_count}:null,context_reset:reset,
+      // Reconcile a partial host result batch before sending it to the replay runtime.
+      const pending=record.message?.tool_calls??[];
+      if(reused&&pending.length&&delta.some(m=>m.role==='tool')){
+        const supplied=new Set(delta.filter(m=>m.role==='tool').map(m=>m.tool_call_id));
+        let at=0;while(at<delta.length&&['assistant','tool'].includes(delta[at].role))at++;
+        delta.splice(at,0,...pending.filter(c=>!supplied.has(c.id)).map(c=>({role:'tool',tool_call_id:c.id,content:'[tool error] The host returned no result for this call.'})));
+      }
+      rebuildReason??=reused&&!toolsReused?'tools_changed':!reused&&!replay?'new_conversation':null;
+      return {record,messages:echo?[...(Array.isArray(echo)?echo:[echo]),...delta]:delta,replay:replay?record.response:null,reused,toolsReused,
+        metrics:{rebuild_reason:rebuildReason,slot_counts:{busy:[...this.records.values()].filter(r=>r.busy).length,awaiting:0,idle:[...this.records.values()].filter(r=>!r.busy).length},historyMode:reused?'delta':'full',sentMessageCount:delta.length,toolsReused,echoCharactersAvoided,nativeEcho,reset:reset?{...reset,firstChangedIndex:reset.first_changed_index,previousMessages:reset.previous_message_count,currentMessages:reset.current_message_count}:null,context_reset:reset,
           pruned_history_reuse:pruned?{removed_message_count:pruned.removed_message_count,removed_roles:pruned.removed_roles,context_usage_ratio:record.contextUsageRatio,threshold,native_retains_pruned_results:true}:null,localReplay:!!replay},
         commit:(response,message,{echo=true}={})=>{
           record.requestHash=requestHash;record.response=response;record.message=message;record.completedAt=Date.now();record.toolSignature=toolSignature;record.echo=echo;
           const assistant=historyEntry(semanticMessages([message])[0]);record.history=[...hashes,assistant.key];record.historyEntries=[...entries,assistant];
           for(const c of message.tool_calls??[])this.tools.set(scope+':'+c.id,record.id);
         },release,discard:()=>this.remove(record)};
-    }catch(e){if(owns)release();else void prior.then(release);throw e;}
+    }catch(e){externalRelease?.();if(record&&this.records.get(record.id)!==record)record.busy=false;if(owns)release();else void prior.then(release);throw e;}
   }
   async close(){this.closed=true;clearInterval(this.timer);for(const r of [...this.records.values()])if(!r.busy)await this.remove(r);}
 }

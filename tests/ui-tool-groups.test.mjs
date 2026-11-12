@@ -29,6 +29,18 @@ test('the answer and anything else that is not work splits a run and stays visib
   assert.deepEqual(out.map(b=>b.fold?'fold':b.key),['fold','text:answer','fold','text:end']);
 });
 
+test('granted approvals fold with the calls they allowed; a pending one ends the run',()=>{
+  const granted=id=>({key:`approval:${id}`,html:()=>id,work:{approval:true}}),pending=id=>({key:`approval:${id}`,html:id});
+  const reviewed=id=>({key:`note:${id}`,html:()=>id,work:{review:true}});
+  const blocks=[tool(1,call('Bash',{command:'npm test'})),granted('g1'),thinking('t'),tool(2,read('a')),granted('g2'),tool(3,read('b')),reviewed('r1'),pending('p1'),tool(4,read('c'))];
+  const out=foldRuns(blocks);
+  assert.deepEqual(out.map(b=>b.fold?`fold:${b.fold.length}`:b.key),['fold:7','approval:p1','tool:4']);
+  assert.equal(foldSummary(out[0].fold,false).detail,'读取文件 2 · 搜索代码 1 · 思考 1 段 · 已授权 3 次');
+  // Approvals and thinking alone never make a fold.
+  const quiet=[granted('a'),granted('b'),thinking('c'),tool(1,read('a')),tool(2,read('b'))];
+  assert.deepEqual(foldRuns(quiet),quiet);
+});
+
 test('a finished run says what it did, most frequent first',()=>{
   const run=[tool(1,read('a')),tool(2,call('Grep',{pattern:'x'})),tool(3,read('b')),thinking('t')];
   assert.deepEqual(foldSummary(run,false),{status:'done',title:'3 次工具调用',detail:'读取文件 2 · 搜索代码 1 · 思考 1 段'});

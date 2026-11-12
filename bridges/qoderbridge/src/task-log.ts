@@ -41,6 +41,10 @@ type Turn = { session_id?: string | null; model?: string | null; reused_session?
   failure?: ReturnType<typeof bridgeFailure> | null;
   sdk_error_code?: number | string | null; sdk_exception?: SDKExceptionDetails | null;
   usage_accounting?:UsageAccounting;
+  /** Native-lane counters and reasons (snake_case keys); null on JSON-path rows. */
+  native?: Record<string, unknown> | null;
+  /** Why a tool-carrying request stayed on the JSON path. */
+  native_skip_reason?: string | null;
 };
 export function taskLogEntry(args: { request: ChatRequest; turn?: Turn; decision?: Decision;
   bridgeRequestId: string; startedAt: number; error?: string; bridgePort?: number; }) {
@@ -111,7 +115,8 @@ export function taskLogEntry(args: { request: ChatRequest; turn?: Turn; decision
         calendar_tier: turn.cache_billing.calendarTier, residual_tokens: turn.cache_billing.residualTokens } : null,
       billing_tier: turn?.billing_tier ?? null, requested_reasoning: turn?.requested_reasoning ?? null,
       reasoning_guard: turn?.reasoning_guard ?? null, reasoning_guard_stops: turn?.reasoning_guard_stops ?? 0,
-      tool_definitions_reused: turn?.tool_definitions_reused ?? null },
+      tool_definitions_reused: turn?.tool_definitions_reused ?? null,
+      native: turn?.native ?? null, native_skip_reason: turn?.native_skip_reason ?? null },
     context_transport: { history_mode: turn?.history_mode ?? null, sent_message_count: turn?.sent_message_count ?? null,
       reset:turn?.context_reset??null,optimization:turn?.prompt_optimization??null },
   };

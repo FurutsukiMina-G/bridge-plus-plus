@@ -17,6 +17,7 @@ export function publicError(error,{diagnostic}={}){
   if(Number.isInteger(extra.upstream_status)&&extra.upstream_status>=100&&extra.upstream_status<=599)inherited.upstream_status=extra.upstream_status;
   if(typeof extra.reset_at==='string'&&/T.*(?:Z|[+-]\d{2}:\d{2})$/.test(extra.reset_at)&&!Number.isNaN(Date.parse(extra.reset_at)))inherited.reset_at=extra.reset_at;
   if(typeof extra.request_id==='string')inherited.request_id=redactSecrets(extra.request_id).slice(0,200);
+  for(const key of ['busy','awaiting','idle'])if(Number.isSafeInteger(extra[key])&&extra[key]>=0)inherited[key]=extra[key];
   if(extra.automatic_retry===false)inherited.automatic_retry=false;
   if(error instanceof BridgeError||limited)return {status:limited?429:error.status,body:{error:{type:'bridge_error',code:limited?'upstream_rate_limited':error.code,...inherited,...details,
     ...(limited||['sessions_busy','invalid_decision','invalid_tool_arguments','native_tool_blocked','required_tool_missing','tools_disabled','wrong_pinned_tool','ambiguous_decision','unfinished_turn','missing_native_output','output_budget'].includes(error.code)?{automatic_retry:false}:{})}}};

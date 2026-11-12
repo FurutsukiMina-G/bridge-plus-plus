@@ -169,7 +169,7 @@ test('Codex free-text questions stay answerable and the raw JSON dialog passes n
   assert.deepEqual(codexUserInputResult(params,'approve',{f2:{answers:['y']}}),{answers:{f2:{answers:['y']}}});
 });
 
-test('Kimi elicitation free-text properties convert to their declared type and accept partial answers',async()=>{
+test('Kimi elicitation offers 是/否 buttons for booleans, converts typed truth words and leaves the rest unanswered',async()=>{
   const params={message:'Name\nCount\nSteps\nFlag',requestedSchema:{properties:{q0:{type:'string'},q1:{type:'number'},q2:{type:'integer'},q3:{type:'boolean'}}}};
   const {adapter,events,responses}=kimiFixture();
   await adapter.message({id:21,method:'elicitation/create',params});
@@ -178,12 +178,20 @@ test('Kimi elicitation free-text properties convert to their declared type and a
     {id:'q0',question:'Name',multiSelect:false,allowCustom:true},
     {id:'q1',question:'Count',multiSelect:false,allowCustom:true},
     {id:'q2',question:'Steps',multiSelect:false,allowCustom:true},
-    {id:'q3',question:'Flag',multiSelect:false,allowCustom:true}
+    {id:'q3',question:'Flag',options:[{label:'是'},{label:'否'}],multiSelect:false,allowCustom:true}
   ]);
   await adapter.approve(event.approvalId,'approve',{items:[{id:'q0',selected:[],custom:'Ada'},{id:'q1',selected:[],custom:'4.5'},{id:'q2',selected:[],custom:'3'},{id:'q3',selected:[],custom:'是'}]});
   assert.deepEqual(responses.at(-1),{id:21,result:{action:'accept',content:{q0:'Ada',q1:4.5,q2:3,q3:true}}});
   const questions=kimiElicitationQuestions(params),properties=params.requestedSchema.properties;
+  assert.deepEqual(kimiElicitationResult(questions,'approve',{items:[{id:'q3',selected:['是']}]},properties),{action:'accept',content:{q3:true}});
+  assert.deepEqual(kimiElicitationResult(questions,'approve',{items:[{id:'q3',selected:['否']}]},properties),{action:'accept',content:{q3:false}});
   assert.deepEqual(kimiElicitationResult(questions,'approve',{items:[{id:'q3',selected:[],custom:'否'}]},properties),{action:'accept',content:{q3:false}});
+  for(const [typed,value]of[[' YES ',true],['no',false],['y',true],['N',false],['TRUE',true],['False',false],['1',true],['0',false],['对',true],['错',false]])
+    assert.deepEqual(kimiElicitationResult(questions,'approve',{items:[{id:'q3',selected:[],custom:typed}]},properties),{action:'accept',content:{q3:value}});
+  // An unrecognized boolean answer is treated as skipped, never forwarded to Kimi as a string.
+  assert.deepEqual(kimiElicitationResult(questions,'approve',{items:[{id:'q3',selected:[],custom:'也许吧'}]},properties),{action:'decline'});
+  assert.deepEqual(kimiElicitationResult(questions,'approve',{items:[{id:'q3',selected:['不是这个']}]},properties),{action:'decline'});
+  assert.deepEqual(kimiElicitationResult(questions,'approve',{items:[{id:'q0',selected:[],custom:'Ada'},{id:'q3',selected:[],custom:'也许吧'}]},properties),{action:'accept',content:{q0:'Ada'}});
   assert.deepEqual(kimiElicitationResult(questions,'approve',{items:[{id:'q2',selected:[],custom:'3.5'}]},properties),{action:'decline'});
   assert.deepEqual(kimiElicitationResult(questions,'approve',{items:[{id:'q1',selected:[],custom:'abc'}]},properties),{action:'decline'});
   assert.deepEqual(kimiElicitationResult(questions,'approve',{items:[{id:'q0',selected:[],custom:'Ada'},{id:'q1',selected:[],skipped:true}]},properties),{action:'accept',content:{q0:'Ada'}});

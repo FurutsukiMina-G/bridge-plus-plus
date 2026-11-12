@@ -147,6 +147,43 @@ kbd{font:500 10.5px var(--font);color:var(--faint);border:1px solid var(--line);
 .settings-entry{flex:1;height:36px;padding:0 10px;border-radius:9px;display:flex;align-items:center;gap:10px;color:var(--text-2);font-weight:500}
 .settings-entry:hover{background:var(--hover);color:var(--text)}
 .version{font-size:11px;color:var(--faint);padding-right:6px}
+/* update notice above the settings button */
+.update-slot{padding:0 10px 8px;flex-shrink:0}
+.update-slot:empty{display:none}
+.update-card{display:flex;align-items:center;gap:9px;padding:8px 8px 8px 9px;border:1px solid var(--accent-line);background:var(--accent-soft);border-radius:11px;animation:rise .2s ease}
+.update-card.ready{background:color-mix(in srgb,var(--accent) 20%,transparent)}
+.uc-icon{width:24px;height:24px;border-radius:50%;background:var(--accent);color:#fff;display:grid;place-items:center;flex-shrink:0}
+.uc-icon .icon{width:14px;height:14px}
+.uc-icon .spinner{width:12px;height:12px;border-color:rgba(255,255,255,.35);border-top-color:#fff}
+.uc-text{flex:1;min-width:0;display:flex;flex-direction:column;gap:1px}
+.uc-text b{font-size:12.5px;font-weight:600;color:var(--text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.uc-text small{font-size:11px;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.uc-text small.uc-error{color:var(--red)}
+.uc-bar{display:block;height:3px;border-radius:2px;background:var(--line);overflow:hidden;margin-top:4px}
+.uc-bar i{display:block;height:100%;background:var(--accent);transition:width .3s}
+.uc-bar.wide{flex:1;max-width:220px;margin:0}
+.update-card .icon-btn.sm{width:24px;height:24px}
+/* 设置 › 关于 › 更新 */
+.update-line{display:flex;align-items:center;gap:8px;margin:8px 0;font-size:13px;color:var(--text-2);flex-wrap:wrap}
+.update-line>.icon{width:15px;height:15px;color:var(--muted);flex-shrink:0}
+.update-line.warn>.icon{color:var(--amber)}
+.update-actions{display:flex;align-items:center;gap:10px;margin:12px 0 10px}
+.update-actions .muted{font-size:12px}
+.update-auto{display:flex;align-items:flex-start;gap:9px;margin:4px 0 18px;cursor:pointer}
+.update-auto input{margin-top:3px;accent-color:var(--accent)}
+.update-auto b{display:block;font-weight:500;font-size:13px;color:var(--text)}
+.update-auto small{display:block;font-size:12px;color:var(--muted);margin-top:1px}
+/* 导出反馈 */
+.fb-summary{display:flex;flex-direction:column;gap:7px;padding:10px 12px;border-radius:10px;background:var(--hover);margin:0 0 6px;font-size:12.5px;color:var(--text-2)}
+.fb-loading{display:flex;align-items:center;gap:8px}
+.fb-loading .icon{width:15px;height:15px;color:var(--amber)}
+.fb-counts{display:flex;flex-wrap:wrap;gap:4px 14px}
+.fb-counts b{color:var(--text);font-weight:600}
+.fb-chips{display:flex;flex-wrap:wrap;gap:4px}
+.fb-chip{font-size:11px;border:1px solid var(--line);border-radius:5px;padding:0 6px;line-height:18px;color:var(--muted);background:var(--surface)}
+.fb-opt{display:flex;flex-direction:column;gap:1px}
+.fb-opt b{font-weight:500;color:var(--text);font-size:13px}
+.fb-opt small{font-size:12px;color:var(--muted)}
 
 /* ---------- main column ---------- */
 .main{display:flex;flex-direction:column;min-width:0;min-height:0;background:var(--bg)}
@@ -383,6 +420,10 @@ kbd{font:500 10.5px var(--font);color:var(--faint);border:1px solid var(--line);
 .approval-card{margin:10px 0;padding:14px 16px;border-radius:14px;border:1px solid color-mix(in srgb,var(--amber) 45%,var(--line));background:color-mix(in srgb,var(--amber) 7%,var(--surface));animation:rise .18s ease-out}
 .approval-head{display:flex;align-items:center;gap:8px;font-size:13px}
 .approval-head .icon{width:16px;height:16px;color:var(--amber)}
+.approval-review{display:flex;align-items:flex-start;gap:7px;margin:8px 0 2px;font-size:12.5px;color:var(--text-2);line-height:1.55}
+.approval-review .icon{width:14px;height:14px;margin-top:2px;flex-shrink:0;color:var(--muted)}
+.approval-review.medium .icon{color:var(--amber)}
+.approval-review.high .icon{color:var(--red)}
 .approval-summary{margin:10px 0 4px;padding:8px 10px;border-radius:9px;background:var(--code);font-family:var(--mono);font-size:12px;white-space:pre-wrap;word-break:break-word;max-height:160px;overflow:auto}
 .approval-details>summary{font-size:12px;color:var(--muted);cursor:pointer;margin:6px 0}
 .approval-details pre{font-size:11.5px;max-height:260px;overflow:auto;background:var(--code);border-radius:9px;padding:8px 10px;margin:0;white-space:pre-wrap;word-break:break-word}
@@ -437,6 +478,12 @@ kbd{font:500 10.5px var(--font);color:var(--faint);border:1px solid var(--line);
 .mi-sub.mono{font-size:11px}
 .mi-tags{display:flex;gap:4px;flex-shrink:0}
 .mi-tag{font-size:10.5px;font-weight:500;color:var(--muted);border:1px solid var(--line);border-radius:5px;padding:0 5px;line-height:17px;white-space:nowrap}
+.mi-tag.price{color:var(--text-2);font-variant-numeric:tabular-nums}
+.mi-tag.price.free{color:var(--green);border-color:color-mix(in srgb,var(--green) 45%,transparent);background:color-mix(in srgb,var(--green) 10%,transparent)}
+.mi-tag.price.deal{color:var(--accent);border-color:var(--accent-line);background:var(--accent-soft)}
+.mi-tag.price.deal s{margin-left:4px;color:var(--faint);font-weight:400}
+.mi-tag.price.soon{color:var(--muted);border-style:dashed}
+.mi-tag.price.peak{color:var(--amber);border-color:color-mix(in srgb,var(--amber) 45%,transparent);background:color-mix(in srgb,var(--amber) 10%,transparent)}
 .mi-check{width:15px;height:15px;color:var(--accent)}
 .menu-sep{height:1px;background:var(--line);margin:5px 4px}
 .menu-static{display:flex;align-items:center;gap:10px;padding:8px 10px}
@@ -841,6 +888,7 @@ dialog h2{margin:0 0 12px;font:600 16px var(--font-display)}
 .model-group.open .mg-caret{transform:rotate(90deg)}
 .mg-name{font:600 14.5px var(--font-display);letter-spacing:.2px}
 .mg-count{font-size:11.5px;color:var(--faint)}
+.mg-balance{font-size:11.5px;color:var(--text-2);padding:0 6px;border-radius:5px;background:var(--hover);line-height:18px;white-space:nowrap}
 .mg-chosen{margin-left:auto;display:inline-flex;align-items:center;gap:4px;font-size:11.5px;color:var(--accent);min-width:0;max-width:210px;overflow:hidden;white-space:nowrap;text-overflow:ellipsis}
 .mg-chosen .icon{width:12px;height:12px;flex-shrink:0}
 .model-group-body{margin:0 0 4px 16px;padding-left:4px;border-left:1px solid var(--line-soft)}

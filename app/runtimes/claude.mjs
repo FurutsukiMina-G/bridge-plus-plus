@@ -5,17 +5,27 @@ import {randomUUID} from 'node:crypto';
 import {launch,JsonLines,stopProcess} from '../core/process.mjs';
 import {RuntimeLifecycle} from '../core/lifecycle.mjs';
 import {failureText,failureValue,runtimeReason} from '../services/failure-details.mjs';
+import {createClaudeReviewer} from './claude-review.mjs';
+import {CLAUDE_AUTO_REVIEW_NATIVES} from '../services/runtime-permissions.mjs';
 
-const PERMISSIONS={readonly:'plan',ask:'default','auto-review':'auto',auto:'bypassPermissions'};
+const PERMISSIONS={readonly:'plan',ask:'default','auto-review':'acceptEdits',auto:'bypassPermissions'};
 const MODEL_ENV=['ANTHROPIC_MODEL','ANTHROPIC_DEFAULT_OPUS_MODEL','ANTHROPIC_DEFAULT_SONNET_MODEL','ANTHROPIC_DEFAULT_HAIKU_MODEL','ANTHROPIC_SMALL_FAST_MODEL','CLAUDE_CODE_SUBAGENT_MODEL'];
 const cleanStderr=value=>String(value??'').split(/\r?\n/).filter(line=>line&&!line.includes('[claude-code:unrecognized_model]')).join('\n').slice(-6000);
 // The probed runtime catalog wins: older CLIs call the ask mode "default".
 export function claudePermissionNative(mode,runtime){
   if(mode==null)return null;
-  const native=runtime?.permissions?.modes?.find(row=>row.id===mode)?.native?.mode,value=native??PERMISSIONS[mode];
+  const modes=runtime?.permissions?.modes??[],native=modes.find(row=>row.id===mode)?.native?.mode;
+  // auto-review prefers native acceptEdits and falls back like ask on older CLIs.
+  const fallback=mode==='auto-review'?CLAUDE_AUTO_REVIEW_NATIVES.find(name=>modes.some(row=>(row.native?.mode??row.id)===name))??PERMISSIONS[mode]:PERMISSIONS[mode];
+  const value=native??fallback;
   if(!value)throw new Error('未知 Claude Code 权限模式');return value;
 }
 const oneLine=(value,limit)=>{let text='';try{text=typeof value==='string'?value:JSON.stringify(value??{});}catch{text='';}const line=String(text).replace(/\s+/g,' ').trim();return line.length>limit?line.slice(0,limit)+'…':line;};
+const reviewTarget=request=>{
+  const input=request.input??{},tool=request.tool_name??'';
+  if(tool==='Bash'||tool==='PowerShell')return oneLine(input.command??input.script??'',80);
+  return oneLine(input.file_path??input.path??input.notebook_path??input,80);
+};
 async function hasNativeRecord(configDir,id){
   const root=join(configDir,'projects');let entries;
   try{entries=await readdir(root,{withFileTypes:true});}catch{return false;}
@@ -46,7 +56,9 @@ export function claudeLaunchSettings(options){
   const args=['-p','--input-format','stream-json','--output-format','stream-json','--verbose','--include-partial-messages','--permission-prompt-tool','stdio','--model',variant.id,'--disallowedTools','ScheduleWakeup'];
   if(resume&&session.nativeId)args.push('--resume',session.nativeId);else args.push('--session-id',session.id);
   if(permissionMode!=null){const mode=claudePermissionNative(permissionMode,options.runtime);args.push('--permission-mode',mode);if(mode==='bypassPermissions')args.push('--allow-dangerously-skip-permissions');}
-  args.push('--settings',JSON.stringify({skipWebFetchPreflight:true,model:variant.id,env:controlled}));
+  // A tool executor keeps no memory of its own between sessions: the model would otherwise spend requests
+  // (and permission prompts outside the project) writing memory files into Bridge++'s private config.
+  args.push('--settings',JSON.stringify({skipWebFetchPreflight:true,autoMemoryEnabled:false,model:variant.id,env:controlled}));
   return {args,env};
 }
 
@@ -61,7 +73,11 @@ async function claudeContent(text,attachments){
 }
 
 export class ClaudeAdapter extends RuntimeLifecycle {
-  constructor(options){super(options);this.requests=new Map();this.pending=new Map();this.steers=new Map();this.subagentTools=new Map();this.controlSeq=0;this.stderr='';this.cancelled=false;}
+  constructor(options){
+    super(options);this.requests=new Map();this.pending=new Map();this.steers=new Map();this.subagentTools=new Map();this.reviews=new Map();this.controlSeq=0;this.stderr='';this.cancelled=false;this.roundText='';this.lastUserRequest='';
+    // One reviewer per session: the same gateway endpoint and model name Claude Code itself uses.
+    this.reviewer=options.reviewer??(this.endpoint?.baseURL&&this.variant?.id?createClaudeReviewer({endpoint:this.endpoint,model:this.variant.id,fetch:options.reviewFetch,now:options.reviewNow,timeoutMs:options.reviewTimeoutMs}):null);
+  }
   async start(){
     this.checkOpen();const credentials=join(this.configDir,'.credentials.json');if(existsSync(credentials))throw new Error(`Bridge++ 的 Claude Code 私有配置目录里出现了登录凭据文件，Bridge++ 保持非登录态；请删除 ${credentials} 后重试`);
     await mkdir(this.configDir,{recursive:true});
@@ -95,7 +111,7 @@ export class ClaudeAdapter extends RuntimeLifecycle {
     if(m.type==='command_lifecycle'){await this.commandLifecycle(m);return;}
     if(m.type==='stream_event'){
       // Subagent deltas would create thousands of rows: only the parent summaries matter.
-      if(m.parent_tool_use_id)return;const delta=m.event?.delta;if(!['text_delta','thinking_delta'].includes(delta?.type))return;await this.emit({type:delta.type==='text_delta'?'text':'thinking',text:delta.type==='text_delta'?delta.text??'':delta.thinking??''});return;
+      if(m.parent_tool_use_id)return;const delta=m.event?.delta;if(!['text_delta','thinking_delta'].includes(delta?.type))return;if(delta.type==='text_delta'&&delta.text)this.roundText=(this.roundText+delta.text).slice(-4000);await this.emit({type:delta.type==='text_delta'?'text':'thinking',text:delta.type==='text_delta'?delta.text??'':delta.thinking??''});return;
     }
     if(m.type==='assistant'){
       const parent=m.parent_tool_use_id;for(const part of m.message?.content??[]){
@@ -148,7 +164,55 @@ export class ClaudeAdapter extends RuntimeLifecycle {
     if(this.permissionMode==='readonly'){this.toolResponse(m.request_id,{behavior:'deny',message:'只读模式已拒绝 Claude Code 工具请求'});await this.emit({type:'error',source:'native-permission',code:'permission_denied',text:'只读模式已拒绝 Claude Code 工具请求',data:request});return;}
     const id=`claude:${randomUUID()}`;this.requests.set(id,m);
     if(request.tool_name==='AskUserQuestion'){await this.emit({type:'question',approvalId:id,data:request.input});return;}
-    await this.emit({type:'approval',approvalId:id,name:request.display_name??request.tool_name,data:request,choices:request.permission_suggestions?.length?['approve','approve-session','reject']:['approve','reject']});
+    const choices=request.permission_suggestions?.length?['approve','approve-session','reject']:['approve','reject'];
+    if(this.permissionMode==='auto-review'&&this.reviewer){await this.reviewRequest(id,m,request,choices);return;}
+    await this.emit({type:'approval',approvalId:id,name:request.display_name??request.tool_name,data:request,choices});
+  }
+  // The reviewer sees what the user would: the tool input, this round's request and the agent's latest words.
+  reviewContext(request){return {project:this.project?.path??'',cwd:request?.cwd??this.project?.path??'',userRequest:(this.lastUserRequest??'').slice(-2000),agentText:(this.roundText??'').slice(-800)};}
+  async reviewRequest(id,m,request,choices){
+    const entry={id,message:m,request,choices,controller:new AbortController(),settled:false};this.reviews.set(m.request_id,entry);
+    let verdict;
+    try{verdict=await this.reviewer.review(request,this.reviewContext(request),entry.controller.signal);}
+    catch(error){
+      if(entry.settled)return;
+      if(entry.controller.signal.aborted){this.cancelReview(entry);return;}
+      verdict={decision:'ask',risk:'medium',reason:`自动审查暂时不可用：${oneLine(error?.message??error??'未知原因',200)}`};
+    }finally{this.reviews.delete(m.request_id);}
+    if(entry.settled)return;
+    // A cancelled round must not leave the native request unanswered, even if a
+    // slow reviewer ignored the abort and returned a verdict anyway.
+    if(entry.controller.signal.aborted){this.cancelReview(entry);return;}
+    if(this.requests.get(id)!==m||this.permissionMode!=='auto-review')return;
+    if(verdict.decision==='allow'){
+      this.requests.delete(id);this.toolResponse(m.request_id,{behavior:'allow',updatedInput:request.input??{}});
+      await this.emit({type:'notice',source:'auto-review',text:`自动审查已允许：${request.tool_name??''} · ${reviewTarget(request)} — ${verdict.reason}`});return;
+    }
+    if(verdict.decision==='deny'){
+      this.requests.delete(id);this.toolResponse(m.request_id,{behavior:'deny',message:`Bridge++ 自动审查拒绝了这个操作：${verdict.reason}。如果确实需要，请先向用户说明理由，由用户决定。`});
+      await this.emit({type:'notice',source:'auto-review',text:`自动审查已拒绝：${request.tool_name??''} · ${reviewTarget(request)} — ${verdict.reason}`});return;
+    }
+    await this.emit({type:'approval',approvalId:id,name:request.display_name??request.tool_name,data:{...request,review:{decision:verdict.decision,risk:verdict.risk,reason:verdict.reason}},choices});
+  }
+  cancelReview(entry){
+    entry.settled=true;if(this.requests.get(entry.id)!==entry.message)return;this.requests.delete(entry.id);
+    try{this.toolResponse(entry.message.request_id,{behavior:'deny',message:'Bridge++ 已取消自动审查'});}catch{}
+  }
+  async settleReviews(mode){
+    if(mode==='auto-review')return;
+    for(const entry of [...this.reviews.values()]){
+      if(this.requests.get(entry.id)!==entry.message){entry.settled=true;continue;}
+      entry.settled=true;entry.controller.abort(new Error('权限模式已切换'));const {id,message,request,choices}=entry;
+      if(mode==='auto'){
+        this.requests.delete(id);this.toolResponse(message.request_id,{behavior:'allow',updatedInput:request.input??{}});
+        await this.emit({type:'notice',source:'auto-review',text:`已切换为一键授权，自动审查中的 ${request.tool_name??'工具'} 请求已直接放行。`});
+      }else if(mode==='readonly'){
+        this.requests.delete(id);this.toolResponse(message.request_id,{behavior:'deny',message:'只读模式已拒绝 Claude Code 工具请求'});
+        await this.emit({type:'error',source:'native-permission',code:'permission_denied',text:'只读模式已拒绝 Claude Code 工具请求',data:request});
+      }else{
+        await this.emit({type:'approval',approvalId:id,name:request.display_name??request.tool_name,data:request,choices});
+      }
+    }
   }
   toolResponse(requestId,response){this.send({type:'control_response',response:{subtype:'success',request_id:requestId,response}});}
   async approve(id,choice,answer){
@@ -160,13 +224,13 @@ export class ClaudeAdapter extends RuntimeLifecycle {
     if(!['approve','approve-session'].includes(choice))throw new Error('未知 Claude Code 授权选择');if(choice==='approve-session'&&!request.permission_suggestions?.length)throw new Error('此工具没有会话级授权建议');
     this.toolResponse(message.request_id,{behavior:'allow',updatedInput:request.input??{},...(choice==='approve-session'?{updatedPermissions:request.permission_suggestions.map(item=>({...item,destination:'session'}))}:{})});this.requests.delete(id);
   }
-  async prompt(text,attachments=[]){await this.ensureStarted();this.checkOpen();if(this.running)throw new Error('Claude Code 当前仍在执行');const content=await claudeContent(text,attachments);this.cancelled=false;this.running=true;this.send({type:'user',session_id:'',message:{role:'user',content},parent_tool_use_id:null,uuid:randomUUID()});}
+  async prompt(text,attachments=[]){await this.ensureStarted();this.checkOpen();if(this.running)throw new Error('Claude Code 当前仍在执行');const content=await claudeContent(text,attachments);this.cancelled=false;this.running=true;this.lastUserRequest=typeof text==='string'?text.slice(-2000):'';this.roundText='';this.send({type:'user',session_id:'',message:{role:'user',content},parent_tool_use_id:null,uuid:randomUUID()});}
   async steer(text,attachments=[],id=randomUUID()){
-    this.checkOpen();if(!this.running)throw new Error('原生轮次尚未开始或已经结束');const content=await claudeContent(text,attachments);this.checkOpen();if(!this.running)throw new Error('原生轮次尚未开始或已经结束');
+    this.checkOpen();if(!this.running)throw new Error('原生轮次尚未开始或已经结束');this.lastUserRequest=typeof text==='string'?text.slice(-2000):'';const content=await claudeContent(text,attachments);this.checkOpen();if(!this.running)throw new Error('原生轮次尚未开始或已经结束');
     const admitted=new Promise((resolve,reject)=>{const timer=setTimeout(()=>{const error=new Error('等待 Claude Code 确认插话超时');error.nativeAdmissionUnknown=true;reject(error);},5000);this.steers.set(id,{id,state:'pending',resolve,reject,timer});});
     try{this.send({type:'user',session_id:'',message:{role:'user',content},parent_tool_use_id:null,uuid:id});}catch(error){const row=this.steers.get(id);if(row){clearTimeout(row.timer);this.steers.delete(id);}throw error;}return admitted;
   }
-  async cancel(){this.checkOpen();if(!this.running)return;this.cancelled=true;await this.control('interrupt',{cancel_queued:true});}
+  async cancel(){this.checkOpen();if(!this.running)return;this.cancelled=true;for(const entry of [...this.reviews.values()])entry.controller.abort(new Error('用户已中止这一轮'));await this.control('interrupt',{cancel_queued:true});}
   async retractSteers(){
     const rows=[...this.steers.values()].filter(row=>['pending','queued','carried'].includes(row.state));if(!rows.length)return [];
     const removed=[];for(const row of rows){clearTimeout(row.timer);row.state='retracted';row.resolve?.({});removed.push(row.id);}
@@ -174,9 +238,9 @@ export class ClaudeAdapter extends RuntimeLifecycle {
     for(const id of removed)this.steers.delete(id);
     return removed;
   }
-  async setPermissionMode(mode){const native=claudePermissionNative(mode,this.runtime);if(!native)throw new Error('未知 Claude Code 权限模式');await this.ensureStarted();await this.control('set_permission_mode',{mode:native});this.permissionMode=mode;}
+  async setPermissionMode(mode){const native=claudePermissionNative(mode,this.runtime);if(!native)throw new Error('未知 Claude Code 权限模式');await this.ensureStarted();await this.control('set_permission_mode',{mode:native});this.permissionMode=mode;await this.settleReviews(mode);}
   async close(){
-    if(this.closing)return this.closing;this.closed=true;this.running=false;this.ready=false;this.requests.clear();this.rejectControls(new Error('Claude Code 原生连接已关闭'));for(const row of this.steers.values()){clearTimeout(row.timer);row.reject(new Error('Claude Code 原生连接已关闭'));}this.steers.clear();
+    if(this.closing)return this.closing;this.closed=true;this.running=false;this.ready=false;for(const entry of this.reviews.values()){entry.settled=true;entry.controller.abort(new Error('Claude Code 原生连接已关闭'));}this.reviews.clear();this.requests.clear();this.rejectControls(new Error('Claude Code 原生连接已关闭'));for(const row of this.steers.values()){clearTimeout(row.timer);row.reject(new Error('Claude Code 原生连接已关闭'));}this.steers.clear();
     this.closing=(async()=>{const child=this.child;if(!child)return;if(child.exitCode!==null||child.signalCode)return;try{child.stdin.end();}catch{}await new Promise(resolve=>{let done=false;const finish=()=>{if(done)return;done=true;clearTimeout(timer);child.off('close',finish);resolve();};const timer=setTimeout(finish,3000);child.once('close',finish);});if(child.exitCode===null&&!child.signalCode)await stopProcess(child);})();return this.closing;
   }
 }

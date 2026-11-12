@@ -3,19 +3,23 @@ import {randomBytes,timingSafeEqual,createHash} from 'node:crypto';
 import {ROOT} from './providers.mjs';
 import {join} from 'node:path';
 import {responsesRoute} from './responses.mjs';
+import {recordCodexBaseInstructionsForSession} from './codex-config.mjs';
 import {anthropicError,anthropicMessagesRoute,writeAnthropicMessage} from './anthropic-messages.mjs';
 import {once} from 'node:events';
 import {BridgeWorkers} from './bridge-workers.mjs';
 import {validateSelection} from '../core/catalog.mjs';
 import {bridgePromptConfig} from './runtime-prompts.mjs';
 import {assertSamplingSupported} from './request-settings.mjs';
-import {relayCompletion} from './gateway-usage.mjs';
+import {relayCompletion,requestKind} from './gateway-usage.mjs';
 import {textHistory,historyText} from './history-content.mjs';
 import {stripBillingHeader} from './prompt-filters.mjs';
 import {publicServiceModel} from './model-service-catalog.mjs';
 import {failureDetails,failureText,failureValue} from './failure-details.mjs';
 import {WebSearch,searchQuery,anthropicSearchResponse} from './web-search.mjs';
 const equal=(a,b)=>{const x=Buffer.from(a??''),y=Buffer.from(b);return x.length===y.length&&timingSafeEqual(x,y);};
+// `x-bridge-effort: none,low` → the first listed level the model supports; only light levels are honoured.
+const LIGHT_EFFORTS=new Set(['none','minimal','low','medium']);
+export const lighterEffort=(header,supported=[])=>String(header??'').split(',').map(s=>s.trim()).find(e=>LIGHT_EFFORTS.has(e)&&supported.includes(e))??null;
 export const gatewayAuthorized=(req,key)=>equal(req.headers.authorization,`Bearer ${key}`)&&req.headers.origin===undefined&&/^127\.0\.0\.1:\d+$/.test(req.headers.host??'');
 
 export class Gateway {
@@ -50,10 +54,14 @@ export class Gateway {
     let size=0;const chunks=[];for await(const chunk of req){size+=chunk.length;if(size>32*1024*1024){fail(413,{message:'Request exceeds 32 MiB'});return;}chunks.push(chunk);}
     const raw=Buffer.concat(chunks).toString('utf8');let body;try{body=JSON.parse(raw);}catch{fail(400,{message:'请求必须是有效 JSON'});return;}
     if(!body||typeof body!=='object'||Array.isArray(body)){fail(400,{message:'请求必须是 JSON 对象'});return;}
-    // Claude Code side requests (titles, review, compaction) declare no tools.
-    const auxiliary=!(Array.isArray(body.tools)&&body.tools.length);
+    // Claude Code side requests (titles, review, compaction) declare no tools, and the
+    // in-process reviewer states `x-bridge-auxiliary:1` explicitly. Same rule as chat/responses.
+    const {auxiliary,toolsCount}=requestKind(body,req.headers);
     if(body.model!==binding.variant.id){fail(409,{message:'此会话未选择该模型或参数'});return;}
-    if(route==='messages/count_tokens'){send(200,{input_tokens:Math.ceil(raw.length/4)});return;}
+    // The Anthropic count_tokens response is specified with `input_tokens` only, so this
+    // character/4 estimate cannot be marked in the body without inventing a schema field.
+    // Callers see it in `x-bridge-count-tokens`, and it is counted for gateway diagnostics.
+    if(route==='messages/count_tokens'){this.countTokensEstimates=(this.countTokensEstimates??0)+1;if(!res.destroyed&&!res.writableEnded){res.writeHead(200,{'content-type':'application/json','cache-control':'no-store','x-bridge-count-tokens':'estimated=characters/4'});res.end(JSON.stringify({input_tokens:Math.ceil(raw.length/4)}));}return;}
     const controller=new AbortController(),abort=()=>{if(!res.writableEnded)controller.abort();};res.once('close',abort);this.controllers.add(controller);
     try{
       if((body.tools??[]).some(tool=>/^web_search_/.test(tool?.type??''))){
@@ -63,7 +71,7 @@ export class Gateway {
         message.usage={input_tokens:0,output_tokens:0,server_tool_use:{web_search_requests:1}};
         writeAnthropicMessage(res,failureValue(message,[this.key]),body.stream===true);return;
       }
-      await anthropicMessagesRoute(body,res,(chat,signal)=>fetch(`${this.base}/claude/${source}/session/${sessionId}/v1/chat/completions`,{method:'POST',headers:{'content-type':'application/json',authorization:`Bearer ${this.key}`,'x-bridge-auxiliary':auxiliary?'1':'0'},body:JSON.stringify(chat),signal}),controller.signal,{images:binding.model.images===true,secrets:[this.key],onFailure:(error,status)=>this.onLocalFailure?.(req,failureValue(error,[this.key]),status)});
+      await anthropicMessagesRoute(body,res,(chat,signal)=>fetch(`${this.base}/claude/${source}/session/${sessionId}/v1/chat/completions`,{method:'POST',headers:{'content-type':'application/json',authorization:`Bearer ${this.key}`,'x-bridge-auxiliary':auxiliary?'1':'0','x-bridge-tool-count':String(toolsCount),...(req.headers['x-bridge-effort']?{'x-bridge-effort':String(req.headers['x-bridge-effort'])}:{})},body:JSON.stringify(chat),signal}),controller.signal,{images:binding.model.images===true,secrets:[this.key],onFailure:(error,status)=>this.onLocalFailure?.(req,failureValue(error,[this.key]),status)});
     }catch(error){if(!res.destroyed)fail(error.status??502,error);}
     finally{res.removeListener('close',abort);controller.abort();this.controllers.delete(controller);}
   }
@@ -85,8 +93,9 @@ export class Gateway {
     if(!['chat/completions','responses'].includes(route)||req.method!=='POST'){send(405,{error:{code:'method_not_allowed',message:'此模型接口不支持该 HTTP 方法'}});return;}
     let size=0;const chunks=[];for await(const chunk of req){size+=chunk.length;if(size>32*1024*1024){send(413,{error:{message:'Request exceeds 32 MiB'}});return;}chunks.push(chunk);}let body;try{body=JSON.parse(Buffer.concat(chunks));}catch{send(400,{error:{message:'Invalid JSON'}});return;}
     if(!body||typeof body!=='object'||Array.isArray(body)){send(400,{error:{message:'JSON object required'}});return;}
-    // Only requests that declare tools are real agent turns; side requests carry none.
-    const auxiliary=req.headers['x-bridge-auxiliary']!==undefined?req.headers['x-bridge-auxiliary']==='1':!(Array.isArray(body.tools)&&body.tools.length);
+    // Only requests that declare tools are real agent turns; side requests carry none
+    // or forbid tool calls. One rule for chat, Anthropic messages and Codex responses.
+    const {auxiliary,toolsCount}=requestKind(body,req.headers);
     // DSH auto-review unconditionally sends temperature:0. Drop that field so
     // reviewers use source defaults; sampling overrides still cannot be forwarded.
     if(runtimeId==='dsh'&&body.temperature===0)delete body.temperature;
@@ -114,19 +123,25 @@ export class Gateway {
     const controller=new AbortController(),abort=()=>{if(!res.writableEnded)controller.abort();};res.once('close',abort);this.controllers.add(controller);
     let leasedWorker;
     try{
-    if(route==='responses'){await responsesRoute(body,res,(chat,signal)=>fetch(`${routeBase}/chat/completions`,{method:'POST',headers:{'content-type':'application/json',authorization:`Bearer ${this.key}`,...this.service?{'x-bridge-internal':this.internalKey,'x-bridge-parent':req.bridgeRequestId}:{}},body:JSON.stringify(chat),signal}),controller.signal,{images:selected.model.images===true,onFailure:(error,status)=>this.onLocalFailure?.(req,failureValue(error,[this.key]),status)});return;}
+    // Codex sends its built-in developer prompt in the first request; keep that text
+    // per Codex version so a later launch can declare apply_patch without changing it.
+    if(route==='responses'){if(!this.service&&runtimeId==='codex'&&sessionId)void recordCodexBaseInstructionsForSession(this.store.root,sessionId,body).catch(()=>{});await responsesRoute(body,res,(chat,signal)=>fetch(`${routeBase}/chat/completions`,{method:'POST',headers:{'content-type':'application/json',authorization:`Bearer ${this.key}`,'x-bridge-auxiliary':auxiliary?'1':'0','x-bridge-tool-count':String(toolsCount),...(req.headers['x-bridge-effort']?{'x-bridge-effort':String(req.headers['x-bridge-effort'])}:{}),...this.service?{'x-bridge-internal':this.internalKey,'x-bridge-parent':req.bridgeRequestId}:{}},body:JSON.stringify(chat),signal}),controller.signal,{images:selected.model.images===true,onFailure:(error,status)=>this.onLocalFailure?.(req,failureValue(error,[this.key]),status)});return;}
     // An application scope owns several independent conversations (main, subagents, compaction).
     // A client key identifies a conversation only within that scope; absent keys use scoped prefix routing.
     if(sessionId){body.bridge_scope=createHash('sha256').update(`${runtimeId}/${source}/${sessionId}`).digest('hex');if(body.prompt_cache_key)body.prompt_cache_key=createHash('sha256').update(body.bridge_scope+':'+body.prompt_cache_key).digest('hex');}else delete body.bridge_scope;
     // The user's chosen source controls effort, even if a client SDK omits or rewrites it.
     if(selected.selection.reasoning)body.reasoning_effort=selected.selection.reasoning;else delete body.reasoning_effort;
+    // Bridge++'s own small side requests (the Claude Code reviewer) may ask for a lighter effort: only for
+    // auxiliary requests, only a level the model supports, taking the first one listed (never a heavier one).
+    const lighter=auxiliary?lighterEffort(req.headers['x-bridge-effort'],selected.model.reasoning):null;
+    if(lighter)body.reasoning_effort=lighter;
     const includeUsage=body.stream_options?.include_usage===true;
     if(body.stream)body.stream_options={...body.stream_options,include_usage:true};
     const worker=await this.ensureWorker(source,runtimeId);this.workers.retain(worker);leasedWorker=worker;controller.signal.throwIfAborted();
     try{validateSelection(this.providers.get(selected.model.key),selected.selection);}catch(error){send(409,{error:{message:error.message}});return;}
     if(runtimeId==='dsh')this.lastDshSource=source;
     const upstream=await fetch(worker.url+'/v1/chat/completions',{method:'POST',headers:{'content-type':'application/json',authorization:`Bearer ${worker.key}`},body:JSON.stringify(body),signal:controller.signal,redirect:'error'});res.writeHead(upstream.status,{'content-type':upstream.headers.get('content-type')??'application/json','cache-control':'no-store'});
-    await relayCompletion(upstream,res,{signal:controller.signal,includeUsage,auxiliary,model:body.model,contextWindow:selected.selection.contextBudget??selected.variant.contextWindow,started,sanitizeError:error=>failureValue(error,[this.key,worker.key]),onUsage:event=>this.onUsage?.(sessionId,event,turnId),onNotice:event=>this.onUsage?.(sessionId,event,turnId),onSuccess:()=>this.onSuccess?.(sessionId,turnId),onFailure:async raw=>{
+    await relayCompletion(upstream,res,{signal:controller.signal,includeUsage,auxiliary,toolsCount,model:body.model,contextWindow:selected.selection.contextBudget??selected.variant.contextWindow,started,sanitizeError:error=>failureValue(error,[this.key,worker.key]),onUsage:event=>this.onUsage?.(sessionId,event,turnId),onNotice:event=>this.onUsage?.(sessionId,event,turnId),onSuccess:()=>this.onSuccess?.(sessionId,turnId),onFailure:async raw=>{
       const error=failureDetails(raw,upstream.status,[this.key,worker.key]);
       await this.onFailure?.(sessionId,error,turnId);
       await this.onUsage?.(sessionId,{type:'upstream-error',source:'gateway',provider:source,model:selected.model.name??selected.variant.name??body.model,code:error.code,message:error.message,...error.upstream_status?{status:error.upstream_status}:{},...error.reset_at?{resetAt:error.reset_at}:{},...error.request_id?{requestId:error.request_id}:{},retrying:error.automatic_retry!==false},turnId);

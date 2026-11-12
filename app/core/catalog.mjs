@@ -4,7 +4,51 @@ const positive=value=>Number.isSafeInteger(value)&&value>0;
 const unique=values=>[...new Set(values)];
 export const modelKey=(source,id)=>`${source}:${id}`;
 export function fingerprint(value){return createHash('sha256').update(JSON.stringify(value)).digest('hex').slice(0,20);}
-export function normalizeQoder(raw){
+// Pricing is lifted from what the source declares. Nothing is inferred: a missing
+// factor is null, never 1. Qoder marks a zero factor as free exactly like its client.
+const amount=value=>typeof value==='number'&&Number.isFinite(value)?value:null;
+const localizedText=value=>{for(const key of ['zh','cn_zh','en'])if(typeof value?.[key]==='string'&&value[key].trim())return value[key].trim();return null;};
+const OFF_PEAK_RULE='idle_time_model_credit_discount';
+// bills via DeepSeek's published CNY list price for exactly these two models.
+const DEEPSEEK_TARIFF_MODELS=new Set(['dfmodel','dmodel']);
+const peakPricing=()=>({timezone:'Asia/Shanghai',days:[1,2,3,4,5],ranges:[['09:00','12:00'],['14:00','18:00']],factor:2,label:'高峰',note:'按 DeepSeek 官方价折算积分：工作日 9:00–12:00、14:00–18:00 为高峰（×2），其余时段和法定节假日为低峰。这里只按星期和时段判断，节假日和调休以实际计费为准'});
+export function qoderPricing(raw,fetchedAt){
+  const base=amount(raw?.priceFactor),original=amount(raw?.originalPriceFactor),promotion=raw?.promotion&&typeof raw.promotion==='object'?raw.promotion:null,windows=[];
+  // Only the idle-time rule drives a window; promotion.active is a snapshot and is never stored.
+  if(promotion?.rule_id===OFF_PEAK_RULE){
+    const factor=amount(promotion.discount_factor);
+    if(factor!==null&&typeof promotion.window_start==='string'&&promotion.window_start&&typeof promotion.window_end==='string'&&promotion.window_end&&typeof promotion.timezone==='string'&&promotion.timezone)windows.push({start:promotion.window_start,end:promotion.window_end,timezone:promotion.timezone,factor,label:localizedText(promotion.badge)});
+  }
+  // An original price only means something next to a declared current price.
+  return {base,original:base!==null&&original!==null&&original!==base?original:null,free:raw?.isFree===true||base===0,
+    limited:Array.isArray(raw?.tags)&&raw.tags.includes('limited_time_free'),windows,
+    peak:DEEPSEEK_TARIFF_MODELS.has(raw?.value)?peakPricing():null,badge:promotion?localizedText(promotion.description):null,unit:'credits',fetchedAt};
+}
+export function workbuddyPricing(raw,fetchedAt){
+  const base=amount(raw?.creditMultiplier);
+  return {base,original:null,free:base===0,limited:false,windows:[],peak:null,badge:null,unit:'credits',fetchedAt};
+}
+const millisIso=value=>typeof value==='number'&&Number.isFinite(value)&&value>0?new Date(value).toISOString():null;
+// Only the fields below leave the source's usage payload; account identifiers never do.
+export function normalizeQoderAccount(usage,fetchedAt){
+  if(!usage||typeof usage!=='object')return null;
+  const parts=[];let balance=0,found=false;
+  for(const [label,quota] of [['套餐',usage.userQuota],['加量包',usage.addOnQuota]]){
+    if(!quota||typeof quota!=='object')continue;
+    found=true;const remaining=amount(quota.remaining)??0;balance+=remaining;
+    parts.push({label,remaining,total:amount(quota.total),expiresAt:millisIso(quota.expiresAt??usage.expiresAt)});
+  }
+  return {balance:found?balance:null,unit:'积分',parts,exceeded:typeof usage.isQuotaExceeded==='boolean'?usage.isQuotaExceeded:null,checkin:null,fetchedAt,error:null};
+}
+export function normalizeWorkbuddyAccount(source,fetchedAt){
+  if(!source||typeof source!=='object')return null;
+  const credits=source.credits&&typeof source.credits==='object'?source.credits:null,checkin=source.checkin&&typeof source.checkin==='object'?source.checkin:null;
+  if(!credits&&!checkin)return null;
+  const parts=Array.isArray(credits?.packages)?credits.packages.filter(p=>p&&typeof p==='object').map(p=>({label:typeof p.packageName==='string'&&p.packageName?p.packageName:'积分包',remaining:amount(p.remain)??0,total:amount(p.size),expiresAt:millisIso(p.expiresAtMs)})):[];
+  return {balance:amount(credits?.total),unit:'积分',parts,exceeded:null,
+    checkin:checkin?{today:checkin.todayCheckedIn===true,daily:amount(checkin.dailyCredit),streak:amount(checkin.streakDays)}:null,fetchedAt,error:null};
+}
+export function normalizeQoder(raw,fetchedAt=new Date().toISOString()){
   if(typeof raw.value!=='string'||!raw.value)return null;
   const contexts=Object.entries(raw.context_config??{}).filter(([,c])=>positive(c?.token_count)).map(([id,c])=>({id,label:c.display_name??c.label??id,tokens:c.token_count,kind:'native'}));
   const enabled=raw.thinking_config?.enabled,efforts=Object.keys(enabled?.efforts??{});
@@ -13,22 +57,22 @@ export function normalizeQoder(raw){
   return {key:modelKey('qoder',raw.value),source:'qoder',id:raw.value,name:raw.displayName??raw.value,enabled:raw.isEnabled!==false,
     contexts,defaultContextTokens:contexts.find(c=>raw.context_config[c.id]?.is_default)?.tokens??raw.defaultContextWindow??contexts[0]?.tokens??null,contextMaximum:contexts.length?Math.max(...contexts.map(c=>c.tokens)):null,reasoning,defaultReasoning:raw.defaultEffort??Object.entries(enabled?.efforts??{}).find(([,v])=>v?.is_default)?.[0]??null,maxOutputTokens:positive(raw.maxOutputTokens)?raw.maxOutputTokens:null,
     tools:typeof raw.supportsToolCall==='boolean'?raw.supportsToolCall:null,images:typeof raw.supportsImages==='boolean'?raw.supportsImages:typeof raw.isVl==='boolean'?raw.isVl:null,
-    identity:fingerprint({id:raw.value,name:raw.displayName}),raw};
+    pricing:qoderPricing(raw,fetchedAt),identity:fingerprint({id:raw.value,name:raw.displayName}),raw};
 }
-export function normalizeWorkbuddy(raw){
+export function normalizeWorkbuddy(raw,fetchedAt=new Date().toISOString()){
   if(typeof raw.id!=='string'||!raw.id)return null;
   const native=positive(raw.contextWindow)?raw.contextWindow:null;
   const reasoning=unique([...(raw.reasoning?.supportedEfforts??[]),...(raw.reasoning?.canDisableThinking?['none']:[])]);
   return {key:modelKey('workbuddy',raw.id),source:'workbuddy',id:raw.id,name:raw.name??raw.id,enabled:true,
     contexts:native?[{id:'native',label:'上游窗口',tokens:native,kind:'native'}]:[],contextMaximum:native,reasoning,defaultReasoning:raw.reasoning?.defaultEffort??null,
     maxOutputTokens:positive(raw.maxTokens)?raw.maxTokens:null,tools:raw.supportsToolCall??null,images:raw.supportsImages??null,
-    identity:fingerprint({id:raw.id,name:raw.name}),raw};
+    pricing:workbuddyPricing(raw,fetchedAt),identity:fingerprint({id:raw.id,name:raw.name}),raw};
 }
 export function normalizeAntigravity(raw){
   if(typeof raw.id!=='string'||!/^gemini[-.]/i.test(raw.id))return null;
   return {key:modelKey('antigravity',raw.id),source:'antigravity',id:raw.id,name:raw.name??raw.id,enabled:true,boundRuntime:'antigravity',
     contexts:[],contextMaximum:null,reasoning:[],defaultReasoning:null,maxOutputTokens:null,tools:null,...antigravityModelMedia(),
-    identity:fingerprint({id:raw.id,name:raw.name}),raw};
+    pricing:null,identity:fingerprint({id:raw.id,name:raw.name}),raw};
 }
 export function validateSelection(model,selection){
   if(!model?.enabled)throw new Error('模型不在当前可用目录中，请刷新模型源');

@@ -30,7 +30,11 @@ import {workbenchSnapshot} from './services/workbench-snapshot.mjs';
 import {assertRuntimeReady} from './services/runtime-availability.mjs';
 import {SourceComponents,sourceComponentMethods} from './services/source-components.mjs';
 import {fileOperationMethods} from './services/file-operations.mjs';
+import {feedbackMethods} from './services/feedback-export.mjs';
 import {allowMainWindowFullscreen} from './services/window-permissions.mjs';
+import {AppUpdates} from './services/app-update.mjs';
+import {spawn as spawnProcess} from 'node:child_process';
+import {homedir} from 'node:os';
 
 const here=dirname(fileURLToPath(import.meta.url)),entry=join(here,'ui/index.html');
 protocol.registerSchemesAsPrivileged([{scheme:'bridge-media',privileges:{standard:true,secure:true,supportFetchAPI:true,stream:true}}]);
@@ -44,7 +48,7 @@ const clip=value=>{const text=String(value);return text.length>220?text.slice(0,
 if(timing)diagnostics.subscribe('child_process',({process:child})=>{const row={step:timing.current,start:ms()};timing.processes.push(row);queueMicrotask(()=>{row.command=basename(String(child.spawnfile??''));row.args=(child.spawnargs??[]).slice(1).map(clip);});child.once('error',error=>{row.error=error.code??error.message;});child.once('exit',code=>{row.ms=ms()-row.start;row.code=code;});});
 async function step(name,task){if(!timing)return task();const start=ms();timing.current=name;try{return await task();}finally{timing.steps.push({step:name,start,ms:ms()-start});}}
 async function writeTiming(label){if(timing)await writeFile(join(app.getPath('userData'),'startup-timing.json'),JSON.stringify({label,version:app.getVersion(),at:new Date().toISOString(),...timing},null,1)).catch(error=>console.error('写入启动计时失败：'+error.message));}
-let window,store,providers,gateway,sessions,runtimes,media,modelServices,environments,sourceComponents,closing=false,dirtyEditors=false,exitCode=0;const terminals=new Terminals(),nativeWindows=new Set(),nativeMediaCatalog=new NativeMediaCatalog(),boot=new BootState();
+let window,store,providers,gateway,sessions,runtimes,media,modelServices,environments,sourceComponents,appUpdates,closing=false,dirtyEditors=false,exitCode=0;const terminals=new Terminals(),nativeWindows=new Set(),nativeMediaCatalog=new NativeMediaCatalog(),boot=new BootState();
 const environmentMethods=new Set(['session:create','session:prompt','session:rebind','session:rebind-cancel','session:permission','runtime:refresh','runtime:permission','runtime:configure','native:models','native:open','environment:check','environment:install','environment:update','environment:configure','provider:refresh']);
 const attachmentCapabilityService=new AttachmentCapabilities({runtimes:()=>runtimes,sessions:()=>sessions,providers:()=>providers,cwd:()=>store.root,catalog:nativeMediaCatalog});
 const attachmentCapabilities=(runtimeId,selection)=>attachmentCapabilityService.forSelection(runtimeId,selection);
@@ -57,9 +61,18 @@ function verifyCaller(event){if(event.sender!==window?.webContents||event.sender
 function id(value){if(typeof value!=='string'||value.length>200)throw new Error('Invalid identifier');return value;}
 function argsObject(args){if(!args||typeof args!=='object'||Array.isArray(args)||Buffer.byteLength(JSON.stringify(args))>3*1024*1024)throw new Error('Invalid request');return args;}
 const methods={
-  async snapshot(){return workbenchSnapshot({store,sourceComponents,modelServices,environments,runtimes,attachmentCapabilityService,boot,appVersion:app.getVersion()});},
+  async snapshot(){return workbenchSnapshot({store,sourceComponents,modelServices,environments,runtimes,attachmentCapabilityService,boot,appVersion:app.getVersion(),appUpdates});},
   ...sourceComponentMethods(()=>sourceComponents,url=>shell.openExternal(url)),
   ...fileOperationMethods(()=>store,{shell,createWindow:options=>{const preview=new BrowserWindow({...options,parent:window});nativeWindows.add(preview);preview.on('closed',()=>nativeWindows.delete(preview));return preview;}}),
+  ...feedbackMethods(()=>store,{
+    app,window:()=>window,dialog,shell,runtimes:()=>runtimes,
+    sources:()=>sourceComponents?.snapshot?.()??[],
+    services:()=>modelServices?.snapshot?.()??[],
+    modelInfo:key=>providers?.get?.(key)??null,
+    projectPath:session=>store.project(session.projectId).path,
+    dataDir:()=>app.getPath('userData'),homeDir:homedir(),
+    secrets:()=>[gateway?.key,...[...(modelServices?.stores?.values?.()??[])].map(serviceStore=>serviceStore.key),...[...(gateway?.workers?.entries?.values?.()??[])].map(worker=>worker.key)]
+  }),
   async 'environment:check'({id}){return environments.check(id);},
   async 'environment:install'({id}){return environments.install(id,'install');},
   async 'environment:update'({id}){return environments.install(id,'update');},
@@ -89,7 +102,13 @@ const methods={
   async 'git:init'({projectId}){return git(store.project(id(projectId)).path,['init','-b','main']);},
   async 'git:stage'({projectId,paths}){return gitStage(store.project(id(projectId)).path,paths);},
   async 'git:commit'({projectId,message}){return gitCommit(store.project(id(projectId)).path,message);},
-  async 'provider:refresh'({source}){if(source==='antigravity')await refreshAntigravitySource(store,runtimes.find(r=>r.id==='antigravity'),store.root);else await providers.refresh(source);return true;},
+  async 'provider:refresh'({source}){if(source==='antigravity')await refreshAntigravitySource(store,runtimes.find(r=>r.id==='antigravity'),store.root,diff=>send('workbench:event',{type:'catalog-diff',...diff}));else await providers.refresh(source);return true;},
+  async 'provider:account'({source,force=false}={}){if(!['qoder','workbuddy'].includes(source))throw new Error('Unknown model source');const account=await providers.account(source,{force:force===true});send('workbench:change');return account;},
+  async 'update:check'(){return appUpdates.check({manual:true});},
+  async 'update:download'(){void appUpdates.download();return appUpdates.view();},
+  async 'update:cancel'(){return appUpdates.cancel();},
+  async 'update:install'({force=false}={}){await appUpdates.install({force:force===true});app.quit();},
+  async 'update:auto-download'({enabled}){return appUpdates.setAutoDownload(enabled===true);},
   async 'runtime:refresh'(){return refreshEnvironmentRuntimes({registry:true});},
   async 'runtime:permission'({runtimeId,mode,selection}){return saveRuntimePermission(store,runtimes,id(runtimeId),mode,selection);},
   async 'native:models'({runtimeId,projectId}){if(runtimeId==='codex'&&shouldRefreshCodex(store.state.preferences.runtimes,runtimes.find(r=>r.id==='codex'),await findCodex()))await refreshEnvironmentRuntimes({registry:false});const runtime=runtimes.find(r=>r.id===runtimeId);assertRuntimeReady(runtime,environments.busyReason(runtimeId));const cwd=projectId?store.project(id(projectId)).path:store.root;return runtimeId==='codex'?nativeMediaCatalog.get(runtime,cwd,{refresh:true}):nativeModels(runtime,cwd);},
@@ -165,11 +184,15 @@ const methods={
 };
 async function main(){if(!app.requestSingleInstanceLock()){app.exit(0);return;}app.on('second-instance',()=>{if(window&&!window.isDestroyed()){window.restore();window.show();window.focus();}});await step('app.whenReady',()=>app.whenReady());Menu.setApplicationMenu(null);store=await step('Store.open',()=>new Store(join(app.getPath('userData'),'workspace')).open());await step('applyAntigravityMediaEvidence',()=>applyAntigravityMediaEvidence(store).catch(()=>{}));const userData=app.getPath('userData'),node=nativeNode();sourceComponents=new SourceComponents({userData,node,isPackaged:app.isPackaged,fetchImpl:(url,init)=>net.fetch(url,init),onInstalled:source=>providers.refresh(source)});sourceComponents.on('event',event=>send('workbench:event',event));sourceComponents.on('change',()=>send('workbench:change'));await step('sourceComponents.init',()=>sourceComponents.init());const runtimeCache=new RuntimeCache({userData,appVersion:app.getVersion()});environments=new Environments({store,userData,node,isPackaged:app.isPackaged,fetchImpl:(url,init)=>net.fetch(url,init),canUpdate:environmentBusy,runtimeCache,onRefresh:()=>refreshEnvironmentRuntimes({scan:false})});environments.on('event',event=>send('workbench:event',event));environments.on('change',()=>send('workbench:change'));runtimes=await step('environments.restore',()=>environments.restore());
   providers=await step('ProviderService.init',()=>new ProviderService(store,node,{components:sourceComponents}).init());gateway=new Gateway(store,providers,node);media=await step('MediaService.init',()=>new MediaService(store).init());protocol.handle('bridge-media',request=>media.response(request));sessions=new Sessions(store,providers,gateway,runtimes,{media,capabilities:attachmentCapabilities,runtimeReady:id=>environments.busyReason(id)??environments.checkingReason(id)});
-  modelServices=new ModelServices({userData,node,components:sourceComponents,runtimeFor:id=>runtimes.find(r=>r.id===id),appVersion:app.getVersion()});modelServices.on('change',()=>send('workbench:change'));timing&&(timing.current='BrowserWindow');
+  modelServices=new ModelServices({userData,node,components:sourceComponents,runtimeFor:id=>runtimes.find(r=>r.id===id),appVersion:app.getVersion()});modelServices.on('change',()=>send('workbench:change'));
+  appUpdates=new AppUpdates({store,userData,currentVersion:app.getVersion(),fetch:(url,init)=>net.fetch(url,init),spawn:spawnProcess,isPackaged:app.isPackaged,sessionsRunning:()=>!!sessions&&[...new Set([...sessions.runs.keys(),...sessions.external.keys()])].some(key=>sessions.runs.has(key)||sessions.nativeBusy(key))});
+  appUpdates.on('change',()=>send('workbench:change'));appUpdates.on('progress',progress=>send('workbench:event',{type:'update-progress',...progress}));
+  await step('appUpdates.init',()=>appUpdates.init());
+  providers.on('catalog-diff',diff=>send('workbench:event',{type:'catalog-diff',...diff}));timing&&(timing.current='BrowserWindow');
   const colors=chrome(store.state.preferences.theme);
   window=new BrowserWindow({title:'Bridge++',width:1460,height:940,minWidth:1080,minHeight:720,backgroundColor:colors.color,titleBarStyle:'hidden',titleBarOverlay:{...colors,height:44},show:false,webPreferences:{preload:join(here,'preload.cjs'),contextIsolation:true,nodeIntegration:false,sandbox:true,spellcheck:false}});
   window.webContents.setWindowOpenHandler(()=>({action:'deny'}));window.webContents.on('will-navigate',e=>e.preventDefault());window.webContents.on('will-attach-webview',e=>e.preventDefault());window.webContents.session.setPermissionRequestHandler((webContents,permission,callback,details)=>callback(allowMainWindowFullscreen({permission,requestingUrl:details.requestingUrl,isMainWindow:webContents===window.webContents,entryUrl:pathToFileURL(entry).href})));
-  ipcMain.handle('workbench:call',async(event,method,args)=>{try{verifyCaller(event);if(!Object.hasOwn(methods,method))throw new Error('Unknown operation');if(environmentMethods.has(method))await boot.ready('environments');else if(method.startsWith('bridgeService:'))await boot.ready('services');if(method==='attachment:stage'){if(!args||!(args.data instanceof Uint8Array)||args.data.byteLength>100*1024*1024)throw new Error('无效或超限的附件请求');argsObject({projectId:args.projectId,name:args.name});return {ok:true,value:await methods[method](args)};}return {ok:true,value:await methods[method](argsObject(args))};}catch(e){return {ok:false,error:e.message};}});
+  ipcMain.handle('workbench:call',async(event,method,args)=>{try{verifyCaller(event);if(!Object.hasOwn(methods,method))throw new Error('Unknown operation');if(environmentMethods.has(method))await boot.ready('environments');else if(method.startsWith('bridgeService:'))await boot.ready('services');if(method==='attachment:stage'){if(!args||!(args.data instanceof Uint8Array)||args.data.byteLength>100*1024*1024)throw new Error('无效或超限的附件请求');argsObject({projectId:args.projectId,name:args.name});return {ok:true,value:await methods[method](args)};}return {ok:true,value:await methods[method](argsObject(args))};}catch(e){return {ok:false,error:e.message,...e?.code?{code:e.code}:{}};}});
   terminals.on('event',event=>send('workbench:event',event));window.on('close',event=>{if(!closing&&!canDiscardEditors())event.preventDefault();});
   const quietQA=process.env.AWB_QA==='1'&&process.env.AWB_QA_INACTIVE==='1'&&!app.isPackaged;
   if(quietQA)window.setFocusable(false);
@@ -184,7 +207,12 @@ async function main(){if(!app.requestSingleInstanceLock()){app.exit(0);return;}a
   if(process.env.AWB_SMOKE_EXIT_MS)setTimeout(()=>app.quit(),Number(process.env.AWB_SMOKE_EXIT_MS));
   if(process.env.AWB_QA==='1'&&!app.isPackaged){await bootReady;const {run}=await import('../scripts/desktop-qa.mjs');await run({window,methods,store});app.quit();return;}
   await environmentBoot;
-  if(!process.env.AWB_QA&&!process.env.AWB_SMOKE_EXIT_MS){void environments.backgroundChecks();for(const source of ['qoder','workbuddy','antigravity'])if((source==='antigravity'?runtimes.find(r=>r.id==='antigravity')?.status==='ready':sourceComponents.snapshot().find(row=>row.id===source)?.status==='ready')&&!store.state.catalog[source]?.models?.length)void methods['provider:refresh']({source}).catch(()=>{});}
+  // Every startup refreshes each ready source once, in parallel and without
+  // blocking the window. Failures keep the previous directory silently.
+  if(!process.env.AWB_QA&&!process.env.AWB_SMOKE_EXIT_MS){void environments.backgroundChecks();for(const source of ['qoder','workbuddy','antigravity'])if(source==='antigravity'?runtimes.find(r=>r.id==='antigravity')?.status==='ready':sourceComponents.snapshot().find(row=>row.id===source)?.status==='ready')void methods['provider:refresh']({source}).catch(()=>{});void appUpdates.checkDaily();
+  // A running external interface keeps its own upstream catalog; use its
+  // existing refresh entry instead of restarting it.
+  void serviceBoot.then(()=>{for(const id of ['qoder','workbuddy'])void modelServices.refreshModels(id).catch(()=>{});});}
 }
 function canDiscardEditors(){if(!dirtyEditors)return true;const choice=dialog.showMessageBoxSync(window,{type:'question',title:'未保存的文件',message:'有项目文件尚未保存。',detail:'返回编辑器保存，或放弃未保存内容并退出。',buttons:['返回编辑','放弃并退出'],defaultId:0,cancelId:0});if(choice!==1)return false;dirtyEditors=false;return true;}
 app.on('window-all-closed',()=>app.quit());app.on('before-quit',e=>{if(closing)return;e.preventDefault();if(!canDiscardEditors())return;closing=true;void(async()=>{for(const service of [providers,sourceComponents,environments,modelServices,terminals,sessions,gateway,store])try{await service?.close();}catch(error){exitCode=1;console.error('关闭服务失败：'+error.message);}if(exitCode)app.exit(exitCode);else app.quit();})();});

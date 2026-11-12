@@ -14,7 +14,10 @@ test('native eligibility is fail-closed and the pool default remains JSON',()=>{
   assert.equal(nativeEligible(request(),config),true);
   assert.equal(nativeEligible(request(),{...config,toolMode:undefined}),false);
   assert.equal(nativeEligible(request({tools:[]}),config),false);
-  for(const tool_choice of ['none','required',{type:'function',function:{name:'Read'}}])assert.equal(nativeEligible(request({tool_choice}),config),false);
+  assert.equal(nativeEligible(request({tool_choice:'none'}),config),false);
+  // required and a pinned function are native now; the prompt carries the per-step requirement.
+  assert.equal(nativeEligible(request({tool_choice:'required'}),config),true);
+  assert.equal(nativeEligible(request({tool_choice:{type:'function',function:{name:'Read'}}}),config),true);
   assert.equal(nativeEligible(request({response_format:{type:'json_object'}}),config),false);
   assert.equal(nativeEligible(request({tools:[tool('Bad',[])]}),config),false);
   assert.equal(nativeEligible(request({tools:[tool('Bad',{type:'array'})]}),config),false);

@@ -13,6 +13,7 @@ import type { OpenAIUsage } from './usage.js';
 import { BRIDGE_MODELS, DEFAULT_PUBLIC_MODEL, PRO_PUBLIC_MODEL, bridgeModel, requestedEffort } from './model.js';
 import {recoverDecision,recoverySummary,decisionRetryLimit,type RecoveryTrace} from './decision-recovery.js';
 import {assertToolContract} from './tool-contract.js';
+import {nativeSkipReason} from './native-lane.js';
 import {publicUpstreamFailure} from './diagnostics.js';
 import {bridgeFailure,type FailurePhase,type FailureInput} from './failures.js';
 
@@ -225,7 +226,8 @@ export async function createBridgeServer(config: Config, options: {
             request.stream&&!request.response_format?text=>projector.push(text):()=>{})});
         const nativeReply=native?pooled?.reply:null;
         decisionRecovery=native?undefined:pooled?.recovery??direct?.recovery;
-        const turn=pooled?pooled.report:{...direct!.turn,decision_recovery:direct!.recovery};
+        const turn=pooled?pooled.report:{...direct!.turn,decision_recovery:direct!.recovery,
+          native_skip_reason:request.tools?.length?nativeSkipReason(request,config):null};
         failureTurn = turn;
         const decisionError=native?null:pooled?.decisionError??direct?.decisionError;
         upstreamFailure=turn.error?publicUpstreamFailure(turn.sdk_errors,turn.api_error_categories,turn.sdk_error_code):null;
@@ -292,6 +294,14 @@ export async function createBridgeServer(config: Config, options: {
       const message = safeError(cause);
       const failure = bridgeFailure({ requestId: bridgeRequestId, phase: failurePhase, accepted: requestAccepted,
         cause, abort: abortKind, turn: failureTurn, recovery: decisionRecovery, hostName: options.hostName });
+      // An idle upstream stall is neither the total deadline nor a client abort: it gets its own code and a 504.
+      if (requestAccepted && failureTurn?.stage === 'upstream_stalled') {
+        failure.code = 'upstream_stalled'; failure.origin = 'upstream'; failure.origin_label = '上游服务/SDK';
+        failure.reason = '上游在请求中途停止输出，Bridge 已中止这一步；会话按取消流程收尾，下一次请求会重建或续上。';
+        failure.action = '条件恢复后重试同一请求，不要重复提交未确认的操作。';
+        failure.upstream_status = 504;
+        failure.message = `[上游服务/SDK] ${failure.reason}\n建议：${failure.action}\n错误码：upstream_stalled | 请求ID：${bridgeRequestId}`;
+      }
       taskTurn = { ...taskTurn, failure };
       await recordFailure(failure);
       await writeTaskLog(undefined, failure.message);
@@ -302,7 +312,8 @@ export async function createBridgeServer(config: Config, options: {
           // Full evidence remains local; the client needs only counts, outcome and correlation hashes.
           failures:decisionRecovery.evidence.filter(row=>row.validationError).map(row=>({
             attempt:row.attempt,stage:row.stage,responseSha256:row.responseSha256}))}}:{}) };
-      if (!res.headersSent) send(res, requestAccepted ? error.upstream_status===429?429:502 : 400, { error });
+      const failureStatus = error.code === 'upstream_stalled' ? 504 : error.upstream_status === 429 ? 429 : 502;
+      if (!res.headersSent) send(res, requestAccepted ? failureStatus : 400, { error });
       else if (!res.destroyed) { res.write(`data: ${JSON.stringify({ error })}\n\n`); res.end(); }
     } finally {
       if (deadline) clearTimeout(deadline);

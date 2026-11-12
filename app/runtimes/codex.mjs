@@ -2,15 +2,17 @@ import {launch,RpcProcess} from '../core/process.mjs';
 import {RuntimeLifecycle} from '../core/lifecycle.mjs';
 import {randomUUID} from 'node:crypto';
 import {codexPermissionSettings} from '../services/runtime-permissions.mjs';
+import {recordCodexRuntime,readCodexBaseInstructions,writeCodexModelCatalog,markCodexCatalogUnsupported,codexCatalogUnsupported,codexVersionNumber,codexWorkspaceRoot} from '../services/codex-config.mjs';
 import {CodexExecAdapter} from './codex-exec.mjs';
 import {runtimeReason,failureText,failureValue} from '../services/failure-details.mjs';
 
-export function codexLaunchSettings({endpoint,variant,model,session,permissionMode=session?.permissionMode,runtime}){
+export function codexLaunchSettings({endpoint,variant,model,session,permissionMode=session?.permissionMode,runtime,catalogPath}){
   const selection=session.selection,args=[],env={};
   const config=endpoint?{model_provider:'agentworkbench',model:variant.id,'model_providers.agentworkbench.name':'Bridge++','model_providers.agentworkbench.base_url':endpoint.baseURL,'model_providers.agentworkbench.env_key':'AWB_GATEWAY_KEY','model_providers.agentworkbench.wire_api':'responses','model_providers.agentworkbench.requires_openai_auth':false,'model_providers.agentworkbench.supports_websockets':false,model_context_window:selection.contextBudget??selection.contextTokens??model.defaultContextTokens??model.contextMaximum}:{model:selection.nativeModel};
   if(selection.reasoning)config.model_reasoning_effort=selection.reasoning;
   if(permissionMode!=null){const p=codexPermissionSettings(permissionMode);config.approval_policy=p.approvalPolicy;config.sandbox_mode=p.sandbox;if(runtime?.permissions?.observed?.autoReview)config.approvals_reviewer=p.approvalsReviewer;}
   for(const [key,value]of Object.entries(config))if(value!==null&&value!==undefined&&value!=='')args.push('-c',`${key}=${JSON.stringify(value)}`);
+  if(endpoint&&catalogPath)args.push('-c',`model_catalog_json=${JSON.stringify(catalogPath)}`);
   if(endpoint)env.AWB_GATEWAY_KEY=endpoint.key;
   return {args,env};
 }
@@ -68,7 +70,36 @@ export function codexEvent(message){
 }
 export class CodexAppServerAdapter extends RuntimeLifecycle {
   constructor(options){super(options);this.requests=new Map();}
-  async start(){this.checkOpen();if(!this.endpoint)throw new Error('app-server 仅用于网关 Codex 会话');const settings=codexLaunchSettings(this);const child=(this.launchProcess??launch)(this.runtime.executable,['app-server','--listen','stdio://',...settings.args],{cwd:this.project.path,env:settings.env});this.rpc=new RpcProcess(child,{timeoutMs:180000,maxEventBytes:16*1024*1024});this.rpc.on('message',m=>{void this.enqueue(()=>this.closed?undefined:this.message(m));});this.rpc.on('closed',e=>{void this.enqueue(async()=>{if(!this.closed&&this.running){this.running=false;await this.emit({type:'error',text:e.message});await this.emit({type:'turn-end',status:'failed'});}});});this.rpc.on('log',()=>{});
+  async start(){
+    this.checkOpen();if(!this.endpoint)throw new Error('app-server 仅用于网关 Codex 会话');
+    const catalog=await this.catalogFile().catch(()=>null);
+    try{await this.open(catalog);}
+    catch(error){
+      if(!catalog)throw error;
+      const text=String(error?.message??'');
+      // Only a catalog rejection may blacklist the version; an unrelated startup
+      // failure must surface unchanged instead of being retried without the file.
+      if(!/model_catalog|catalog/i.test(text))throw error;
+      const root=codexWorkspaceRoot(this.dir),version=this.runtime?.permissions?.observed?.version;
+      await markCodexCatalogUnsupported(root,version).catch(()=>{});
+      await this.rpc?.close().catch(()=>{});this.rpc=null;
+      await this.emit({type:'notice',source:'codex-apply-patch',text:`Codex ${codexVersionNumber(version)??'当前版本'} 拒绝了模型目录（原生 apply_patch 声明），已自动退回不带目录的启动；不会再为这个版本尝试。`}).catch(()=>{});
+      await this.open(null);
+    }
+  }
+  async catalogFile(){
+    if(!this.endpoint||!this.dir)return null;
+    const version=this.runtime?.permissions?.observed?.version??null;
+    recordCodexRuntime(this.session?.id,version);
+    const root=codexWorkspaceRoot(this.dir);
+    if(!root||await codexCatalogUnsupported(root,version))return null;
+    const base=await readCodexBaseInstructions(root,version);
+    if(!base)return null;
+    return writeCodexModelCatalog(this.dir,{slug:this.variant?.id,displayName:this.variant?.name,baseInstructions:base});
+  }
+  async open(catalogPath){
+    this.catalogPath=catalogPath??null;
+    const settings=codexLaunchSettings(this);const child=(this.launchProcess??launch)(this.runtime.executable,['app-server','--listen','stdio://',...settings.args],{cwd:this.project.path,env:settings.env});this.rpc=new RpcProcess(child,{timeoutMs:180000,maxEventBytes:16*1024*1024});this.rpc.on('message',m=>{void this.enqueue(()=>this.closed?undefined:this.message(m));});this.rpc.on('closed',e=>{void this.enqueue(async()=>{if(!this.closed&&this.running){this.running=false;await this.emit({type:'error',text:e.message});await this.emit({type:'turn-end',status:'failed'});}});});this.rpc.on('log',()=>{});
     this.checkOpen();await this.rpc.request('initialize',{clientInfo:{name:'agent_workbench',title:'Bridge++',version:'0.1.15'},capabilities:{experimentalApi:false}});this.checkOpen();this.rpc.notify('initialized');
     const permissions=codexPermissionSettings(this.permissionMode);if(!this.runtime.permissions?.observed?.autoReview)delete permissions.approvalsReviewer;
     const threadSettings={cwd:this.project.path,...permissions,...(this.endpoint?{model:this.variant.id,modelProvider:'agentworkbench'}:this.session.selection.nativeModel?{model:this.session.selection.nativeModel}:{})};

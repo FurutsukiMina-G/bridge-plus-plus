@@ -5,8 +5,15 @@ import {isToolProtocolText} from './protocol-text.js';
 export const hasUsableTools = (request: ChatRequest) => !!request.tools?.length && request.tool_choice !== 'none';
 export function answerInstructions(request: ChatRequest) {
   return 'Return the requested final answer directly, preserving the original conversation role priorities. Do not add a bridge envelope. ' +
-    (request.response_format ? `Return a complete JSON document matching response_format: ${JSON.stringify(request.response_format)}.` : 'Plain text is permitted.') + '\n';
+    (request.response_format ? `Return a complete JSON document matching response_format: ${JSON.stringify(request.response_format)}.` : 'Reply exactly as the conversation above instructs.') + '\n';
 }
+/** Quoted material (fenced blocks, inline code) may name protocol markers without being a call. */
+function withoutCode(text: string): string {
+  return text.replace(/```[^\n]*\n[\s\S]*?```/g, '')
+    .replace(/(?<!`)(?:``(?!`)(?:(?!``)[^\r\n])+(?<!`)``|`[^`\r\n]+`)(?!`)/g, '');
+}
+/** Only a line that starts with a call shell is protocol, as in the decision path. */
+const protocolShell = (text: string) => /(?:^|\n)[\t ]*<\/?｜{1,2}(?:DSML|DS)｜{1,2}/.test(text);
 export function finalAnswer(text: string, request: ChatRequest): string {
   if(request.tool_choice==='required'||request.tool_choice&&typeof request.tool_choice==='object')throw new Error('tool_choice requires a tool call');
   let value: unknown;
@@ -22,6 +29,6 @@ export function finalAnswer(text: string, request: ChatRequest): string {
     if (format?.type === 'json_object' && (!document || typeof document !== 'object' || Array.isArray(document))) throw new Error('response_format requires a JSON object');
     if (format?.type === 'json_schema' && format.json_schema?.schema !== undefined && !toolValidator(format.json_schema.schema)(document)) throw new Error('Answer violates response_format json_schema');
   }
-  else if(isToolProtocolText(text)||/｜{1,2}(?:DSML|DS)｜｜/.test(text)||/^\s*<\/?(?:tool_call|custom_tool_call)\b/.test(text)||/^\s*\{\s*"(?:tool_calls|kind)"\s*:/.test(text))throw new Error('tool_choice forbids tool calls');
+  else if(isToolProtocolText(text)||protocolShell(withoutCode(text))||/^\s*<\/?(?:tool_call|custom_tool_call)\b/.test(text)||/^\s*\{\s*"(?:tool_calls|kind)"\s*:/.test(text))throw new Error('tool_choice forbids tool calls');
   return text;
 }

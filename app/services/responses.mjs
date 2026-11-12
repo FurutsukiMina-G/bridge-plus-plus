@@ -12,9 +12,20 @@ export function responseToChat(body,{images=false}={}){
   const unavailable=Object.values(mapping).filter(t=>t.type==='server-only').map(t=>t.name).sort();if(unavailable.length)messages.push({role:'system',content:'These native service capabilities require the original model connection and are unavailable through this bridge: '+unavailable.join(', ')+'. Explain this boundary if needed; do not claim they were executed.'});
   const input=typeof body.input==='string'?[{role:'user',content:body.input}]:body.input;
   if(!Array.isArray(input))throw new Error('Responses input must be a string or item array');
+  const pictures=[];
+  const flushPictures=()=>{if(pictures.length)messages.push({role:'user',content:pictures.splice(0)});};
   for(const item of input){
+    const toolOutput=item.type==='function_call_output'||item.type==='custom_tool_call_output';
+    if(!toolOutput&&item.type!=='reasoning')flushPictures();
     if(item.type==='function_call'||item.type==='custom_tool_call'){const last=messages.at(-1),call={id:item.call_id,type:'function',function:{name:aliasFor(item.namespace,item.name),arguments:item.type==='custom_tool_call'?JSON.stringify({input:item.input??''}):item.arguments??'{}'}};if(last?.role==='assistant'&&last.content===null)last.tool_calls.push(call);else messages.push({role:'assistant',content:null,tool_calls:[call]});}
-    else if(item.type==='function_call_output'||item.type==='custom_tool_call_output')messages.push({role:'tool',tool_call_id:item.call_id,content:textParts(item.output)});
+    else if(toolOutput){
+      const content=textParts(item.output,images);
+      if(Array.isArray(content)){
+        const returnedImages=content.filter(part=>part.type==='image_url'),text=content.filter(part=>part.type==='text').map(part=>part.text).join('\n');
+        messages.push({role:'tool',tool_call_id:item.call_id,content:text.trim()?text:'Images returned in the next user message.'});
+        pictures.push({type:'text',text:`Images returned by tool call ${item.call_id}:`},...returnedImages);
+      }else messages.push({role:'tool',tool_call_id:item.call_id,content});
+    }
     else if(item.type==='reasoning'){/* Provider-specific encrypted thinking cannot be replayed to a different provider. */}
     else if(['compaction','compacted'].includes(item.type)){
       const summary=typeof item.summary==='string'?item.summary:typeof item.text==='string'?item.text:typeof item.content==='string'?item.content:null;
@@ -30,6 +41,7 @@ export function responseToChat(body,{images=false}={}){
     else if(item.type==='message'||item.role){if(!['user','assistant','system','developer'].includes(item.role))throw new Error('Unknown Responses message role');messages.push({role:item.role,content:textParts(item.content,images&&item.role==='user')});}
     else throw new Error(`Unsupported Responses input item: ${item.type}`);
   }
+  flushPictures();
   let choice=body.tool_choice;if(['function','custom'].includes(choice?.type))choice={type:'function',function:{name:aliasFor(choice.namespace,choice.name)}};
   return {model:body.model,messages,stream:true,stream_options:{include_usage:true},bridge_tool_mapping:mapping,...omitted.size?{bridge_omitted_media:[...omitted]}:{},...(body.prompt_cache_key?{prompt_cache_key:body.prompt_cache_key}:{}),...(tools.length?{tools}:{}),...choice?{tool_choice:choice}:{},...body.max_output_tokens?{max_tokens:body.max_output_tokens}:{},...body.reasoning?.effort?{reasoning_effort:body.reasoning.effort}:{},...body.parallel_tool_calls!==undefined?{parallel_tool_calls:body.parallel_tool_calls}:{}};
 }

@@ -1,6 +1,6 @@
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
-import {mkdir,mkdtemp,readFile,writeFile,readdir} from 'node:fs/promises';
+import {mkdir,mkdtemp,readFile,writeFile,readdir,open} from 'node:fs/promises';
 import {resolve,join} from 'node:path';
 import {createHash} from 'node:crypto';
 import {Environments} from '../app/services/environments.mjs';
@@ -44,6 +44,21 @@ test('Kimi verified managed version activates; failed version leaves previous ch
  const bad=await fixture(t,{kimiInstaller:async({directory})=>{await kimiPackage(directory);return {code:0};},execute:async()=>({code:0,stdout:'2.3.1'})});await bad.store.mutate(s=>s.preferences.runtimes.kimi={executable:'previous-fixture.mjs'});await bad.manager.install('kimi','update');await assert.rejects(bad.manager.jobs.get('kimi').promise,/--version 验证失败/);assert.equal(bad.store.state.preferences.runtimes.kimi.executable,'previous-fixture.mjs');assert.deepEqual(await readdir(join(bad.userData,'environments/kimi-code')),[]);
 });
 test('missing npm disables Kimi install/update and keeps bundled runtime ready',async t=>{const {manager}=await fixture(t,{npmFinder:async()=>null});const view=manager.snapshot().find(r=>r.id==='kimi');assert.equal(view.status,'ready');assert.equal(view.actions.update,false);await manager.install('kimi');await assert.rejects(manager.jobs.get('kimi').promise,/捆绑 npm/);});
+test('a Kimi activation failing during the final rename rolls the previous managed directory back instead of losing it',async t=>{
+ if(process.platform!=='win32'){t.skip('the locked-rename reproduction relies on Windows sharing semantics');return;}
+ const userData=await root(),store=await new Store(join(userData,'workspace')).open();
+ const final=join(userData,'environments/kimi-code','3.2.1');await kimiPackage(final);await writeFile(join(final,'node_modules/@moonshot-ai/kimi-code/dist/main.mjs'),'// old managed version');
+ let handle;
+ const manager=await new Environments({store,userData,node:{command:'fixture-node',args:[],env:{}},inspect:async()=>rows(),npmFinder:async()=>({cli:'fixture-npm'}),registry:async()=>[],isDshRunning:async()=>false,
+  execute:async(command,args)=>({code:0,stdout:String(args).includes(final)?'Kimi Code 2.9.9':'Kimi Code 3.2.1'}),
+  kimiInstaller:async({directory})=>{await kimiPackage(directory);handle=await open(join(directory,'node_modules/@moonshot-ai/kimi-code/dist/main.mjs'),'r');return {code:0};},
+  fetchImpl:async url=>new Response(url.endsWith('.yml')?feed:JSON.stringify({name:'@moonshot-ai/kimi-code',version:'3.2.1'}))}).init();
+ t.after(async()=>{await handle?.close();await manager.close();await store.close();});
+ await manager.install('kimi','update');await assert.rejects(manager.jobs.get('kimi').promise,/rename/);
+ assert.equal(await readFile(join(final,'node_modules/@moonshot-ai/kimi-code/dist/main.mjs'),'utf8'),'// old managed version');
+ assert.ok(store.state.preferences.runtimes.kimi?.executable===undefined||String(store.state.preferences.runtimes.kimi.executable).startsWith(final));
+ const left=await readdir(join(userData,'environments/kimi-code'));assert.ok(left.includes('3.2.1'));assert.equal(left.filter(name=>name.includes('-old-')).length,0);
+});
 test('failed Kimi npm install reports a bounded redacted stderr tail in job events and environment service log',async t=>{
  const {manager,store,userData}=await fixture(t,{kimiInstaller:async()=>({code:1,stderr:'irrelevant head '.repeat(500)+'\napi_key="fixture-secret" Bearer fixture-bearer https://user:fixture-password@registry.invalid/p?signature=fixture-signed\nnpm ERR double-loading config as global, previously loaded as user'})});await store.mutate(s=>s.preferences.runtimes.kimi={executable:'previous.mjs'});await manager.install('kimi','update');await assert.rejects(manager.jobs.get('kimi').promise,/double-loading/);const message=manager.snapshot().find(r=>r.id==='kimi').job.message,log=await readFile(join(userData,'environments/logs/kimi-install.log'),'utf8');assert.match(message,/退出码：1/);assert.ok(message.length<2000);assert.match(log,/double-loading/);for(const secret of ['fixture-secret','fixture-bearer','fixture-password','fixture-signed']){assert.equal(message.includes(secret),false);assert.equal(log.includes(secret),false);}assert.equal(store.state.preferences.runtimes.kimi.executable,'previous.mjs');
 });

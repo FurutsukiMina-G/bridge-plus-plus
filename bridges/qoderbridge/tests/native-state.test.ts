@@ -90,7 +90,7 @@ test('changing reasoning while awaiting host results rebuilds before resolving o
     const{pending}=await started(pool,request,runtimes);const old=runtimes[0]!;const handlers=await old.toolStep([{id:'old',name:'Read',input:{path:'x'}}]);const first=await pending;
     const next=resultRequest(request,first.reply,['ignored']);const secondPending=pool.infer(next,{reasoningEffort:'high'});
     await waitFor(()=>runtimes.length===2&&runtimes[1]!.prompts.length===1);assert.equal((await handlers[0]!).isError,true);assert.equal(old.closed,1);
-    runtimes[1]!.final('new');const second=await secondPending;assert.equal(second.reply.content,'new');assert.equal(second.report.native.rebuild_reason,'reasoning_changed_mid_turn');
+    runtimes[1]!.final('new');const second=await secondPending;assert.equal(second.reply.content,'new');assert.equal(second.report.native.rebuild_reason,'superseded');
   }finally{pool.closeAll();}
 });
 

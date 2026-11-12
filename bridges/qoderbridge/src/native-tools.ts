@@ -12,6 +12,14 @@ export type HostTool={host:string;exposed:string;description:string;inputSchema:
 export type HostToolTable={signature:string;tools:HostTool[];byExposed:Map<string,HostTool>;byHost:Map<string,HostTool>};
 export type CallHandler=(name:string,input:unknown,resolve:(result:CallToolResult)=>void,signal:AbortSignal)=>void;
 
+/** `tool_choice:{type:'function',function:{name}}` pins one host function for the step. */
+export function pinnedFunction(request:{tool_choice?:unknown}):string|null{
+  const choice=request.tool_choice;
+  if(!choice||typeof choice!=='object'||Array.isArray(choice))return null;
+  const row=choice as {type?:unknown;function?:{name?:unknown}};
+  return row.type==='function'&&typeof row.function?.name==='string'&&row.function.name?row.function.name:null;
+}
+
 export function hostToolTable(request:ChatRequest):HostToolTable{
   const tools:HostTool[]=[],byExposed=new Map<string,HostTool>(),byHost=new Map<string,HostTool>(),used=new Set<string>();
   for(const tool of request.tools??[]){

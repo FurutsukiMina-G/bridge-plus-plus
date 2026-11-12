@@ -179,6 +179,17 @@ export class Sessions {
     }
     await this.finish(session,run,status,event);
   }
+  // Balance is read only after a turn ends, and only when nothing else is
+  // running on the same source, so a refresh never competes with a live session.
+  scheduleAccountRefresh(session){
+    if(this.closed||typeof this.providers?.account!=='function')return;
+    const source=session?.selection?.modelKey?.split(':')[0];
+    if(!['qoder','workbuddy'].includes(source))return;
+    for(const [id,run]of this.runs)if(!run.terminal&&this.store.session(id).selection?.modelKey?.split(':')[0]===source)return;
+    const current=this.store.state.catalog?.[source]?.account;
+    if(current&&!current.error&&Date.now()-(Date.parse(current.fetchedAt||'')||0)<300000)return;
+    void this.providers.account(source).catch(()=>{});
+  }
   finish(session,run,status,event={}){
     if(run.finishing)return run.finishing;run.terminal=true;
     run.finishing=(async()=>{
@@ -211,6 +222,7 @@ export class Sessions {
       if(['completed','paused'].includes(status)&&!this.closed)this.scheduleQueue(session.id);
       else await this.store.event(session.id,{type:'notice',source:'queue',text:`本轮未完成，排队的 ${session.queue.length} 条消息没有发送。`});
     }
+    if(['completed','paused'].includes(status)&&!session.queue?.length)this.scheduleAccountRefresh(session);
     }
     })();return run.finishing;
   }

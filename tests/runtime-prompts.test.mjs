@@ -9,6 +9,7 @@ import {Sessions} from '../app/services/sessions.mjs';
 import {Store} from '../app/core/store.mjs';
 import {normalizeWorkbuddy,normalizeAntigravity,variantFor} from '../app/core/catalog.mjs';
 import {ResponseProjection} from '../app/services/responses.mjs';
+import {holdFixture,collectHold,hostResults} from './fixtures/workbuddy-hold.mjs';
 
 const credential={accessToken:'local-fixture',uid:'fixture',domain:'www.workbuddy.cn'};
 const names={dsh:'DeepSeek Harness',kimi:'Kimi Code',codex:'Codex CLI'};
@@ -51,11 +52,11 @@ test('each runtime selects its own system contract and preserves provider-specif
   for(const id of [undefined,'unknown','__proto__','antigravity'])assert.throws(()=>bridgePromptConfig(id));
 });
 
-test('all selected WorkBuddy hosts return complete native and JSON batches and enforce explicit serial requests',async t=>{
+test('all selected WorkBuddy hosts return complete replay and JSON batches and reject explicit serial batch violations',async t=>{
   const calls=[{name:'Read',arguments:{path:'a'}},{name:'Read',arguments:{path:'b'}}];
   for(const runtimeId of Object.keys(names))for(const native of [false,true]){
     const seen=[],config=bridgePromptConfig(runtimeId).workbuddy;
-    const transport=new SdkTransport({runtime:await directory(),cliPath:process.execPath,toolMode:native?'native':'json',decisionRetries:0,...config},{get:async()=>credential},{run:async function*({prompt}){
+    const transport=new SdkTransport({runtime:await directory(),cliPath:process.execPath,toolMode:native?'replay':'json',decisionRetries:0,...config},{get:async()=>credential},{run:async function*({prompt}){
       seen.push(prompt);
       yield {type:'system',subtype:'init',model:'fixture',session_id:'batch-session',mcp_servers:native?[{name:'host',status:'connected'}]:[]};
       yield {type:'assistant',message:{model:'fixture',content:native?calls.map((c,i)=>({type:'tool_use',id:'call_'+i,name:'mcp__host__'+c.name,input:c.arguments})):[{type:'text',text:JSON.stringify({action:'tool_calls',calls})}]}};
@@ -77,10 +78,10 @@ test('all selected WorkBuddy hosts return complete native and JSON batches and e
   }
 });
 
-test('WorkBuddy runtime-specific system survives native and JSON format corrections',async t=>{
+test('WorkBuddy runtime-specific system survives replay and JSON format corrections',async t=>{
   for(const native of [false,true]){
     const seen=[],runtime=await directory(),config=bridgePromptConfig(native?'kimi':'codex').workbuddy;
-    const transport=new SdkTransport({runtime,cliPath:process.execPath,toolMode:native?'native':'json',decisionRetries:1,...config},{get:async()=>credential},{run:async function*({options,prompt}){
+    const transport=new SdkTransport({runtime,cliPath:process.execPath,toolMode:native?'replay':'json',decisionRetries:1,...config},{get:async()=>credential},{run:async function*({options,prompt}){
       seen.push({system:options.systemPrompt,prompt});
       yield {type:'system',subtype:'init',model:'fixture',session_id:'fixture-session',mcp_servers:native?[{name:'host',status:'connected'}]:[]};
       const text=seen.length===1?'BAD FORMAT':native?'Complete fixture answer.':'{"action":"final","content":"Complete fixture answer."}';
@@ -95,6 +96,58 @@ test('WorkBuddy runtime-specific system survives native and JSON format correcti
     for(const entry of seen)assert.equal(entry.system,config.hostPrompts[native?'native':'decision']);
     assert.doesNotMatch(seen[1].prompt,/DeepSeek Harness|pending Harness/);
   }
+});
+
+test('default WorkBuddy hold preserves each host batch and enforces serial requests before dispatch',async t=>{
+  const calls=[{id:'hold-a',name:'mcp__host__Read',input:{path:'a'}},{id:'hold-b',name:'mcp__host__Read',input:{path:'b'}}];
+  for(const runtimeId of [...Object.keys(names),'claude']){
+    const config=bridgePromptConfig(runtimeId).workbuddy;
+    const fixture=await holdFixture(t,config,session=>session.toolStep(calls));
+    const body={model:'fixture',max_tokens:128,prompt_cache_key:'batch',messages:[{role:'user',content:'Read both files'}],tools:[{type:'function',function:{name:'Read',parameters:{type:'object',properties:{path:{type:'string'}},required:['path'],additionalProperties:false}}}]};
+    const first=await collectHold(await fixture.chat(body),body.tools),message=first.result.choices[0].message;
+    assert.equal(first.metrics.mode,'hold');assert.equal(first.result.choices[0].finish_reason,'tool_calls');
+    assert.equal(first.metrics.native.model_responses,1);assert.equal(first.metrics.native.host_calls,2);assert.ok(first.metrics.requests[0].tool_input_chars>0);
+    assert.deepEqual(message.tool_calls.map(call=>[call.id,call.function.name,JSON.parse(call.function.arguments)]),calls.map(call=>[call.id,'Read',call.input]));
+    assert.equal(fixture.sessions.length,1);const session=fixture.sessions[0];
+    assert.deepEqual(session.nativeTrace.filter(event=>event.kind==='message_delta').map(event=>event.stop),['tool_use','end_turn']);
+    assert.ok(session.options.systemPrompt.startsWith(config.hostPrompts.native+'\n\n'));
+    assert.equal(session.options.fallbackModel,undefined);assert.equal(session.options.model,'fixture');
+    assert.doesNotMatch(session.prompts[0],/at most one|parallel_tool_calls:false/i);
+    if(runtimeId==='codex'){
+      const projection=new ResponseProjection('fixture',()=>{});for(const event of first.events)projection.accept(event);
+      assert.deepEqual(projection.finish().output.filter(item=>item.type==='function_call').map(item=>JSON.parse(item.arguments)),calls.map(call=>call.input));
+    }
+    const final=await collectHold(await fixture.chat(hostResults(body,message)),body.tools);
+    assert.equal(final.result.choices[0].message.content,'Complete fixture answer.');assert.equal(final.result.choices[0].finish_reason,'stop');
+    assert.deepEqual(session.handlerResults.map(result=>result.content[0].text),['host-result-0','host-result-1']);
+    assert.equal(fixture.sessions.length,1);assert.equal(session.prompts.length,1,'Host results must resume held MCP calls, not replay the conversation');
+
+    // Emit the same violating two-call model response. The hold lane must expose
+    // only the first call and reject the other locally, without host side effects.
+    const serialBody={...body,prompt_cache_key:'serial',parallel_tool_calls:false};
+    const serial=await collectHold(await fixture.chat(serialBody),body.tools),serialMessage=serial.result.choices[0].message;
+    assert.deepEqual(serialMessage.tool_calls,[message.tool_calls[0]]);assert.equal(serial.result.choices[0].finish_reason,'tool_calls');
+    assert.equal(serial.metrics.native.parallel_trimmed,1);assert.equal(fixture.sessions.length,2);
+    const serialSession=fixture.sessions[1];assert.match(serialSession.prompts[0],/Call at most one host function per reply\./);
+    const serialFinal=await collectHold(await fixture.chat(hostResults(serialBody,serialMessage)),body.tools);
+    assert.equal(serialFinal.result.choices[0].finish_reason,'stop');assert.equal(serialSession.prompts.length,1);
+    assert.equal(serialSession.handlerResults[0].content[0].text,'host-result-0');
+    assert.equal(serialSession.handlerResults[1].isError,true);
+    assert.equal(serialSession.handlerResults[1].content[0].text,'Only one function call per step is allowed here. Repeat this call in a later step after you have the previous result.');
+  }
+});
+
+test('default WorkBuddy hold preserves the runtime system through native protocol correction',async t=>{
+  const config=bridgePromptConfig('kimi').workbuddy;
+  const fixture=await holdFixture(t,config,(session,_prompt,turn)=>session.final(turn===1?'<tool_call>invalid</tool_call>':'Complete fixture answer.'));
+  const body={model:'fixture',max_tokens:128,messages:[{role:'user',content:'Bounded fixture task'}],tools:[{type:'function',function:{name:'read',parameters:{type:'object'}}}]};
+  const result=await collectHold(await fixture.chat(body),body.tools);
+  assert.equal(result.metrics.mode,'hold');assert.equal(result.result.choices[0].message.content,'Complete fixture answer.');
+  assert.equal(result.result.choices[0].finish_reason,'stop');assert.doesNotMatch(result.wire,/<tool_call>/);
+  assert.equal(fixture.sessions.length,1);const session=fixture.sessions[0];assert.equal(session.prompts.length,2);
+  assert.equal(session.options.resume,undefined);assert.equal(session.options.model,'fixture');
+  assert.ok(session.options.systemPrompt.startsWith(config.hostPrompts.native+'\n\n'));
+  assert.match(session.prompts[1],/native function calling/);assert.doesNotMatch(session.prompts[1],/DeepSeek Harness|pending Harness/);
 });
 
 test('gateway binds identical models to separate runtime workers and keeps Responses on that route',async t=>{

@@ -36,12 +36,20 @@ test('source default window wins; effort and local budget do not change native p
   const config=kimiAcpConfig({model:{name:'No thinking model',reasoning:[],defaultContextTokens:200000,contextMaximum:1000000},variant:{id:'fixture'},endpoint:{baseURL:'http://127.0.0.1:1/v1'},session:{selection:{}}});assert.match(config,/max_context_size = 200000/);assert.match(config,/enabled = false/);assert.doesNotMatch(config,/"thinking"/);
 });
 
-test('new branches cannot evict reserved roots when the pool holds only application roots',async t=>{
+test('new branches evict idle application roots but never evict busy lanes',async t=>{
   const pool=new ContextPool({runtime:await directory(),maxSessions:2});t.after(()=>pool.close());const credential={uid:'fixture',domain:'fixture'},signal=new AbortController().signal;
-  const open=scope=>pool.acquire({model:'fixture',bridge_scope:scope,messages:[{role:'user',content:Math.random().toString()}]},credential,signal);
+  let branch=0;const open=scope=>pool.acquire({model:'fixture',bridge_scope:scope,messages:[{role:'user',content:`branch-${++branch}`}]},credential,signal);
   const a=await open('app-a');a.record.sessionId='a';a.commit({}, {role:'assistant',content:'answer'});a.release();
   const b=await open('app-b');b.record.sessionId='b';b.commit({}, {role:'assistant',content:'answer'});b.release();
-  await assert.rejects(open('app-a'),error=>error.code==='sessions_busy');assert.ok(pool.records.has(b.record.id));assert.ok(pool.records.has(a.record.id));
+  // Idle roots are preferred over rejecting useful work; same-scope eviction
+  // still preserves the other application's idle root when possible.
+  const nextA=await open('app-a');t.after(()=>nextA.release());
+  assert.equal(pool.records.size,2);assert.ok(!pool.records.has(a.record.id));assert.ok(pool.records.has(b.record.id));assert.ok(pool.records.has(nextA.record.id));
+  const nextB=await open('app-b');t.after(()=>nextB.release());
+  assert.equal(pool.records.size,2);assert.ok(!pool.records.has(b.record.id));assert.ok(pool.records.has(nextA.record.id));assert.ok(pool.records.has(nextB.record.id));
+  await assert.rejects(open('app-c'),error=>error.code==='sessions_busy'&&error.details.busy===2&&error.details.awaiting===0&&error.details.idle===0);
+  assert.deepEqual([...pool.records.keys()],[nextA.record.id,nextB.record.id]);
+  nextA.release();nextB.release();
 });
 
 test('gateway usage is emitted once before terminal delivery and estimates remain separate',async()=>{

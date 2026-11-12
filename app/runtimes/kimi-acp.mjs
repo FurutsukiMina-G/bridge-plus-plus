@@ -37,15 +37,20 @@ export function kimiElicitationQuestions(params={}){
     const variants=Array.isArray(property?.oneOf)?property.oneOf:Array.isArray(property?.anyOf)?property.anyOf:Array.isArray(property?.items?.anyOf)?property.items.anyOf:[];
     const options=variants.map(variant=>({label:variant?.const??variant?.title,...variant?.description?{description:variant.description}:{}})).filter(option=>typeof option.label==='string');
     const question=lines[index]?.trim()||property?.title||id;
-    // Without an enum there is nothing to pick, so the form has to accept typed text instead.
-    return {id,question,...property?.title?{header:property.title}:{},...property?.description?{detail:property.description}:{},...options.length?{options}:{},multiSelect:property?.type==='array'&&options.length>0,allowCustom:!options.length};
+    // Without an enum there is nothing to pick, so the form has to accept typed text instead. A boolean
+    // always offers the fixed 是/否 pair; the typed box stays open for the expanded truth-word answers.
+    const boolean=property?.type==='boolean';
+    return {id,question,...property?.title?{header:property.title}:{},...property?.description?{detail:property.description}:{},...(boolean?{options:[{label:'是'},{label:'否'}]}:options.length?{options}:{}),multiSelect:property?.type==='array'&&options.length>0,allowCustom:boolean||!options.length};
   });
 }
+const KIMI_BOOLEAN_ANSWERS=new Map([['true',true],['false',false],['是',true],['否',false],['对',true],['错',false],['yes',true],['no',false],['y',true],['n',false],['1',true],['0',false]]);
+function kimiBooleanValue(text){const key=String(text??'').trim().toLowerCase();return KIMI_BOOLEAN_ANSWERS.has(key)?KIMI_BOOLEAN_ANSWERS.get(key):undefined;}
 function kimiFreeTextValue(type,text){
   const value=String(text??'').trim();if(!value)return undefined;
   if(type==='number'){const number=Number(value);return Number.isFinite(number)?number:undefined;}
   if(type==='integer'){const number=Number(value);return Number.isInteger(number)?number:undefined;}
-  if(type==='boolean')return value==='true'||value==='是'?true:value==='false'||value==='否'?false:value;
+  // An unrecognized boolean answer stays unanswered: Kimi must never receive a free-form string here.
+  if(type==='boolean')return kimiBooleanValue(value);
   return value;
 }
 export function kimiPermissionQuestion(params={}){
@@ -64,6 +69,13 @@ export function kimiElicitationResult(questions,choice,answer={},properties={}){
     const item=items.find(row=>row.id===question.id||row.question===question.question),labels=(question.options??[]).map(option=>option?.label).filter(label=>typeof label==='string');
     if(labels.length){
       const selected=(item?.selected??[]).filter(label=>labels.includes(label));
+      // Booleans answer with real true/false from either the 是/否 buttons or the typed box;
+      // anything unrecognized leaves the field unanswered instead of sending a string.
+      if(properties?.[question.id]?.type==='boolean'){
+        const value=selected.length?selected[0]==='是':kimiBooleanValue(item?.custom);
+        if(value!==undefined)content[question.id]=value;
+        continue;
+      }
       if(selected.length)content[question.id]=question.multiSelect?selected:selected[0];
       continue;
     }

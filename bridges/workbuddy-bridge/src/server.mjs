@@ -98,7 +98,7 @@ export function createBridge({cfg,provider,key,instanceId,log}){
       clearTimeout(deadline);clearInterval(heartbeat);clearInterval(idle);res.removeListener('close',disconnect);req.removeListener('aborted',disconnect);controller.abort();controllers.delete(controller);release?.();
       const row={at:new Date().toISOString(),requestId,model:selected?.id??null,upstream:upstream?.model??null,outcome,errorCode,wallMs:Date.now()-started,
         lastActivityMs:activity.started?Date.now()-activity.at:null,
-        firstEventMs,firstTextMs,firstThinkingMs,queueMs,usage:completion?.usage??null,context:transportMetrics,
+        firstEventMs,firstTextMs,firstThinkingMs,queueMs,usage:completion?.usage??null,context:transportMetrics,mode:transportMetrics?.mode??null,harness_tool_count:transportMetrics?.harness_tool_count??0,available_tool_definition_chars:transportMetrics?.available_tool_definition_chars??0,sent_tool_definition_chars:transportMetrics?.sent_tool_definition_chars??0,
         contextPressure:transportMetrics?.lastPromptTokens?{native:transportMetrics.lastPromptTokens/(provider.model?.contextWindow??1000000),selectedBudget:transportMetrics.lastPromptTokens/selected.contextWindow}:null};
       recent.push(row);if(recent.length>1000)recent.shift();await record(row).catch(()=>{});
     }

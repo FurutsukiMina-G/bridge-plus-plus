@@ -1,7 +1,7 @@
 {
   "name": "bridge-plus-plus",
   "productName": "Bridge++",
-  "version": "0.1.21",
+  "version": "0.1.22",
   "description": "Windows agent development workspace with independent model sources and native agent runtimes",
   "private": true,
   "type": "module",

@@ -49,11 +49,11 @@ test('native resume preserves session when DSH prepends acp block tags to assist
   const second=await collect(transport,{...body,tools,messages:[...body.messages,tagged,{role:'tool',tool_call_id:message.tool_calls[0].id,content:'OK'}]});
   assert.equal(received[1].options.resume,'fixture-session');assert.equal(second.metrics.historyMode,'delta');assert.equal(second.metrics.sessionReset,undefined);
 });
-test('identical retries retain tool IDs, do not call the model, and report local zero usage',async t=>{
+test('identical retries retain tool IDs, do not call the model, and omit local usage',async t=>{
   let calls=0;const transport=await fixture(t,async function*(){calls++;yield* events(JSON.stringify({action:'tool_calls',calls:[{name:'write',arguments:{text:'x'}}]}));});
   const request={...body,tools};const first=await collect(transport,request),retry=await collect(transport,request);
   assert.equal(calls,1);assert.deepEqual(retry.result.choices,first.result.choices);assert.equal(retry.result.id,first.result.id);
-  assert.equal(retry.result.usage.total_tokens,0);assert.equal(retry.result.usage.bridge_usage_source,'local-response-replay');
+  assert.equal(retry.result.usage,null);assert.doesNotMatch(retry.raw,/"usage":\{/);assert.equal(retry.metrics.client_usage,null);
 });
 test('rewritten history, isolated client keys, effort, public window and account identity cannot share context',async t=>{
   const received=[];const transport=await fixture(t,async function*(input){received.push(input);yield* events('{"action":"final","content":"ok"}');});
@@ -77,7 +77,7 @@ test('concurrent duplicate requests single-flight; cancelling the waiter preserv
   const transport=await fixture(t,async function*(){calls++;started();await gate;yield* events('{"action":"final","content":"ok"}');});
   const first=collect(transport);await began;const controller=new AbortController();const second=collect(transport,body,controller.signal);controller.abort(new DOMException('cancelled','AbortError'));
   await assert.rejects(second);go();assert.equal((await first).result.choices[0].message.content,'ok');assert.equal(calls,1);
-  assert.equal((await collect(transport)).result.usage.total_tokens,0);
+  assert.equal((await collect(transport)).result.usage,null);
 });
 test('bounded format correction resumes the same model and sums every attempt once',async t=>{
   let calls=0;const transport=await fixture(t,async function*(input){calls++;if(calls===2)assert.equal(input.options.resume,'fixture-session');yield* events(calls===1?'bad decision':'{"action":"final","content":"recovered"}');});
@@ -88,7 +88,7 @@ test('bounded format correction resumes the same model and sums every attempt on
 test('repeated invalid output stops correction early without publishing an executable call',async t=>{
   let calls=0;const transport=await fixture(t,async function*(){calls++;yield* events('{"action":"tool_calls","calls":[{"name":"write","arguments":{}}]}');});
   const result=await collect(transport,{...body,tools});assert.equal(calls,2);assert.match(result.raw,/invalid_tool_arguments/);assert.ok(!result.raw.includes('"tool_calls":['));assert.ok(!result.raw.includes('[DONE]'));
-  const replay=await collect(transport,{...body,tools});assert.equal(calls,2);assert.equal(replay.metrics.localReplay,true);assert.match(replay.raw,/local-rejection-replay/);
+  const replay=await collect(transport,{...body,tools});assert.equal(calls,2);assert.equal(replay.metrics.localReplay,true);assert.equal(replay.metrics.localReplayReason,'local-rejection-replay');assert.doesNotMatch(replay.raw,/"usage":\{/);
 });
 test('a wrapped tool envelope cannot leak as streaming final text or bypass correction',async t=>{
   let calls=0;const transport=await fixture(t,async function*(){

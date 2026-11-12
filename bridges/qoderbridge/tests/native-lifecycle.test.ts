@@ -40,7 +40,9 @@ test('a matching native warm runtime is claimed without opening a replacement',a
     await waitFor(()=>pool.stats().native.warm_ready===1);assert.equal(runtimes[1]!.listed?.length,1);
     const secondRequest={...toolRequest(),prompt_cache_key:'second-native',messages:[{role:'user' as const,content:'A separate conversation'}]};
     const secondPending=pool.infer(secondRequest);
-    await waitFor(()=>runtimes[1]?.prompts.length===1);
+    // Receiving the claimed runtime's prompt can precede asynchronous refill.
+    // Wait for both events; keep the exact runtime-count and no-extra-prompt assertions.
+    await waitFor(()=>runtimes[1]?.prompts.length===1&&runtimes.length===3);
     assert.equal(runtimes.length,3);assert.equal(runtimes[2]!.prompts.length,0,'only the replenished warm runtime is new');
     runtimes[1]!.final('two');const second=await secondPending;
     assert.equal(second.reply.content,'two');

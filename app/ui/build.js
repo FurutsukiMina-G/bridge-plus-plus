@@ -4193,7 +4193,9 @@ function foldSummary(run, running2) {
     counts.set(kind, (counts.get(kind) ?? 0) + 1);
   }
   const parts = [...counts].sort((a3, b) => b[1] - a3[1]).map(([kind, n]) => `${kind} ${n}`);
-  if (run.length > tools.length) parts.push(`\u601D\u8003 ${run.length - tools.length} \u6BB5`);
+  const count2 = (kind) => run.filter((b) => b.work[kind]).length, thinking = count2("thinking"), approved = count2("approval") + count2("review");
+  if (thinking) parts.push(`\u601D\u8003 ${thinking} \u6BB5`);
+  if (approved) parts.push(`\u5DF2\u6388\u6743 ${approved} \u6B21`);
   if (failed) parts.unshift(`${failed} \u4E2A\u5931\u8D25`);
   return { status, title, detail: parts.join(" \xB7 ") };
 }
@@ -18925,7 +18927,11 @@ function saveUi() {
 }
 async function call(method, args = {}) {
   const result = await window.workbench.call(method, args);
-  if (!result.ok) throw new Error(result.error);
+  if (!result.ok) {
+    const error = new Error(result.error);
+    if (result.code) error.code = result.code;
+    throw error;
+  }
   return result.value;
 }
 function toast(text3, error = false) {
@@ -19203,6 +19209,7 @@ function renderSidebarFrame() {
     <label class="sidebar-search">${icon("search")}<input id="session-search" placeholder="\u641C\u7D22\u4F1A\u8BDD" autocomplete="off" spellcheck="false"></label>
     <div class="section-head"><span>\u5DE5\u4F5C\u6587\u4EF6\u5939</span><button class="icon-btn sm" id="add-project" title="\u6253\u5F00\u6587\u4EF6\u5939">${icon("folderPlus")}</button></div>
     <nav id="folders" class="folders"></nav>
+    <div id="update-slot" class="update-slot"></div>
     <div class="sidebar-bottom"><button class="settings-entry" id="open-settings" title="\u8BBE\u7F6E (Ctrl+,)">${icon("settings")}<span>\u8BBE\u7F6E</span></button><span class="version" id="app-version"></span></div>`;
   bind("#session-search", "input", (e) => {
     state.sessionSearch = e.target.value;
@@ -19220,6 +19227,7 @@ function renderFolders() {
   const snap = state.snapshot, query = state.sessionSearch.trim().toLowerCase(), el = $2("#folders");
   if (!snap || !el) return;
   $2("#app-version").textContent = `v${snap.app.version}`;
+  renderUpdateSlot();
   if (!snap.projects.length) {
     el.innerHTML = `<div class="folders-empty">${icon("folder")}<p>\u6253\u5F00\u4E00\u4E2A\u672C\u673A\u6587\u4EF6\u5939\uFF0C\u4F1A\u8BDD\u4F1A\u6309\u6587\u4EF6\u5939\u6574\u7406\u5728\u8FD9\u91CC\u3002</p><button class="btn sm" id="empty-add-project">${icon("folderPlus")}\u6253\u5F00\u6587\u4EF6\u5939</button></div>`;
     return;
@@ -19805,6 +19813,11 @@ function approvalSummary(e) {
   const command = Array.isArray(d.command) ? d.command.join(" ") : d.command;
   return [d.toolCall?.title, command, d.reason, v2.command && (Array.isArray(v2.command) ? v2.command.join(" ") : v2.command), v2.file_path ?? v2.path, v2.plan, v2.url, d.grantRoot, d.description].find((x2) => typeof x2 === "string" && x2.trim()) ?? "";
 }
+var REVIEW_RISK = { low: "\u4F4E\u98CE\u9669", medium: "\u4E2D\u7B49\u98CE\u9669", high: "\u9AD8\u98CE\u9669" };
+function reviewNote(review) {
+  if (!review?.reason) return "";
+  return `<div class="approval-review ${esc5(review.risk ?? "")}">${icon("shield")}<span>\u81EA\u52A8\u5BA1\u67E5${review.risk && REVIEW_RISK[review.risk] ? `\uFF08${REVIEW_RISK[review.risk]}\uFF09` : ""}\uFF1A${esc5(review.reason)}</span></div>`;
+}
 function approvalBlock(e, resolved) {
   const done = resolved.get(e.approvalId);
   if (done !== void 0) return `<div class="approval-done ${done === "reject" || done === "reject-session" ? "rejected" : ""}">${icon(done === "expired" ? "clock" : done?.startsWith?.("reject") ? "close" : "check")}<span>${e.type === "question" ? "\u95EE\u9898" : "\u6388\u6743"}${esc5(resolvedLabels[done] ?? "\u5DF2\u5904\u7406")}</span><span class="muted">${esc5(e.name ?? "")}</span></div>`;
@@ -19813,7 +19826,7 @@ function approvalBlock(e, resolved) {
   if (choices.includes("native")) buttons = '<button class="btn primary sm" data-approval-native="true">\u5728\u5B8C\u6574\u5DE5\u5177\u754C\u9762\u5904\u7406</button>';
   else if (e.type === "question") buttons = `<button class="btn primary sm" data-question="${esc5(e.approvalId)}">\u56DE\u7B54</button><button class="btn sm danger" data-approval="${esc5(e.approvalId)}" data-choice="reject">\u4E0D\u56DE\u7B54</button>${hasNativeUi(session()?.runtimeId) ? '<button class="btn sm" data-approval-native="true">\u5728\u539F\u751F\u754C\u9762\u5904\u7406</button>' : ""}`;
   else buttons = choices.filter((c) => choiceLabels[c]).map((c) => `<button class="btn sm${c === "approve" ? " primary" : c.startsWith("reject") ? " danger" : ""}" data-approval="${esc5(e.approvalId)}" data-choice="${esc5(c)}">${choiceLabels[c]}</button>`).join("");
-  return `<div class="approval-card"><div class="approval-head">${icon(e.type === "question" ? "info" : "key")}<b>${e.type === "question" ? "Agent \u9700\u8981\u4F60\u8865\u5145\u4FE1\u606F" : "Agent \u8BF7\u6C42\u6388\u6743"}</b>${e.name ? `<span class="muted">${esc5(e.name)}</span>` : ""}</div>${summary ? `<div class="approval-summary">${esc5(summary)}</div>` : ""}<details class="approval-details" data-expand="approval-${esc5(e.approvalId)}"><summary>\u8BE6\u7EC6\u53C2\u6570</summary><pre>${esc5(clip2(pretty(e.data)))}</pre></details><div class="approval-actions">${buttons}</div></div>`;
+  return `<div class="approval-card"><div class="approval-head">${icon(e.type === "question" ? "info" : "key")}<b>${e.type === "question" ? "Agent \u9700\u8981\u4F60\u8865\u5145\u4FE1\u606F" : "Agent \u8BF7\u6C42\u6388\u6743"}</b>${e.name ? `<span class="muted">${esc5(e.name)}</span>` : ""}</div>${summary ? `<div class="approval-summary">${esc5(summary)}</div>` : ""}${reviewNote(e.data?.review)}<details class="approval-details" data-expand="approval-${esc5(e.approvalId)}"><summary>\u8BE6\u7EC6\u53C2\u6570</summary><pre>${esc5(clip2(pretty(e.data)))}</pre></details><div class="approval-actions">${buttons}</div></div>`;
 }
 function planBlock(e, live) {
   const d = e.data ?? {}, items = (d.entries ?? d.plan ?? []).map((x2) => ({ text: x2.content ?? x2.step ?? "", status: String(x2.status ?? "") }));
@@ -19900,7 +19913,9 @@ function renderChat(quiet = false) {
     else if (e.type === "plan") add(`plan:${e.id}`, planBlock(e, e.id === livePlan));
     else if (e.type === "diff") {
       if (lastDiff.get(e.turnId ?? "none") === e) add(`diff:${e.turnId ?? e.id}`, diffBlock(e));
-    } else if (e.type === "approval" || e.type === "question") add(`approval:${e.approvalId ?? e.id}`, approvalBlock(e, resolved));
+    } else if (e.type === "approval" && ["approve", "approve-session"].includes(resolved.get(e.approvalId))) add(`approval:${e.approvalId ?? e.id}`, () => approvalBlock(e, resolved), { approval: true });
+    else if (e.type === "approval" || e.type === "question") add(`approval:${e.approvalId ?? e.id}`, approvalBlock(e, resolved));
+    else if (e.type === "notice" && e.source === "auto-review" && /^自动审查已允许/.test(e.text ?? "")) add(`note:${e.id}`, () => `<div class="event-note notice quiet" title="${esc5(e.text)}">${icon("shield")}<span>${esc5(e.text)}</span></div>`, { review: true });
     else if (e.type === "error" || e.type === "notice") {
       if (e.type === "error" && upstreamSaid.has(`${e.turnId}\0${e.text}`)) continue;
       const note = e.type === "notice" && e.source === "gateway" ? gatewayNotice(e.text) : null;
@@ -19972,9 +19987,30 @@ function openMenu(anchor, kind) {
     const s = session();
     const base = s?.selectionNext ?? s?.selection;
     if (s) state.params = { reasoning: base.reasoning ?? "", contextTokens: base.contextTokens ?? null, contextBudget: base.contextBudget ?? null };
+    refreshBalances();
   }
   paintMenu();
 }
+var balanceAsked = /* @__PURE__ */ new Map();
+function refreshBalances() {
+  for (const source of ["qoder", "workbuddy"]) {
+    const cat = state.snapshot?.catalog?.[source], at2 = Date.parse(cat?.account?.fetchedAt ?? "");
+    if (!cat?.models?.length || Date.now() - (Number.isFinite(at2) ? at2 : 0) < 3e5 || Date.now() - (balanceAsked.get(source) ?? 0) < 6e4) continue;
+    balanceAsked.set(source, Date.now());
+    void call("provider:account", { source }).then((account) => {
+      if (!account || !state.snapshot?.catalog?.[source]) return;
+      state.snapshot.catalog[source].account = account;
+      const list = menu?.kind === "model" ? $2("#menu-list") : null;
+      if (list) list.innerHTML = modelListHtml();
+    }).catch(() => {
+    });
+  }
+}
+setInterval(() => {
+  if (menu?.kind !== "model") return;
+  const list = $2("#menu-list");
+  if (list && !state.menuSearch) list.innerHTML = modelListHtml();
+}, 6e4);
 function closeMenu() {
   menu = null;
   const el = $2("#popover");
@@ -20069,13 +20105,83 @@ function envMenuHtml() {
 }
 function sessionMenuHtml() {
   const s = session();
-  return `<button class="menu-item" id="menu-rename">${icon("edit", "mi-icon")}<span class="mi-main"><span class="mi-name">\u91CD\u547D\u540D</span></span></button><button class="menu-item" id="menu-reveal">${icon("folder", "mi-icon")}<span class="mi-main"><span class="mi-name">\u5728\u8D44\u6E90\u7BA1\u7406\u5668\u4E2D\u6253\u5F00\u6587\u4EF6\u5939</span></span></button><div class="menu-sep"></div><button class="menu-item danger" data-archive="${s?.id ?? ""}" ${busy(s) ? "disabled" : ""}>${icon("archive", "mi-icon")}<span class="mi-main"><span class="mi-name">\u5F52\u6863\u4F1A\u8BDD</span></span></button>`;
+  return `<button class="menu-item" id="menu-rename">${icon("edit", "mi-icon")}<span class="mi-main"><span class="mi-name">\u91CD\u547D\u540D</span></span></button><button class="menu-item" id="menu-reveal">${icon("folder", "mi-icon")}<span class="mi-main"><span class="mi-name">\u5728\u8D44\u6E90\u7BA1\u7406\u5668\u4E2D\u6253\u5F00\u6587\u4EF6\u5939</span></span></button><button class="menu-item" id="menu-feedback">${icon("download", "mi-icon")}<span class="mi-main"><span class="mi-name">\u5BFC\u51FA\u53CD\u9988\u2026</span><span class="mi-sub">\u6253\u5305\u8FD9\u4E2A\u4F1A\u8BDD\u7684\u62A5\u9519\u548C\u7EA0\u6B63\u8BB0\u5F55</span></span></button><div class="menu-sep"></div><button class="menu-item danger" data-archive="${s?.id ?? ""}" ${busy(s) ? "disabled" : ""}>${icon("archive", "mi-icon")}<span class="mi-main"><span class="mi-name">\u5F52\u6863\u4F1A\u8BDD</span></span></button>`;
 }
 var sourcePrefix = { qoder: "Q-", workbuddy: "W-" };
 var sourceName = (m) => `${sourcePrefix[m?.source] ?? ""}${m?.name ?? ""}`;
 var openGroups = /* @__PURE__ */ new Set();
+var factorText = (v2) => Number.isFinite(v2) ? `\xD7${Number(v2.toFixed(3))}` : "";
+function clockIn(timezone, now = /* @__PURE__ */ new Date()) {
+  try {
+    const parts = new Intl.DateTimeFormat("en-GB", { timeZone: timezone || "Asia/Shanghai", hour: "2-digit", minute: "2-digit", hour12: false }).formatToParts(now);
+    const h2 = Number(parts.find((p) => p.type === "hour")?.value) % 24, m = Number(parts.find((p) => p.type === "minute")?.value);
+    return h2 * 60 + m;
+  } catch {
+    return now.getHours() * 60 + now.getMinutes();
+  }
+}
+var minutesOf = (hhmm) => {
+  const m = /^(\d{1,2}):(\d{2})$/.exec(String(hhmm ?? ""));
+  return m ? Number(m[1]) * 60 + Number(m[2]) : null;
+};
+var WEEKDAY = { Sun: 0, Mon: 1, Tue: 2, Wed: 3, Thu: 4, Fri: 5, Sat: 6 };
+function dayIn(timezone, now = /* @__PURE__ */ new Date()) {
+  try {
+    return WEEKDAY[new Intl.DateTimeFormat("en-US", { timeZone: timezone || "Asia/Shanghai", weekday: "short" }).format(now)] ?? now.getDay();
+  } catch {
+    return now.getDay();
+  }
+}
+function peakActive(peak, now = /* @__PURE__ */ new Date()) {
+  if (!peak || !(peak.days ?? []).includes(dayIn(peak.timezone, now))) return false;
+  const t = clockIn(peak.timezone, now);
+  return (peak.ranges ?? []).some(([s, e]) => {
+    const a3 = minutesOf(s), b = minutesOf(e);
+    return a3 !== null && b !== null && t >= a3 && t < b;
+  });
+}
+var windowWord = (w2) => String(w2?.label || "\u4F4E\u5CF0").replace(/\s*[\d.]+\s*折\s*$/, "").trim() || "\u4F4E\u5CF0";
+function priceNow(pricing, now = /* @__PURE__ */ new Date()) {
+  if (!pricing) return null;
+  const until = pricing.freeUntil ? Date.parse(pricing.freeUntil) : NaN;
+  const free = pricing.free === true && (!Number.isFinite(until) || until > now.getTime());
+  const base = Number.isFinite(pricing.base) ? pricing.base : null;
+  let active = null, next = null;
+  for (const w2 of Array.isArray(pricing.windows) ? pricing.windows : []) {
+    const s = minutesOf(w2.start), e = minutesOf(w2.end);
+    if (s === null || e === null || !Number.isFinite(w2.factor)) continue;
+    const t = clockIn(w2.timezone, now), inside = s <= e ? t >= s && t < e : t >= s || t < e;
+    if (inside) {
+      if (!active || w2.factor < active.factor) active = w2;
+      continue;
+    }
+    const wait = (s - t + 1440) % 1440;
+    if (wait <= 180 && (!next || wait < next.wait)) next = { ...w2, wait };
+  }
+  const value = free ? 0 : base === null ? null : active ? base * active.factor : base;
+  return { free, base, value, active, next, until: free && Number.isFinite(until) ? until : null, peak: peakActive(pricing.peak, now) };
+}
+var windowText = (w2) => `${windowWord(w2)} ${w2.start}\u2013${w2.end}${w2.timezone && w2.timezone !== "Asia/Shanghai" ? `\uFF08${w2.timezone}\uFF09` : ""}\uFF0C${Number(((w2.factor ?? 1) * 10).toFixed(1))} \u6298`;
+function priceTag(m) {
+  const p = priceNow(m.pricing);
+  if (!p) return "";
+  const tip = ["\u79EF\u5206\u500D\u7387" + (Number.isFinite(p.base) ? ` ${factorText(p.base)}` : ""), m.pricing.original && m.pricing.original !== p.base ? `\u539F\u4EF7 ${factorText(m.pricing.original)}` : "", m.pricing.badge, ...(m.pricing.windows ?? []).map(windowText), m.pricing.peak?.note, p.until ? `\u9650\u514D\u81F3 ${new Date(p.until).toLocaleString("zh-CN", { month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit" })}` : ""].filter(Boolean).join("\n");
+  if (p.free) return `<span class="mi-tag price free" title="${esc5(tip)}">${m.pricing.limited || p.until ? "\u9650\u514D" : "\u514D\u8D39"}</span>`;
+  if (p.value === null) return "";
+  const peak = p.peak ? `<span class="mi-tag price peak" title="${esc5(m.pricing.peak?.note ?? "")}">${esc5(m.pricing.peak?.label || "\u9AD8\u5CF0")} \xD7${m.pricing.peak?.factor ?? 2}</span>` : "";
+  const original = Number.isFinite(m.pricing.original) && m.pricing.original !== p.value ? m.pricing.original : p.active ? p.base : null;
+  if (p.active) return `<span class="mi-tag price deal" title="${esc5(tip)}">${esc5(windowWord(p.active))} ${factorText(p.value)}<s>${factorText(original)}</s></span>${peak}`;
+  const soon = p.next ? `<span class="mi-tag price soon" title="${esc5(tip)}">${p.next.wait < 60 ? `${p.next.wait} \u5206\u949F\u540E` : `${p.next.start} \u8D77`}${esc5(windowWord(p.next))} ${factorText(p.base * p.next.factor)}</span>` : "";
+  return `<span class="mi-tag price${original ? " deal" : ""}" title="${esc5(tip)}">${factorText(p.value)}${original ? `<s>${factorText(original)}</s>` : ""}</span>${peak}${soon}`;
+}
+function balanceText(source) {
+  const a3 = state.snapshot?.catalog?.[source]?.account;
+  if (!a3 || !Number.isFinite(a3.balance)) return "";
+  const n = a3.balance >= 1e3 ? Math.round(a3.balance).toLocaleString("zh-CN") : Number(a3.balance.toFixed(1)).toString();
+  return `<span class="mg-balance" title="${esc5(`${a3.unit ?? "\u79EF\u5206"}\u4F59\u989D${a3.fetchedAt ? `\uFF0C${since(a3.fetchedAt)}\u66F4\u65B0` : ""}`)}">\u4F59\u989D ${esc5(n)}</span>`;
+}
 function modelItemHtml(m) {
-  return `<button class="menu-item model-item${m.key === state.modelKey ? " selected" : ""}" data-model-key="${esc5(m.key)}"><span class="mi-main"><span class="mi-name">${esc5(sourceName(m))}</span><span class="mi-sub mono">${esc5(m.id)}</span></span><span class="mi-tags">${m.reasoning.some((e) => e !== "none") ? '<span class="mi-tag">\u601D\u8003</span>' : ""}${m.contextMaximum ? `<span class="mi-tag">${compact(m.contextMaximum)}</span>` : ""}</span>${m.key === state.modelKey ? icon("check", "mi-check") : ""}</button>`;
+  return `<button class="menu-item model-item${m.key === state.modelKey ? " selected" : ""}" data-model-key="${esc5(m.key)}"><span class="mi-main"><span class="mi-name">${esc5(sourceName(m))}</span><span class="mi-sub mono">${esc5(m.id)}</span></span><span class="mi-tags">${priceTag(m)}${m.reasoning.some((e) => e !== "none") ? '<span class="mi-tag">\u601D\u8003</span>' : ""}${m.contextMaximum ? `<span class="mi-tag">${compact(m.contextMaximum)}</span>` : ""}</span>${m.key === state.modelKey ? icon("check", "mi-check") : ""}</button>`;
 }
 function modelListHtml() {
   const env = state.runtimeId, q2 = state.menuSearch.trim().toLowerCase();
@@ -20084,7 +20190,7 @@ function modelListHtml() {
     const list = all.filter((m) => !q2 || `${sourceName(m)} ${m.name} ${m.id}`.toLowerCase().includes(q2));
     if (!list.length) return "";
     const open2 = !!q2 || openGroups.has(source), chosen = all.find((m) => m.key === state.modelKey);
-    return `<div class="model-group${open2 ? " open" : ""}"><button class="model-group-head" data-model-group="${source}" aria-expanded="${open2}">${icon("chevronRight", "mg-caret")}<span class="mg-name">${esc5(sourceNames[source])}</span><span class="mg-count">${q2 ? `${list.length}/${all.length}` : all.length} \u4E2A</span>${chosen && !open2 ? `<span class="mg-chosen" title="\u5F53\u524D\u9009\u62E9">${icon("check")}${esc5(sourceName(chosen))}</span>` : ""}</button>${open2 ? `<div class="model-group-body">${list.map(modelItemHtml).join("")}</div>` : ""}</div>`;
+    return `<div class="model-group${open2 ? " open" : ""}"><button class="model-group-head" data-model-group="${source}" aria-expanded="${open2}">${icon("chevronRight", "mg-caret")}<span class="mg-name">${esc5(sourceNames[source])}</span><span class="mg-count">${q2 ? `${list.length}/${all.length}` : all.length} \u4E2A</span>${balanceText(source)}${chosen && !open2 ? `<span class="mg-chosen" title="\u5F53\u524D\u9009\u62E9">${icon("check")}${esc5(sourceName(chosen))}</span>` : ""}</button>${open2 ? `<div class="model-group-body">${list.map(modelItemHtml).join("")}</div>` : ""}</div>`;
   }).join("");
   const native = !gatewayOnly(env) && (!q2 || "\u539F\u751F native".includes(q2)) ? `<div class="menu-label">\u539F\u751F</div><button class="menu-item model-item${state.modelKey === "native" ? " selected" : ""}" data-model-key="native"><span class="mi-main"><span class="mi-name">\u539F\u751F\u6A21\u578B\u8BBE\u7F6E</span><span class="mi-sub">\u4F7F\u7528 ${esc5(runtime(env)?.name ?? "")} \u81EA\u5DF1\u7684\u6A21\u578B\u4E0E\u767B\u5F55</span></span>${state.modelKey === "native" ? icon("check", "mi-check") : ""}</button>` : "";
   return groups + native || `<div class="menu-empty">${models().length ? "\u6CA1\u6709\u5339\u914D\u7684\u6A21\u578B" : "\u8FD8\u6CA1\u6709\u6A21\u578B\u76EE\u5F55\u3002\u8BF7\u5230\u8BBE\u7F6E \u2192 \u6A21\u578B\u6E90\u4E0B\u8F7D\u7EC4\u4EF6\u5E76\u767B\u5F55\u3002"}</div>`;
@@ -20499,7 +20605,7 @@ function settingsBody(tab) {
     }).join("")}</tbody></table></div>` : '<div class="note">\u8FD8\u6CA1\u6709\u4FDD\u5B58\u7684\u642D\u914D\u3002</div>'}`;
   }
   if (tab === "shortcuts") return `<div class="settings-head"><h1>\u5FEB\u6377\u952E</h1></div><dl class="kv">${[["Ctrl + N", "\u65B0\u5EFA\u4F1A\u8BDD"], ["Enter", "\u53D1\u9001\u4EFB\u52A1"], ["Shift + Enter", "\u6362\u884C"], ["Ctrl + B", "\u6536\u8D77 / \u5C55\u5F00\u5DE6\u4FA7\u680F"], ["Ctrl + Alt + B", "\u6536\u8D77 / \u5C55\u5F00\u53F3\u4FA7\u9762\u677F"], ["Ctrl + J", "\u6253\u5F00\u4EFB\u52A1\u4E0E\u7EC8\u7AEF"], ["Ctrl + S", "\u4FDD\u5B58\u6B63\u5728\u7F16\u8F91\u7684\u6587\u4EF6"], ["Ctrl + ,", "\u6253\u5F00\u8BBE\u7F6E"], ["Esc", "\u5173\u95ED\u83DC\u5355\u6216\u8BBE\u7F6E"]].map(([k, v2]) => `<dt><kbd>${k}</kbd></dt><dd>${v2}</dd>`).join("")}</dl>`;
-  if (tab === "about") return `<div class="settings-head about"><div class="about-mark">${logo(48)}</div><h1>Bridge++</h1><p>\u628A\u4F60\u7684\u6A21\u578B\u6E90\u63A5\u5230\u719F\u6089\u7684\u539F\u751F Agent \u91CC\uFF0C\u5728\u4E00\u4E2A\u5DE5\u4F5C\u533A\u7BA1\u7406\u4F1A\u8BDD\u3001\u53D8\u66F4\u4E0E\u6587\u4EF6\u3002</p></div><dl class="kv"><dt>\u7248\u672C</dt><dd>${esc5(snap.app.version)}</dd><dt>\u5DE5\u4F5C\u533A\u6570\u636E</dt><dd class="mono">${esc5(snap.app.dataDir)}</dd><dt>\u5DE5\u4F5C\u6587\u4EF6\u5939</dt><dd>${snap.projects.length} \u4E2A</dd><dt>\u5DF2\u4FDD\u5B58\u4F1A\u8BDD</dt><dd>${snap.sessions.length} \u4E2A</dd></dl><div class="note">${icon("info")}<span>Qoder CN \u548C WorkBuddy \u7684 bridge \u5185\u7F6E\u5728 Bridge++ \u91CC\uFF1B\u8981\u8BA9\u5176\u4ED6 Agent \u4F7F\u7528\u8FD9\u4E24\u4E2A\u6A21\u578B\u6E90\uFF0C\u8BF7\u5230\u8BBE\u7F6E \u2192 \u5BF9\u5916\u63A5\u53E3\u3002</span></div>`;
+  if (tab === "about") return `<div class="settings-head about"><div class="about-mark">${logo(48)}</div><h1>Bridge++</h1><p>\u628A\u4F60\u7684\u6A21\u578B\u6E90\u63A5\u5230\u719F\u6089\u7684\u539F\u751F Agent \u91CC\uFF0C\u5728\u4E00\u4E2A\u5DE5\u4F5C\u533A\u7BA1\u7406\u4F1A\u8BDD\u3001\u53D8\u66F4\u4E0E\u6587\u4EF6\u3002</p></div><dl class="kv"><dt>\u7248\u672C</dt><dd>${esc5(snap.app.version)}</dd><dt>\u5DE5\u4F5C\u533A\u6570\u636E</dt><dd class="mono">${esc5(snap.app.dataDir)}</dd><dt>\u5DE5\u4F5C\u6587\u4EF6\u5939</dt><dd>${snap.projects.length} \u4E2A</dd><dt>\u5DF2\u4FDD\u5B58\u4F1A\u8BDD</dt><dd>${snap.sessions.length} \u4E2A</dd></dl>${updateSectionHtml(snap.updates)}<div class="note">${icon("info")}<span>Qoder CN \u548C WorkBuddy \u7684 bridge \u5185\u7F6E\u5728 Bridge++ \u91CC\uFF1B\u8981\u8BA9\u5176\u4ED6 Agent \u4F7F\u7528\u8FD9\u4E24\u4E2A\u6A21\u578B\u6E90\uFF0C\u8BF7\u5230\u8BBE\u7F6E \u2192 \u5BF9\u5916\u63A5\u53E3\u3002</span></div>`;
   return `<div class="settings-head"><h1>\u901A\u7528</h1><p>\u754C\u9762\u5916\u89C2\u4E0E\u5DE5\u4F5C\u533A\u4FE1\u606F\u3002</p></div>
     <h2>\u5916\u89C2</h2><div class="theme-grid">${[["system", "monitor", "\u8DDF\u968F\u7CFB\u7EDF"], ["light", "sun", "\u6D45\u8272"], ["dark", "moon", "\u6DF1\u8272"]].map(([id, ico, label]) => `<button class="theme-card${theme === id ? " active" : ""}" data-theme-choice="${id}"><span class="theme-preview ${id}"><i></i><i></i><i></i></span><span class="theme-label">${icon(ico)}${label}</span></button>`).join("")}</div>
     <h2>\u5DE5\u4F5C\u533A</h2><dl class="kv"><dt>\u6570\u636E\u76EE\u5F55</dt><dd class="mono">${esc5(snap.app.dataDir)}</dd><dt>\u5DE5\u4F5C\u6587\u4EF6\u5939</dt><dd>${snap.projects.length} \u4E2A</dd><dt>\u4F1A\u8BDD</dt><dd>${snap.sessions.filter((s) => !s.archived).length} \u4E2A\uFF08\u53E6\u6709 ${snap.sessions.filter((s) => s.archived).length} \u4E2A\u5DF2\u5F52\u6863\uFF09</dd><dt>\u7248\u672C</dt><dd>${esc5(snap.app.version)}</dd></dl>`;
@@ -20547,6 +20653,136 @@ function modal(title, body, confirm, { confirm: confirmText = "\u4FDD\u5B58", da
     await confirm();
     el.close();
   }));
+}
+var sizeText = (n) => !Number.isFinite(n) || n <= 0 ? "" : n >= 1073741824 ? `${(n / 1073741824).toFixed(2)} GB` : n >= 1048576 ? `${(n / 1048576).toFixed(1)} MB` : `${Math.max(1, Math.round(n / 1024))} KB`;
+var releaseDate = (iso) => {
+  const d = new Date(iso);
+  return Number.isNaN(d.getTime()) ? "" : `${d.getMonth() + 1} \u6708 ${d.getDate()} \u65E5`;
+};
+var percent = (d) => d.total ? Math.min(100, Math.floor(d.received / d.total * 100)) : 0;
+function updateSlotHtml(u) {
+  const d = u?.download ?? {}, v2 = u?.latest?.version;
+  if (d.status === "downloaded" && d.version) return `<div class="update-card ready"><span class="uc-icon">${icon("download")}</span><span class="uc-text"><b>\u6709\u65B0\u66F4\u65B0\u5F85\u5B89\u88C5</b><small>V${esc5(d.version)} \u5DF2\u4E0B\u8F7D</small></span><button class="btn primary sm" data-update="install">\u5B89\u88C5</button></div>`;
+  if (u?.status !== "available" || !v2) return "";
+  if (d.status === "downloading") return `<div class="update-card"><span class="uc-icon"><span class="spinner"></span></span><span class="uc-text"><b>\u6B63\u5728\u4E0B\u8F7D V${esc5(v2)}</b><small>${d.total ? `${percent(d)}% \xB7 ${sizeText(d.received) || "0 KB"} / ${sizeText(d.total)}` : "\u6B63\u5728\u8FDE\u63A5\u2026"}</small><span class="uc-bar"><i style="width:${percent(d)}%"></i></span></span><button class="icon-btn sm" data-update="cancel" title="\u53D6\u6D88\u4E0B\u8F7D">${icon("close")}</button></div>`;
+  const failed = d.status === "failed" && (!d.version || d.version === v2), asset = u.latest.asset;
+  const sub2 = failed ? `<small class="uc-error" title="${esc5(d.error ?? "")}">\u4E0B\u8F7D\u5931\u8D25${d.error ? `\uFF1A${esc5(d.error)}` : ""}</small>` : `<small>${asset ? esc5(sizeText(asset.size)) : "\u5230\u53D1\u5E03\u9875\u4E0B\u8F7D"}</small>`;
+  return `<div class="update-card"><span class="uc-icon">${icon("arrowUp")}</span><span class="uc-text"><b>\u6709\u65B0\u7248\u672C V${esc5(v2)}</b>${sub2}</span><button class="btn sm" data-update="${asset ? "download" : "page"}">${asset ? failed ? "\u91CD\u8BD5" : "\u4E0B\u8F7D" : "\u67E5\u770B"}</button></div>`;
+}
+function renderUpdateSlot() {
+  const el = $2("#update-slot");
+  if (!el) return;
+  const html2 = updateSlotHtml(state.snapshot?.updates);
+  if (el.innerHTML !== html2) el.innerHTML = html2;
+}
+function updateSectionHtml(u) {
+  if (!u) return "";
+  const d = u.download ?? {}, v2 = u.latest?.version;
+  const line = u.checking ? `<span class="spinner"></span><span>\u6B63\u5728\u68C0\u67E5\u66F4\u65B0\u2026</span>` : u.status === "error" ? `${icon("alert")}<span>\u68C0\u67E5\u5931\u8D25\uFF1A${esc5(u.error ?? "\u672A\u77E5\u539F\u56E0")}</span>` : u.status === "available" && v2 ? `${icon("arrowUp")}<span>\u6709\u65B0\u7248\u672C V${esc5(v2)}${u.latest.publishedAt ? `\uFF08${esc5(releaseDate(u.latest.publishedAt))}\u53D1\u5E03\uFF09` : ""}</span>${u.latest.url ? `<button class="link-btn" data-update="page">\u53D1\u5E03\u8BF4\u660E</button>` : ""}` : u.status === "latest" ? `${icon("check")}<span>\u5DF2\u662F\u6700\u65B0\u7248\u672C</span>` : `${icon("info")}<span>\u8FD8\u6CA1\u6709\u68C0\u67E5\u8FC7\u66F4\u65B0</span>`;
+  const download = d.status === "downloading" ? `<div class="update-line"><span class="spinner"></span><span>\u6B63\u5728\u4E0B\u8F7D V${esc5(d.version ?? v2 ?? "")}${d.total ? ` \xB7 ${percent(d)}%` : ""}</span><span class="uc-bar wide"><i style="width:${percent(d)}%"></i></span><button class="link-btn" data-update="cancel">\u53D6\u6D88</button></div>` : d.status === "downloaded" && d.version ? `<div class="update-line">${icon("download")}<span>V${esc5(d.version)} \u5DF2\u4E0B\u8F7D${u.latest?.version === d.version && !u.latest?.asset?.digest ? "\uFF08\u53D1\u5E03\u6CA1\u6709\u63D0\u4F9B SHA-256\uFF0C\u53EA\u6838\u5BF9\u4E86\u6587\u4EF6\u5927\u5C0F\uFF09" : ""}\u3002\u5B89\u88C5\u65F6\u4F1A\u5173\u95ED Bridge++\uFF0C\u6570\u636E\u548C\u8BBE\u7F6E\u90FD\u4F1A\u4FDD\u7559\u3002</span><button class="btn primary sm" data-update="install">\u5B89\u88C5</button></div>` : d.status === "failed" && d.error ? `<div class="update-line warn">${icon("alert")}<span>\u4E0B\u8F7D\u5931\u8D25\uFF1A${esc5(d.error)}</span>${u.latest?.asset ? `<button class="link-btn" data-update="download">\u91CD\u8BD5</button>` : ""}</div>` : u.status === "available" && u.latest?.asset ? `<div class="update-line"><button class="btn sm" data-update="download">${icon("download")}\u4E0B\u8F7D\u66F4\u65B0\u5305\uFF08${esc5(sizeText(u.latest.asset.size))}\uFF09</button></div>` : "";
+  return `<h2>\u66F4\u65B0</h2><div class="update-line">${line}</div>${download}
+    <div class="update-actions"><button class="btn sm" data-update="check" ${u.checking ? "disabled" : ""}>${icon("refresh")}\u68C0\u67E5\u66F4\u65B0</button><span class="muted">${u.checkedAt ? `\u4E0A\u6B21\u68C0\u67E5\uFF1A${esc5(since(u.checkedAt))}` : "\u6BCF\u5929\u7B2C\u4E00\u6B21\u542F\u52A8\u65F6\u81EA\u52A8\u68C0\u67E5"}</span></div>
+    <label class="update-auto"><input type="checkbox" data-update-auto ${u.autoDownload ? "checked" : ""}><span><b>\u81EA\u52A8\u4E0B\u8F7D\u66F4\u65B0\u5305</b><small>\u6709\u65B0\u7248\u672C\u65F6\u5728\u540E\u53F0\u4E0B\u8F7D\uFF0C\u4E0B\u8F7D\u5B8C\u5728\u5DE6\u4E0B\u89D2\u63D0\u793A\u5B89\u88C5</small></span></label>`;
+}
+async function installUpdate(force) {
+  try {
+    await call("update:install", { force });
+  } catch (error) {
+    if (error.code !== "sessions_running" || force) throw error;
+    setTimeout(() => modal("\u5B89\u88C5\u66F4\u65B0", `<p>${esc5(error.message)}\u3002</p><p>\u4ECD\u8981\u73B0\u5728\u5B89\u88C5\u5417\uFF1F</p>`, () => installUpdate(true), { confirm: "\u4E2D\u65AD\u4EFB\u52A1\u5E76\u5B89\u88C5", danger: true }), 0);
+  }
+}
+async function updateAction(kind) {
+  const u = state.snapshot?.updates;
+  if (kind === "page") {
+    if (u?.latest?.url) await call("link:open", { url: u.latest.url });
+    return;
+  }
+  if (kind === "install") {
+    modal("\u5B89\u88C5\u66F4\u65B0", `<p>\u5C06\u5173\u95ED Bridge++ \u5E76\u8FD0\u884C V${esc5(u?.download?.version ?? "")} \u7684\u5B89\u88C5\u7A0B\u5E8F\u3002\u6570\u636E\u548C\u8BBE\u7F6E\u90FD\u4F1A\u4FDD\u7559\uFF0C\u88C5\u597D\u540E\u81EA\u52A8\u6253\u5F00\u3002</p><p class="q-note">\u5BF9\u5916\u63A5\u53E3\u4F1A\u5728\u5B89\u88C5\u65F6\u6682\u505C\uFF0C\u88C5\u5B8C\u81EA\u52A8\u6062\u590D\u3002</p>`, () => installUpdate(false), { confirm: "\u5173\u95ED\u5E76\u5B89\u88C5" });
+    return;
+  }
+  if (kind === "check") {
+    if (u) {
+      u.checking = true;
+      refreshSettingsLive();
+    }
+    let r;
+    try {
+      r = await call("update:check");
+    } finally {
+      if (u) u.checking = false;
+    }
+    if (state.snapshot) state.snapshot.updates = r;
+    toast(r.status === "available" ? `\u6709\u65B0\u7248\u672C V${r.latest?.version}` : r.status === "latest" ? "\u5DF2\u662F\u6700\u65B0\u7248\u672C" : `\u68C0\u67E5\u5931\u8D25\uFF1A${r.error ?? "\u672A\u77E5\u539F\u56E0"}`, r.status === "error");
+  } else if (kind === "download" || kind === "cancel") {
+    const r = await call(`update:${kind}`);
+    if (state.snapshot) state.snapshot.updates = r;
+  }
+  renderUpdateSlot();
+  refreshSettingsLive();
+}
+var FEEDBACK_KINDS = {
+  upstream: "\u4E0A\u6E38\u62A5\u9519",
+  bridge: "\u6865/\u7F51\u5173\u62A5\u9519",
+  runtime: "\u8FD0\u884C\u73AF\u5883\u62A5\u9519",
+  rate_limit: "\u9650\u901F",
+  timeout: "\u8D85\u65F6",
+  retry: "\u81EA\u52A8\u91CD\u8BD5",
+  tool_recovery: "\u5DE5\u5177\u8C03\u7528\u7EA0\u6B63",
+  runtime_rebuild: "\u8FD0\u884C\u65F6\u91CD\u5EFA",
+  late_followup: "\u8FDF\u5230\u7684\u7ED3\u679C",
+  protocol_filter: "\u534F\u8BAE\u6B8B\u7559\u8FC7\u6EE4",
+  json_fallback: "\u9000\u56DE JSON \u8DEF\u5F84",
+  context_compaction: "\u4E0A\u4E0B\u6587\u538B\u7F29",
+  stop: "\u4F60\u505C\u6B62\u4E86\u4EFB\u52A1",
+  steer: "\u8FD0\u884C\u4E2D\u63D2\u8BDD",
+  approval_denied: "\u62D2\u7EDD\u6388\u6743",
+  follow_up_message: "\u62A5\u9519\u540E\u8FFD\u95EE",
+  rebind: "\u6362\u6A21\u578B\u6216\u53C2\u6570"
+};
+function feedbackSummaryHtml(p) {
+  const chips = (group) => Object.entries(group?.byKind ?? {}).filter(([, n]) => n).map(([k, n]) => `<span class="fb-chip">${esc5(FEEDBACK_KINDS[k] ?? k)} ${n}</span>`).join("");
+  const all = chips(p.errors) + chips(p.corrections);
+  return `<div class="fb-counts"><span><b>${p.turns ?? 0}</b> \u8F6E</span><span><b>${p.errors?.total ?? 0}</b> \u5904\u62A5\u9519</span><span><b>${p.corrections?.total ?? 0}</b> \u6B21\u7EA0\u6B63</span><span class="muted">\u7EA6 ${esc5(sizeText(p.bytes) || "1 KB")}${p.truncated ? "\uFF0C\u6700\u65E9\u7684\u8BB0\u5F55\u5DF2\u622A\u65AD" : ""}</span></div>${all ? `<div class="fb-chips">${all}</div>` : ""}`;
+}
+async function openFeedback() {
+  const s = session();
+  if (!s) return;
+  const opts = { includeConversation: false, includeTools: false };
+  modal("\u5BFC\u51FA\u53CD\u9988", `<p>\u628A\u8FD9\u4E2A\u4F1A\u8BDD\u7684\u62A5\u9519\u3001\u81EA\u52A8\u7EA0\u6B63\u548C\u4F60\u7684\u64CD\u4F5C\uFF08\u505C\u6B62\u3001\u63D2\u8BDD\u3001\u62D2\u7EDD\u6388\u6743\u3001\u6362\u6A21\u578B\uFF09\u6253\u5305\u6210\u4E00\u4E2A zip\uFF0C\u53D1\u7ED9\u5F00\u53D1\u8005\u5C31\u80FD\u5B9A\u4F4D\u95EE\u9898\u3002</p>
+    <div class="fb-summary" id="fb-summary"><div class="fb-loading"><span class="spinner"></span><span>\u6B63\u5728\u7EDF\u8BA1\u2026</span></div></div>
+    <label class="q-option"><input type="checkbox" id="fb-conversation"><span class="fb-opt"><b>\u5305\u542B\u5BF9\u8BDD\u5185\u5BB9</b><small>\u4F60\u53D1\u7684\u6D88\u606F\u548C\u6A21\u578B\u7684\u56DE\u590D\uFF0C\u4E0D\u542B\u601D\u8003\u8FC7\u7A0B</small></span></label>
+    <label class="q-option"><input type="checkbox" id="fb-tools"><span class="fb-opt"><b>\u5305\u542B\u5DE5\u5177\u53C2\u6570\u548C\u8F93\u51FA</b><small>\u547D\u4EE4\u3001\u6587\u4EF6\u6539\u52A8\u548C\u5DE5\u5177\u7ED3\u679C\uFF0C\u6BCF\u9879\u6700\u591A 2000 \u5B57</small></span></label>
+    <label for="fb-note">\u95EE\u9898\u63CF\u8FF0\uFF08\u53EF\u9009\uFF09</label><textarea id="fb-note" rows="4" maxlength="4000" placeholder="\u53D1\u751F\u4E86\u4EC0\u4E48\u3001\u4F60\u671F\u671B\u7684\u7ED3\u679C\u3001\u600E\u4E48\u590D\u73B0"></textarea>
+    <p class="q-note">\u5BC6\u94A5\u3001\u7528\u6237\u76EE\u5F55\u3001\u9879\u76EE\u548C\u6570\u636E\u76EE\u5F55\u7684\u8DEF\u5F84\u3001\u90AE\u7BB1\u548C\u624B\u673A\u53F7\u4F1A\u88AB\u66FF\u6362\uFF1B\u5BF9\u8BDD\u548C\u5DE5\u5177\u8F93\u51FA\u91CC\u7684\u5176\u4ED6\u5185\u5BB9\u539F\u6837\u4FDD\u7559\u3002\u6587\u4EF6\u53EA\u4FDD\u5B58\u5728\u4F60\u7684\u7535\u8111\u4E0A\uFF0C\u4E0D\u4F1A\u4E0A\u4F20\u3002</p>`, async () => {
+    const r = await call("feedback:export", { sessionId: s.id, ...opts, note: $2("#fb-note")?.value ?? "" });
+    if (!r) return;
+    toast(`\u53CD\u9988\u5DF2\u5BFC\u51FA\uFF1A${r.path.split(/[\\/]/).pop()}`);
+    void call("feedback:reveal", { path: r.path }).catch(() => {
+    });
+  }, { confirm: "\u5BFC\u51FA\u2026" });
+  let seq = 0;
+  const paint = async () => {
+    const mine = ++seq, el = () => mine === seq ? $2("#fb-summary") : null;
+    try {
+      const p = await call("feedback:preview", { sessionId: s.id, ...opts });
+      const box = el();
+      if (box) box.innerHTML = feedbackSummaryHtml(p);
+    } catch (e) {
+      const box = el();
+      if (box) box.innerHTML = `<div class="fb-loading">${icon("alert")}<span>${esc5(e.message)}</span></div>`;
+    }
+  };
+  bind("#fb-conversation", "change", (e) => {
+    opts.includeConversation = e.target.checked;
+    void paint();
+  });
+  bind("#fb-tools", "change", (e) => {
+    opts.includeTools = e.target.checked;
+    void paint();
+  });
+  await paint();
 }
 function openGuide() {
   const el = $2("#modal");
@@ -21044,6 +21280,10 @@ document.addEventListener("click", (e) => {
     openSettings(el.dataset.openSettings);
     return;
   }
+  if (el = hit("[data-update]")) {
+    void action(() => updateAction(el.dataset.update));
+    return;
+  }
   if (el = hit("[data-source-install]")) {
     void action(() => call("source:install", { id: el.dataset.sourceInstall }));
     return;
@@ -21232,7 +21472,19 @@ document.addEventListener("click", (e) => {
     return;
   }
   if (el = hit("[data-approval]")) {
-    void action(() => call("session:approve", { sessionId: state.sessionId, approvalId: el.dataset.approval, choice: el.dataset.choice }));
+    const sessionId = state.sessionId, card = el.closest(".approval-card");
+    card?.querySelectorAll("button").forEach((b) => {
+      b.disabled = true;
+    });
+    void call("session:approve", { sessionId, approvalId: el.dataset.approval, choice: el.dataset.choice }).catch(async (error) => {
+      if (/已结束或已过期/.test(error.message)) toast("\u8FD9\u6761\u6388\u6743\u5DF2\u7ECF\u7ED3\u675F\uFF1A\u4EFB\u52A1\u5DF2\u505C\u6B62\u6216\u8FD9\u4E00\u8F6E\u5DF2\u7ECF\u7ED3\u675F\u3002");
+      else {
+        card?.querySelectorAll("button").forEach((b) => {
+          b.disabled = false;
+        });
+        toast(error.message, true);
+      }
+    });
     return;
   }
   if (hit("[data-approval-native]")) {
@@ -21372,6 +21624,10 @@ document.addEventListener("click", (e) => {
     case "menu-rename":
       closeMenu();
       renameSession();
+      break;
+    case "menu-feedback":
+      closeMenu();
+      void action(openFeedback);
       break;
     case "menu-reveal":
       closeMenu();
@@ -21648,6 +21904,17 @@ document.addEventListener("change", (e) => {
     void action(() => serviceCall("bridgeService:configure", { id, defaultProfile: t.value }));
     return;
   }
+  if (t.matches?.("[data-update-auto]")) {
+    const enabled = t.checked;
+    void action(async () => {
+      await call("update:auto-download", { enabled });
+      toast(enabled ? "\u5DF2\u5F00\u542F\u81EA\u52A8\u4E0B\u8F7D\u66F4\u65B0\u5305" : "\u5DF2\u5173\u95ED\u81EA\u52A8\u4E0B\u8F7D\u66F4\u65B0\u5305");
+      await snapshot();
+      refreshSettingsLive();
+      renderUpdateSlot();
+    });
+    return;
+  }
   if (t.matches?.("[data-svc-autostart]")) {
     const id = t.dataset.svcAutostart, enabled = t.checked;
     void action(async () => {
@@ -21707,6 +21974,22 @@ window.workbench.onChange(() => {
   refreshTimer = setTimeout(() => void refreshFromBackend(), 70);
 });
 window.workbench.onEvent((event) => {
+  if (event.type === "update-progress") {
+    const d = state.snapshot?.updates?.download;
+    if (d && d.status === "downloading" && (!d.version || d.version === event.version)) {
+      d.received = event.received;
+      d.total = event.total;
+      renderUpdateSlot();
+      if (state.settings === "about") refreshSettingsLive();
+    }
+    return;
+  }
+  if (event.type === "catalog-diff") {
+    const name = sourceNames[event.source] ?? event.source, list = (a3) => a3.slice(0, 4).join("\u3001") + (a3.length > 4 ? ` \u7B49 ${a3.length} \u4E2A` : "");
+    const parts = [event.added?.length ? `\u65B0\u589E ${list(event.added)}` : "", event.removed?.length ? `\u4E0B\u67B6 ${list(event.removed)}` : ""].filter(Boolean);
+    if (parts.length) toast(`${name} \u6A21\u578B\u76EE\u5F55\u5DF2\u66F4\u65B0\uFF1A${parts.join("\uFF1B")}`);
+    return;
+  }
   if (event.type === "source-job") {
     const component = state.snapshot?.sourceComponents?.find((x2) => x2.id === event.id);
     if (component) component.job = { action: event.action, state: event.state, received: event.received, total: event.total, message: event.message };

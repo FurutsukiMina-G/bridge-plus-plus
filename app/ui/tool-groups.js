@@ -12,8 +12,9 @@ export function toolFailed(end){
 export const toolStatus=(t,running)=>t.end?toolFailed(t.end)?'failed':'done':running?'running':'stopped';
 
 /**
- * Blocks marked `work` are tool calls ({tool}) or thinking ({thinking}); any other block ends a run,
- * so the answer, approvals and errors always stay in view. A run with enough tool calls becomes {fold:[…]}.
+ * Blocks marked `work` are tool calls ({tool}), thinking ({thinking}), granted approvals ({approval}) or
+ * calls the automatic review allowed ({review}); any other block ends a run, so the answer, pending or
+ * rejected approvals and errors always stay in view. A run with enough tool calls becomes {fold:[…]}.
  */
 export function foldRuns(blocks){
   const out=[];let run=[];
@@ -42,7 +43,9 @@ export function foldSummary(run,running){
   const counts=new Map();
   for(const t of tools){const kind=toolActivity(t.start??t.end).short;counts.set(kind,(counts.get(kind)??0)+1);}
   const parts=[...counts].sort((a,b)=>b[1]-a[1]).map(([kind,n])=>`${kind} ${n}`);
-  if(run.length>tools.length)parts.push(`思考 ${run.length-tools.length} 段`);
+  const count=kind=>run.filter(b=>b.work[kind]).length,thinking=count('thinking'),approved=count('approval')+count('review');
+  if(thinking)parts.push(`思考 ${thinking} 段`);
+  if(approved)parts.push(`已授权 ${approved} 次`);
   if(failed)parts.unshift(`${failed} 个失败`);
   return{status,title,detail:parts.join(' · ')};
 }

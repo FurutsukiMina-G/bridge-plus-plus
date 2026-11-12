@@ -62,7 +62,7 @@ async function* turn({text='',calls=[],id='native-session',servers=[{name:'host'
 async function fixture(t,steps,cfg={}){
   const runtime=await mkdtemp(join(tmpdir(),'wb-native-'));const seen=[];
   const run=async function*(input){const index=seen.length;seen.push({options:input.options,prompt:await promptText(input.prompt)});yield* turn(typeof steps==='function'?steps(index,seen[index]):steps[index]);};
-  const transport=new SdkTransport({runtime,cliPath:process.execPath,toolMode:'native',...cfg},{get:async()=>credential},{run});
+  const transport=new SdkTransport({runtime,cliPath:process.execPath,toolMode:'replay',...cfg},{get:async()=>credential},{run});
   t.after(async()=>{await transport.close();await rm(runtime,{recursive:true,force:true});});return {transport,seen};
 }
 async function collect(transport,request=body){
@@ -85,7 +85,7 @@ test('native host calls keep runtime IDs, validate schemas and deliver the held 
   const {result,contents,metrics}=await collect(transport);const message=result.choices[0].message;
   assert.deepEqual(message.tool_calls.map(c=>[c.id,c.function.name,JSON.parse(c.function.arguments)]),[['call_00_A','read',{file_path:'a.ts'}],['call_00_B','read',{file_path:'b.ts',limit:20}]]);
   assert.equal(message.content,'我先读取两个文件。');assert.deepEqual(contents,['我先读取两个文件。']);assert.equal(result.choices[0].finish_reason,'tool_calls');
-  assert.equal(seen.length,1);assert.equal(metrics.toolMode,'native');assert.equal(transport.metrics.hostCalls,2);assert.equal(result.usage.bridge_decision_format,'native');
+  assert.equal(seen.length,1);assert.equal(metrics.toolMode,'replay');assert.equal(transport.metrics.hostCalls,2);assert.equal(result.usage.bridge_decision_format,'native');
   const options=seen[0].options;assert.equal(options.mcpServers.host.type,'sdk');assert.match(options.systemPrompt.append,/mcp__host__/);
   assert.equal((await options.hooks.PreToolUse[0].hooks[0]({})).hookSpecificOutput.permissionDecisionReason,FORWARDED);
   for(const text of [options.systemPrompt.append,NATIVE_INSTRUCTIONS,FORWARDED,NATIVE_BATCH_RULES,seen[0].prompt,nativeInput(body),DECISION_INSTRUCTIONS,decisionInput(body)])
@@ -129,15 +129,16 @@ test('native parallel echo preserves call order and the result IDs that follow i
   assert.deepEqual(input.messages[0].host_received_calls,[{id:'call_00_P',name:'read',received_input:{file_path:'a.ts'}},{id:'call_01_Q',name:'write',received_input:{file_path:'b.ts',content:'B'}}]);
   assert.deepEqual(input.messages.slice(1).map(m=>[m.tool_call_id,m.content]),[['call_00_P','RESULT_A'],['call_01_Q','RESULT_B']]);
 });
-test('native echo truncates long string values and reduces later calls at the total limit',async t=>{
-  const calls=Array.from({length:6},(_,i)=>({id:`call_long_${i}`,name:'write',input:{file_path:String(i)+'p'.repeat(700),content:String(i)+'x'.repeat(1400)}}));
-  const {transport,seen}=await fixture(t,[{calls},{text:'长参数回显检查完毕。'}]);const first=await collect(transport),message=first.result.choices[0].message;
-  const results=calls.map(call=>({role:'tool',tool_call_id:call.id,content:'OK'}));
-  const second=await collect(transport,{...body,messages:[...body.messages,message,...results]});
-  const echo=JSON.parse(seen[1].prompt.split('\n')[0]).messages[0],received=echo.host_received_calls;
-  assert.equal(received.length,6);assert.equal(received[0].received_input.content,('0'+'x'.repeat(1400)).slice(0,600)+'…(shortened here; the host received all 1401 characters)');
-  assert.match(received[0].received_input.file_path,/the host received all 701 characters/);assert.deepEqual(received.at(-1),{id:'call_long_5',name:'write'});
-  assert.ok(JSON.stringify(echo).length<=6000);assert.deepEqual(second.metrics.nativeEcho,{calls:6,characters:JSON.stringify(echo).length,truncated:true});
+test('replay echo segments complete arguments without truncating later calls',async t=>{
+  const content='中文 😀 " \\ '.repeat(3000);
+  const calls=Array.from({length:8},(_,i)=>({id:'call_'+i,name:'write',input:{file_path:'f'+i,content}}));
+  const {transport,seen}=await fixture(t,[{calls},{text:'done'}]);
+  const first=await collect(transport);const message=first.result.choices[0].message;
+  const next=await collect(transport,{...body,messages:[...body.messages,message,...message.tool_calls.map(c=>({role:'tool',tool_call_id:c.id,content:'OK'}))]});
+  const echoes=JSON.parse(seen[1].prompt.split('\n\n')[0]).messages.filter(m=>m.host_received_calls_json_chunk);
+  assert.ok(echoes.length>1);const recovered=JSON.parse(echoes.map(m=>m.host_received_calls_json_chunk.data).join(''));
+  assert.deepEqual(recovered.map(c=>c.received_input),calls.map(c=>c.input));assert.deepEqual(recovered.map(c=>c.id),calls.map(c=>c.id));
+  assert.equal(next.metrics.nativeEcho.truncated,false);assert.equal(next.metrics.nativeEcho.segments,echoes.length);
 });
 test('new, replayed and reset native requests do not add an echo',async t=>{
   const {transport,seen}=await fixture(t,[{calls:[{id:'call_00_A',name:'read',input:{file_path:'a.ts'}}]},{text:'继续完成。'},{text:'新会话完成。'}]);
@@ -329,7 +330,7 @@ test('repeated empty native stops fail clearly after one correction and identica
   assert.deepEqual(metrics.attempts[0].observation.deniedTools,[]);assert.equal(metrics.attempts[0].observation.deniedToolCount,0);
   const event=raw.split('\n').filter(s=>s.startsWith('{')).map(s=>JSON.parse(s)).find(e=>e.bridge_usage);
   assert.equal(event.bridge_usage.correction_calls,1);assert.equal(event.bridge_usage.accounting.attempts,2);
-  const replay=await collect(transport);assert.equal(seen.length,2);assert.match(replay.raw,/local-rejection-replay/);
+  const replay=await collect(transport);assert.equal(seen.length,2);assert.equal(replay.metrics.localReplayReason,'local-rejection-replay');assert.doesNotMatch(replay.raw,/"usage":\{/);
 });
 
 test('thinking without calls cannot hide transport, authentication, mixed-stop or unexpected turn-limit errors',async t=>{
@@ -415,4 +416,12 @@ test('JSON mode fails a runtime built-in tool call immediately without a correct
   const {transport,seen}=await fixture(t,[{calls:[{id:'r',name:'Read',input:{file_path:'x'}}],servers:[]}],{toolMode:'json'});
   const {raw}=await collect(transport);
   assert.equal(seen.length,1);assert.match(raw,/native_tool_blocked/);assert.ok(!raw.includes('[DONE]'));
+});
+
+test('replay reconciles a missing host result with an explicit error receipt',async t=>{
+ const calls=[{id:'result_a',name:'read',input:{file_path:'a.ts'}},{id:'result_b',name:'read',input:{file_path:'b.ts'}}];
+ const {transport,seen}=await fixture(t,[{calls},{text:'done'}]);const first=await collect(transport),message=first.result.choices[0].message;
+ await collect(transport,{...body,messages:[...body.messages,message,{role:'tool',tool_call_id:'result_a',content:'A'}]});
+ const messages=JSON.parse(seen[1].prompt.split('\n')[0]).messages;
+ assert.ok(messages.some(m=>m.role==='tool'&&m.tool_call_id==='result_b'&&m.content==='[tool error] The host returned no result for this call.'));
 });

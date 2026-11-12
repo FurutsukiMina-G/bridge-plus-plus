@@ -19,23 +19,23 @@ async function fixture(t,runtimeId,sessionId){
   return {endpoint,events,variant};
 }
 
-test('chat route marks only requests without tool declarations as auxiliary usage',async t=>{
+test('chat route states the declared tool count and marks a request without tools as auxiliary',async t=>{
   const f=await fixture(t,'codex','session-chat');
   const post=extra=>fetch(f.endpoint.baseURL+'/chat/completions',{method:'POST',headers:{authorization:'Bearer '+f.endpoint.key,'content-type':'application/json'},body:JSON.stringify({model:f.variant.id,stream:true,messages:[{role:'user',content:'agent turn'}],...extra})}).then(response=>response.text());
   await post({tools:chatTools});await post({});
   const usage=f.events.filter(event=>event.type==='usage'&&event.scope==='request');
   assert.equal(usage.length,2);
-  assert.equal(usage[0].data.auxiliary,undefined);
-  assert.equal(usage[1].data.auxiliary,true);
+  assert.deepEqual({auxiliary:usage[0].data.auxiliary,tools_count:usage[0].data.tools_count},{auxiliary:false,tools_count:1});
+  assert.deepEqual({auxiliary:usage[1].data.auxiliary,tools_count:usage[1].data.tools_count},{auxiliary:true,tools_count:0});
   assert.equal(usage[1].data.prompt_tokens,30);
 });
 
-test('claude route marks only Anthropic requests without tools as auxiliary usage',async t=>{
+test('claude route states the declared tool count and marks a request without tools as auxiliary',async t=>{
   const f=await fixture(t,'claude','session-claude');
   const post=extra=>fetch(f.endpoint.baseURL+'/messages',{method:'POST',headers:{authorization:'Bearer '+f.endpoint.key,'content-type':'application/json'},body:JSON.stringify({model:f.variant.id,max_tokens:64,stream:true,messages:[{role:'user',content:'agent turn'}],...extra})}).then(response=>response.text());
   await post({tools:anthropicTools});await post({});
   const usage=f.events.filter(event=>event.type==='usage'&&event.scope==='request');
   assert.equal(usage.length,2);
-  assert.equal(usage[0].data.auxiliary,undefined);
-  assert.equal(usage[1].data.auxiliary,true);
+  assert.deepEqual({auxiliary:usage[0].data.auxiliary,tools_count:usage[0].data.tools_count},{auxiliary:false,tools_count:1});
+  assert.deepEqual({auxiliary:usage[1].data.auxiliary,tools_count:usage[1].data.tools_count},{auxiliary:true,tools_count:0});
 });

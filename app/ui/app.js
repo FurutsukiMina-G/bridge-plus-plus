@@ -49,7 +49,7 @@ function loadUi(){
 function saveUi(){try{localStorage.setItem('bridgepp.ui',JSON.stringify(ui));}catch{}}
 async function call(method,args={}){
   const result=await window.workbench.call(method,args);
-  if(!result.ok)throw new Error(result.error);
+  if(!result.ok){const error=new Error(result.error);if(result.code)error.code=result.code;throw error;}
   return result.value;
 }
 function toast(text,error=false){
@@ -261,6 +261,7 @@ function renderSidebarFrame(){
     <label class="sidebar-search">${icon('search')}<input id="session-search" placeholder="搜索会话" autocomplete="off" spellcheck="false"></label>
     <div class="section-head"><span>工作文件夹</span><button class="icon-btn sm" id="add-project" title="打开文件夹">${icon('folderPlus')}</button></div>
     <nav id="folders" class="folders"></nav>
+    <div id="update-slot" class="update-slot"></div>
     <div class="sidebar-bottom"><button class="settings-entry" id="open-settings" title="设置 (Ctrl+,)">${icon('settings')}<span>设置</span></button><span class="version" id="app-version"></span></div>`;
   bind('#session-search','input',e=>{state.sessionSearch=e.target.value;renderFolders();});
 }
@@ -274,6 +275,7 @@ function renderFolders(){
   const snap=state.snapshot,query=state.sessionSearch.trim().toLowerCase(),el=$('#folders');
   if(!snap||!el)return;
   $('#app-version').textContent=`v${snap.app.version}`;
+  renderUpdateSlot();
   if(!snap.projects.length){
     el.innerHTML=`<div class="folders-empty">${icon('folder')}<p>打开一个本机文件夹，会话会按文件夹整理在这里。</p><button class="btn sm" id="empty-add-project">${icon('folderPlus')}打开文件夹</button></div>`;
     return;
@@ -765,6 +767,12 @@ function approvalSummary(e){
   // Claude Code's requests carry the tool input as-is: a plan to approve (ExitPlanMode), a URL (WebFetch), then its own one-line description.
   return[d.toolCall?.title,command,d.reason,v.command&&(Array.isArray(v.command)?v.command.join(' '):v.command),v.file_path??v.path,v.plan,v.url,d.grantRoot,d.description].find(x=>typeof x==='string'&&x.trim())??'';
 }
+/** Bridge++'s own reviewer (Claude Code "自动审查") passes its verdict along when it leaves the call to the user. */
+const REVIEW_RISK={low:'低风险',medium:'中等风险',high:'高风险'};
+function reviewNote(review){
+  if(!review?.reason)return'';
+  return`<div class="approval-review ${esc(review.risk??'')}">${icon('shield')}<span>自动审查${review.risk&&REVIEW_RISK[review.risk]?`（${REVIEW_RISK[review.risk]}）`:''}：${esc(review.reason)}</span></div>`;
+}
 function approvalBlock(e,resolved){
   const done=resolved.get(e.approvalId);
   if(done!==undefined)return`<div class="approval-done ${done==='reject'||done==='reject-session'?'rejected':''}">${icon(done==='expired'?'clock':done?.startsWith?.('reject')?'close':'check')}<span>${e.type==='question'?'问题':'授权'}${esc(resolvedLabels[done]??'已处理')}</span><span class="muted">${esc(e.name??'')}</span></div>`;
@@ -773,7 +781,7 @@ function approvalBlock(e,resolved){
   if(choices.includes('native'))buttons='<button class="btn primary sm" data-approval-native="true">在完整工具界面处理</button>';
   else if(e.type==='question')buttons=`<button class="btn primary sm" data-question="${esc(e.approvalId)}">回答</button><button class="btn sm danger" data-approval="${esc(e.approvalId)}" data-choice="reject">不回答</button>${hasNativeUi(session()?.runtimeId)?'<button class="btn sm" data-approval-native="true">在原生界面处理</button>':''}`;
   else buttons=choices.filter(c=>choiceLabels[c]).map(c=>`<button class="btn sm${c==='approve'?' primary':c.startsWith('reject')?' danger':''}" data-approval="${esc(e.approvalId)}" data-choice="${esc(c)}">${choiceLabels[c]}</button>`).join('');
-  return`<div class="approval-card"><div class="approval-head">${icon(e.type==='question'?'info':'key')}<b>${e.type==='question'?'Agent 需要你补充信息':'Agent 请求授权'}</b>${e.name?`<span class="muted">${esc(e.name)}</span>`:''}</div>${summary?`<div class="approval-summary">${esc(summary)}</div>`:''}<details class="approval-details" data-expand="approval-${esc(e.approvalId)}"><summary>详细参数</summary><pre>${esc(clip(pretty(e.data)))}</pre></details><div class="approval-actions">${buttons}</div></div>`;
+  return`<div class="approval-card"><div class="approval-head">${icon(e.type==='question'?'info':'key')}<b>${e.type==='question'?'Agent 需要你补充信息':'Agent 请求授权'}</b>${e.name?`<span class="muted">${esc(e.name)}</span>`:''}</div>${summary?`<div class="approval-summary">${esc(summary)}</div>`:''}${reviewNote(e.data?.review)}<details class="approval-details" data-expand="approval-${esc(e.approvalId)}"><summary>详细参数</summary><pre>${esc(clip(pretty(e.data)))}</pre></details><div class="approval-actions">${buttons}</div></div>`;
 }
 /** `live` is true only for the newest plan of the turn that is running now: an item stays "in
  * progress" in the record after a turn stops, but nothing is working on it any more. */
@@ -853,7 +861,12 @@ function renderChat(quiet=false){
     }else if(e.type==='subagent')add(`subagent:${e.id}`,miscBlock(e,'bot','子代理'));
     else if(e.type==='plan')add(`plan:${e.id}`,planBlock(e,e.id===livePlan));
     else if(e.type==='diff'){if(lastDiff.get(e.turnId??'none')===e)add(`diff:${e.turnId??e.id}`,diffBlock(e));}
+    // An approval that was granted is part of the work it allowed: it folds with the tool calls around it.
+    // Pending, rejected and expired ones, and every question, stay in view and end a run.
+    else if(e.type==='approval'&&['approve','approve-session'].includes(resolved.get(e.approvalId)))add(`approval:${e.approvalId??e.id}`,()=>approvalBlock(e,resolved),{approval:true});
     else if(e.type==='approval'||e.type==='question')add(`approval:${e.approvalId??e.id}`,approvalBlock(e,resolved));
+    // Calls the automatic review let through read like granted approvals; a refusal stays in view.
+    else if(e.type==='notice'&&e.source==='auto-review'&&/^自动审查已允许/.test(e.text??''))add(`note:${e.id}`,()=>`<div class="event-note notice quiet" title="${esc(e.text)}">${icon('shield')}<span>${esc(e.text)}</span></div>`,{review:true});
     else if(e.type==='error'||e.type==='notice'){
       if(e.type==='error'&&upstreamSaid.has(`${e.turnId}\u0000${e.text}`))continue;
       // Bridge wait/retry lines are live status; only retries stay in the transcript, in plain words.
@@ -917,9 +930,26 @@ function openMenu(anchor,kind){
     // A queued change is what the next turn will use, so the controls start from it.
     const base=s?.selectionNext??s?.selection;
     if(s)state.params={reasoning:base.reasoning??'',contextTokens:base.contextTokens??null,contextBudget:base.contextBudget??null};
+    refreshBalances();
   }
   paintMenu();
 }
+/** Opening the model menu refreshes a source's credit balance once it is 5 minutes old; the backend caches and merges. */
+const balanceAsked=new Map();
+function refreshBalances(){
+  for(const source of ['qoder','workbuddy']){
+    const cat=state.snapshot?.catalog?.[source],at=Date.parse(cat?.account?.fetchedAt??'');
+    if(!cat?.models?.length||Date.now()-(Number.isFinite(at)?at:0)<300000||Date.now()-(balanceAsked.get(source)??0)<60000)continue;
+    balanceAsked.set(source,Date.now());
+    void call('provider:account',{source}).then(account=>{
+      if(!account||!state.snapshot?.catalog?.[source])return;
+      state.snapshot.catalog[source].account=account;
+      const list=menu?.kind==='model'?$('#menu-list'):null;if(list)list.innerHTML=modelListHtml();
+    }).catch(()=>{});
+  }
+}
+// Off-peak windows start and end while the menu is open: reprice the visible list once a minute.
+setInterval(()=>{if(menu?.kind!=='model')return;const list=$('#menu-list');if(list&&!state.menuSearch)list.innerHTML=modelListHtml();},60000);
 function closeMenu(){
   menu=null;
   const el=$('#popover');
@@ -992,15 +1022,69 @@ function envMenuHtml(){
 }
 function sessionMenuHtml(){
   const s=session();
-  return`<button class="menu-item" id="menu-rename">${icon('edit','mi-icon')}<span class="mi-main"><span class="mi-name">重命名</span></span></button><button class="menu-item" id="menu-reveal">${icon('folder','mi-icon')}<span class="mi-main"><span class="mi-name">在资源管理器中打开文件夹</span></span></button><div class="menu-sep"></div><button class="menu-item danger" data-archive="${s?.id??''}" ${busy(s)?'disabled':''}>${icon('archive','mi-icon')}<span class="mi-main"><span class="mi-name">归档会话</span></span></button>`;
+  return`<button class="menu-item" id="menu-rename">${icon('edit','mi-icon')}<span class="mi-main"><span class="mi-name">重命名</span></span></button><button class="menu-item" id="menu-reveal">${icon('folder','mi-icon')}<span class="mi-main"><span class="mi-name">在资源管理器中打开文件夹</span></span></button><button class="menu-item" id="menu-feedback">${icon('download','mi-icon')}<span class="mi-main"><span class="mi-name">导出反馈…</span><span class="mi-sub">打包这个会话的报错和纠正记录</span></span></button><div class="menu-sep"></div><button class="menu-item danger" data-archive="${s?.id??''}" ${busy(s)?'disabled':''}>${icon('archive','mi-icon')}<span class="mi-main"><span class="mi-name">归档会话</span></span></button>`;
 }
 /* Two sources carry models with near-identical names (DeepSeek Flash on both), so a model is
  * always shown with its source's letter, and each source is a group that opens on demand. */
 const sourcePrefix={qoder:'Q-',workbuddy:'W-'};
 const sourceName=m=>`${sourcePrefix[m?.source]??''}${m?.name??''}`;
 const openGroups=new Set();
+/* ---------- model price ----------
+ * model.pricing (B4): {base, original, free, limited, windows:[{start:'HH:mm',end:'HH:mm',timezone,factor,label}], peak, badge, unit, fetchedAt}
+ * A window multiplies the base (factor 0.4 = 4 折); start > end crosses midnight. */
+const factorText=v=>Number.isFinite(v)?`×${Number(v.toFixed(3))}`:'';
+function clockIn(timezone,now=new Date()){
+  try{const parts=new Intl.DateTimeFormat('en-GB',{timeZone:timezone||'Asia/Shanghai',hour:'2-digit',minute:'2-digit',hour12:false}).formatToParts(now);const h=Number(parts.find(p=>p.type==='hour')?.value)%24,m=Number(parts.find(p=>p.type==='minute')?.value);return h*60+m;}
+  catch{return now.getHours()*60+now.getMinutes();}
+}
+const minutesOf=hhmm=>{const m=/^(\d{1,2}):(\d{2})$/.exec(String(hhmm??''));return m?Number(m[1])*60+Number(m[2]):null;};
+const WEEKDAY={Sun:0,Mon:1,Tue:2,Wed:3,Thu:4,Fri:5,Sat:6};
+function dayIn(timezone,now=new Date()){try{return WEEKDAY[new Intl.DateTimeFormat('en-US',{timeZone:timezone||'Asia/Shanghai',weekday:'short'}).format(now)]??now.getDay();}catch{return now.getDay();}}
+/** DeepSeek's published peak hours (Qoder bills its DeepSeek models at the official price, ×2 at peak). */
+function peakActive(peak,now=new Date()){
+  if(!peak||!(peak.days??[]).includes(dayIn(peak.timezone,now)))return false;
+  const t=clockIn(peak.timezone,now);
+  return (peak.ranges??[]).some(([s,e])=>{const a=minutesOf(s),b=minutesOf(e);return a!==null&&b!==null&&t>=a&&t<b;});
+}
+// The source's badge reads like "错峰 4 折"; the chip keeps the word, the multiplier says the rest.
+const windowWord=w=>String(w?.label||'低峰').replace(/\s*[\d.]+\s*折\s*$/,'').trim()||'低峰';
+/** The multiplier that applies right now, the active time window and the next one to start (within 3 hours). */
+function priceNow(pricing,now=new Date()){
+  if(!pricing)return null;
+  const until=pricing.freeUntil?Date.parse(pricing.freeUntil):NaN;
+  const free=pricing.free===true&&(!Number.isFinite(until)||until>now.getTime());
+  const base=Number.isFinite(pricing.base)?pricing.base:null;
+  let active=null,next=null;
+  for(const w of Array.isArray(pricing.windows)?pricing.windows:[]){
+    const s=minutesOf(w.start),e=minutesOf(w.end);if(s===null||e===null||!Number.isFinite(w.factor))continue;
+    const t=clockIn(w.timezone,now),inside=s<=e?t>=s&&t<e:t>=s||t<e;
+    if(inside){if(!active||w.factor<active.factor)active=w;continue;}
+    const wait=(s-t+1440)%1440;if(wait<=180&&(!next||wait<next.wait))next={...w,wait};
+  }
+  const value=free?0:base===null?null:active?base*active.factor:base;
+  return {free,base,value,active,next,until:free&&Number.isFinite(until)?until:null,peak:peakActive(pricing.peak,now)};
+}
+const windowText=w=>`${windowWord(w)} ${w.start}–${w.end}${w.timezone&&w.timezone!=='Asia/Shanghai'?`（${w.timezone}）`:''}，${Number(((w.factor??1)*10).toFixed(1))} 折`;
+function priceTag(m){
+  const p=priceNow(m.pricing);if(!p)return'';
+  const tip=['积分倍率'+(Number.isFinite(p.base)?` ${factorText(p.base)}`:''),m.pricing.original&&m.pricing.original!==p.base?`原价 ${factorText(m.pricing.original)}`:'',m.pricing.badge,...(m.pricing.windows??[]).map(windowText),m.pricing.peak?.note,p.until?`限免至 ${new Date(p.until).toLocaleString('zh-CN',{month:'numeric',day:'numeric',hour:'2-digit',minute:'2-digit'})}`:''].filter(Boolean).join('\n');
+  if(p.free)return`<span class="mi-tag price free" title="${esc(tip)}">${m.pricing.limited||p.until?'限免':'免费'}</span>`;
+  if(p.value===null)return'';
+  const peak=p.peak?`<span class="mi-tag price peak" title="${esc(m.pricing.peak?.note??'')}">${esc(m.pricing.peak?.label||'高峰')} ×${m.pricing.peak?.factor??2}</span>`:'';
+  const original=Number.isFinite(m.pricing.original)&&m.pricing.original!==p.value?m.pricing.original:p.active?p.base:null;
+  if(p.active)return`<span class="mi-tag price deal" title="${esc(tip)}">${esc(windowWord(p.active))} ${factorText(p.value)}<s>${factorText(original)}</s></span>${peak}`;
+  const soon=p.next?`<span class="mi-tag price soon" title="${esc(tip)}">${p.next.wait<60?`${p.next.wait} 分钟后`:`${p.next.start} 起`}${esc(windowWord(p.next))} ${factorText(p.base*p.next.factor)}</span>`:'';
+  return`<span class="mi-tag price${original?' deal':''}" title="${esc(tip)}">${factorText(p.value)}${original?`<s>${factorText(original)}</s>`:''}</span>${peak}${soon}`;
+}
+/** Remaining credits of a source, when its SDK reports them. */
+function balanceText(source){
+  const a=state.snapshot?.catalog?.[source]?.account;
+  if(!a||!Number.isFinite(a.balance))return'';
+  const n=a.balance>=1000?Math.round(a.balance).toLocaleString('zh-CN'):Number(a.balance.toFixed(1)).toString();
+  return`<span class="mg-balance" title="${esc(`${a.unit??'积分'}余额${a.fetchedAt?`，${since(a.fetchedAt)}更新`:''}`)}">余额 ${esc(n)}</span>`;
+}
 function modelItemHtml(m){
-  return`<button class="menu-item model-item${m.key===state.modelKey?' selected':''}" data-model-key="${esc(m.key)}"><span class="mi-main"><span class="mi-name">${esc(sourceName(m))}</span><span class="mi-sub mono">${esc(m.id)}</span></span><span class="mi-tags">${m.reasoning.some(e=>e!=='none')?'<span class="mi-tag">思考</span>':''}${m.contextMaximum?`<span class="mi-tag">${compact(m.contextMaximum)}</span>`:''}</span>${m.key===state.modelKey?icon('check','mi-check'):''}</button>`;
+  return`<button class="menu-item model-item${m.key===state.modelKey?' selected':''}" data-model-key="${esc(m.key)}"><span class="mi-main"><span class="mi-name">${esc(sourceName(m))}</span><span class="mi-sub mono">${esc(m.id)}</span></span><span class="mi-tags">${priceTag(m)}${m.reasoning.some(e=>e!=='none')?'<span class="mi-tag">思考</span>':''}${m.contextMaximum?`<span class="mi-tag">${compact(m.contextMaximum)}</span>`:''}</span>${m.key===state.modelKey?icon('check','mi-check'):''}</button>`;
 }
 function modelListHtml(){
   const env=state.runtimeId,q=state.menuSearch.trim().toLowerCase();
@@ -1010,7 +1094,7 @@ function modelListHtml(){
     if(!list.length)return'';
     // A search shows every match; otherwise a group stays closed until it is opened.
     const open=!!q||openGroups.has(source),chosen=all.find(m=>m.key===state.modelKey);
-    return`<div class="model-group${open?' open':''}"><button class="model-group-head" data-model-group="${source}" aria-expanded="${open}">${icon('chevronRight','mg-caret')}<span class="mg-name">${esc(sourceNames[source])}</span><span class="mg-count">${q?`${list.length}/${all.length}`:all.length} 个</span>${chosen&&!open?`<span class="mg-chosen" title="当前选择">${icon('check')}${esc(sourceName(chosen))}</span>`:''}</button>${open?`<div class="model-group-body">${list.map(modelItemHtml).join('')}</div>`:''}</div>`;
+    return`<div class="model-group${open?' open':''}"><button class="model-group-head" data-model-group="${source}" aria-expanded="${open}">${icon('chevronRight','mg-caret')}<span class="mg-name">${esc(sourceNames[source])}</span><span class="mg-count">${q?`${list.length}/${all.length}`:all.length} 个</span>${balanceText(source)}${chosen&&!open?`<span class="mg-chosen" title="当前选择">${icon('check')}${esc(sourceName(chosen))}</span>`:''}</button>${open?`<div class="model-group-body">${list.map(modelItemHtml).join('')}</div>`:''}</div>`;
   }).join('');
   const native=!gatewayOnly(env)&&(!q||'原生 native'.includes(q))?`<div class="menu-label">原生</div><button class="menu-item model-item${state.modelKey==='native'?' selected':''}" data-model-key="native"><span class="mi-main"><span class="mi-name">原生模型设置</span><span class="mi-sub">使用 ${esc(runtime(env)?.name??'')} 自己的模型与登录</span></span>${state.modelKey==='native'?icon('check','mi-check'):''}</button>`:'';
   return groups+native||`<div class="menu-empty">${models().length?'没有匹配的模型':'还没有模型目录。请到设置 → 模型源下载组件并登录。'}</div>`;
@@ -1335,7 +1419,7 @@ function settingsBody(tab){
     return`<div class="settings-head"><h1>默认搭配</h1><p>在编辑框的模型菜单里点击“记住此搭配”，再次选择该模型时会自动恢复思考强度、窗口与预算。</p></div>${rows.length?`<div class="table-wrap"><table class="catalog-table"><thead><tr><th>模型</th><th>运行环境</th><th>思考</th><th>窗口</th><th>预算</th></tr></thead><tbody>${rows.map(([key,v])=>{const m=models().find(x=>x.key===key);return`<tr><td><div class="model-name">${esc(key.startsWith('native')?`原生模型 · ${v.nativeModel||'当前默认'}`:m?.name??key)}</div><div class="model-id mono">${esc(key)}</div></td><td>${esc(runtime(v.runtimeId)?.name??v.runtimeId??'—')}</td><td>${esc(v.reasoning?effortName(v.reasoning):'默认')}</td><td>${v.contextTokens?compact(v.contextTokens):'—'}</td><td>${v.contextBudget?compact(v.contextBudget):'—'}</td></tr>`;}).join('')}</tbody></table></div>`:'<div class="note">还没有保存的搭配。</div>'}`;
   }
   if(tab==='shortcuts')return`<div class="settings-head"><h1>快捷键</h1></div><dl class="kv">${[['Ctrl + N','新建会话'],['Enter','发送任务'],['Shift + Enter','换行'],['Ctrl + B','收起 / 展开左侧栏'],['Ctrl + Alt + B','收起 / 展开右侧面板'],['Ctrl + J','打开任务与终端'],['Ctrl + S','保存正在编辑的文件'],['Ctrl + ,','打开设置'],['Esc','关闭菜单或设置']].map(([k,v])=>`<dt><kbd>${k}</kbd></dt><dd>${v}</dd>`).join('')}</dl>`;
-  if(tab==='about')return`<div class="settings-head about"><div class="about-mark">${logo(48)}</div><h1>Bridge++</h1><p>把你的模型源接到熟悉的原生 Agent 里，在一个工作区管理会话、变更与文件。</p></div><dl class="kv"><dt>版本</dt><dd>${esc(snap.app.version)}</dd><dt>工作区数据</dt><dd class="mono">${esc(snap.app.dataDir)}</dd><dt>工作文件夹</dt><dd>${snap.projects.length} 个</dd><dt>已保存会话</dt><dd>${snap.sessions.length} 个</dd></dl><div class="note">${icon('info')}<span>Qoder CN 和 WorkBuddy 的 bridge 内置在 Bridge++ 里；要让其他 Agent 使用这两个模型源，请到设置 → 对外接口。</span></div>`;
+  if(tab==='about')return`<div class="settings-head about"><div class="about-mark">${logo(48)}</div><h1>Bridge++</h1><p>把你的模型源接到熟悉的原生 Agent 里，在一个工作区管理会话、变更与文件。</p></div><dl class="kv"><dt>版本</dt><dd>${esc(snap.app.version)}</dd><dt>工作区数据</dt><dd class="mono">${esc(snap.app.dataDir)}</dd><dt>工作文件夹</dt><dd>${snap.projects.length} 个</dd><dt>已保存会话</dt><dd>${snap.sessions.length} 个</dd></dl>${updateSectionHtml(snap.updates)}<div class="note">${icon('info')}<span>Qoder CN 和 WorkBuddy 的 bridge 内置在 Bridge++ 里；要让其他 Agent 使用这两个模型源，请到设置 → 对外接口。</span></div>`;
   return`<div class="settings-head"><h1>通用</h1><p>界面外观与工作区信息。</p></div>
     <h2>外观</h2><div class="theme-grid">${[['system','monitor','跟随系统'],['light','sun','浅色'],['dark','moon','深色']].map(([id,ico,label])=>`<button class="theme-card${theme===id?' active':''}" data-theme-choice="${id}"><span class="theme-preview ${id}"><i></i><i></i><i></i></span><span class="theme-label">${icon(ico)}${label}</span></button>`).join('')}</div>
     <h2>工作区</h2><dl class="kv"><dt>数据目录</dt><dd class="mono">${esc(snap.app.dataDir)}</dd><dt>工作文件夹</dt><dd>${snap.projects.length} 个</dd><dt>会话</dt><dd>${snap.sessions.filter(s=>!s.archived).length} 个（另有 ${snap.sessions.filter(s=>s.archived).length} 个已归档）</dd><dt>版本</dt><dd>${esc(snap.app.version)}</dd></dl>`;
@@ -1376,6 +1460,93 @@ function modal(title,body,confirm,{confirm:confirmText='保存',danger=false}={}
   el.showModal();
   bind('#modal-cancel','click',()=>el.close());
   bind('#modal-confirm','click',()=>void action(async()=>{await confirm();el.close();}));
+}
+/* ---------- app updates ---------- */
+const sizeText=n=>!Number.isFinite(n)||n<=0?'':n>=1073741824?`${(n/1073741824).toFixed(2)} GB`:n>=1048576?`${(n/1048576).toFixed(1)} MB`:`${Math.max(1,Math.round(n/1024))} KB`;
+const releaseDate=iso=>{const d=new Date(iso);return Number.isNaN(d.getTime())?'':`${d.getMonth()+1} 月 ${d.getDate()} 日`;};
+const percent=d=>d.total?Math.min(100,Math.floor(d.received/d.total*100)):0;
+/** Above the settings button. Silent unless a newer release exists or its installer is ready. */
+function updateSlotHtml(u){
+  const d=u?.download??{},v=u?.latest?.version;
+  if(d.status==='downloaded'&&d.version)return`<div class="update-card ready"><span class="uc-icon">${icon('download')}</span><span class="uc-text"><b>有新更新待安装</b><small>V${esc(d.version)} 已下载</small></span><button class="btn primary sm" data-update="install">安装</button></div>`;
+  if(u?.status!=='available'||!v)return'';
+  if(d.status==='downloading')return`<div class="update-card"><span class="uc-icon"><span class="spinner"></span></span><span class="uc-text"><b>正在下载 V${esc(v)}</b><small>${d.total?`${percent(d)}% · ${sizeText(d.received)||'0 KB'} / ${sizeText(d.total)}`:'正在连接…'}</small><span class="uc-bar"><i style="width:${percent(d)}%"></i></span></span><button class="icon-btn sm" data-update="cancel" title="取消下载">${icon('close')}</button></div>`;
+  const failed=d.status==='failed'&&(!d.version||d.version===v),asset=u.latest.asset;
+  const sub=failed?`<small class="uc-error" title="${esc(d.error??'')}">下载失败${d.error?`：${esc(d.error)}`:''}</small>`:`<small>${asset?esc(sizeText(asset.size)):'到发布页下载'}</small>`;
+  return`<div class="update-card"><span class="uc-icon">${icon('arrowUp')}</span><span class="uc-text"><b>有新版本 V${esc(v)}</b>${sub}</span><button class="btn sm" data-update="${asset?'download':'page'}">${asset?(failed?'重试':'下载'):'查看'}</button></div>`;
+}
+function renderUpdateSlot(){const el=$('#update-slot');if(!el)return;const html=updateSlotHtml(state.snapshot?.updates);if(el.innerHTML!==html)el.innerHTML=html;}
+/** 设置 › 关于 › 更新: the last check, the download and the auto-download preference. */
+function updateSectionHtml(u){
+  if(!u)return'';
+  const d=u.download??{},v=u.latest?.version;
+  const line=u.checking?`<span class="spinner"></span><span>正在检查更新…</span>`
+    :u.status==='error'?`${icon('alert')}<span>检查失败：${esc(u.error??'未知原因')}</span>`
+    :u.status==='available'&&v?`${icon('arrowUp')}<span>有新版本 V${esc(v)}${u.latest.publishedAt?`（${esc(releaseDate(u.latest.publishedAt))}发布）`:''}</span>${u.latest.url?`<button class="link-btn" data-update="page">发布说明</button>`:''}`
+    :u.status==='latest'?`${icon('check')}<span>已是最新版本</span>`:`${icon('info')}<span>还没有检查过更新</span>`;
+  const download=d.status==='downloading'?`<div class="update-line"><span class="spinner"></span><span>正在下载 V${esc(d.version??v??'')}${d.total?` · ${percent(d)}%`:''}</span><span class="uc-bar wide"><i style="width:${percent(d)}%"></i></span><button class="link-btn" data-update="cancel">取消</button></div>`
+    :d.status==='downloaded'&&d.version?`<div class="update-line">${icon('download')}<span>V${esc(d.version)} 已下载${u.latest?.version===d.version&&!u.latest?.asset?.digest?'（发布没有提供 SHA-256，只核对了文件大小）':''}。安装时会关闭 Bridge++，数据和设置都会保留。</span><button class="btn primary sm" data-update="install">安装</button></div>`
+    :d.status==='failed'&&d.error?`<div class="update-line warn">${icon('alert')}<span>下载失败：${esc(d.error)}</span>${u.latest?.asset?`<button class="link-btn" data-update="download">重试</button>`:''}</div>`
+    :u.status==='available'&&u.latest?.asset?`<div class="update-line"><button class="btn sm" data-update="download">${icon('download')}下载更新包（${esc(sizeText(u.latest.asset.size))}）</button></div>`:'';
+  return`<h2>更新</h2><div class="update-line">${line}</div>${download}
+    <div class="update-actions"><button class="btn sm" data-update="check" ${u.checking?'disabled':''}>${icon('refresh')}检查更新</button><span class="muted">${u.checkedAt?`上次检查：${esc(since(u.checkedAt))}`:'每天第一次启动时自动检查'}</span></div>
+    <label class="update-auto"><input type="checkbox" data-update-auto ${u.autoDownload?'checked':''}><span><b>自动下载更新包</b><small>有新版本时在后台下载，下载完在左下角提示安装</small></span></label>`;
+}
+async function installUpdate(force){
+  try{await call('update:install',{force});}
+  catch(error){
+    if(error.code!=='sessions_running'||force)throw error;
+    // The confirming dialog closes after this returns; ask again once it has.
+    setTimeout(()=>modal('安装更新',`<p>${esc(error.message)}。</p><p>仍要现在安装吗？</p>`,()=>installUpdate(true),{confirm:'中断任务并安装',danger:true}),0);
+  }
+}
+async function updateAction(kind){
+  const u=state.snapshot?.updates;
+  if(kind==='page'){if(u?.latest?.url)await call('link:open',{url:u.latest.url});return;}
+  if(kind==='install'){
+    modal('安装更新',`<p>将关闭 Bridge++ 并运行 V${esc(u?.download?.version??'')} 的安装程序。数据和设置都会保留，装好后自动打开。</p><p class="q-note">对外接口会在安装时暂停，装完自动恢复。</p>`,()=>installUpdate(false),{confirm:'关闭并安装'});
+    return;
+  }
+  if(kind==='check'){
+    if(u){u.checking=true;refreshSettingsLive();}
+    let r;try{r=await call('update:check');}finally{if(u)u.checking=false;}
+    if(state.snapshot)state.snapshot.updates=r;
+    toast(r.status==='available'?`有新版本 V${r.latest?.version}`:r.status==='latest'?'已是最新版本':`检查失败：${r.error??'未知原因'}`,r.status==='error');
+  }else if(kind==='download'||kind==='cancel'){
+    const r=await call(`update:${kind}`);
+    if(state.snapshot)state.snapshot.updates=r;
+  }
+  renderUpdateSlot();refreshSettingsLive();
+}
+/* ---------- feedback export ---------- */
+// Kind ids come from the backend; unknown ids are shown as they are.
+const FEEDBACK_KINDS={upstream:'上游报错',bridge:'桥/网关报错',runtime:'运行环境报错',rate_limit:'限速',timeout:'超时',
+  retry:'自动重试',tool_recovery:'工具调用纠正',runtime_rebuild:'运行时重建',late_followup:'迟到的结果',protocol_filter:'协议残留过滤',json_fallback:'退回 JSON 路径',context_compaction:'上下文压缩',
+  stop:'你停止了任务',steer:'运行中插话',approval_denied:'拒绝授权',follow_up_message:'报错后追问',rebind:'换模型或参数'};
+function feedbackSummaryHtml(p){
+  const chips=group=>Object.entries(group?.byKind??{}).filter(([,n])=>n).map(([k,n])=>`<span class="fb-chip">${esc(FEEDBACK_KINDS[k]??k)} ${n}</span>`).join('');
+  const all=chips(p.errors)+chips(p.corrections);
+  return`<div class="fb-counts"><span><b>${p.turns??0}</b> 轮</span><span><b>${p.errors?.total??0}</b> 处报错</span><span><b>${p.corrections?.total??0}</b> 次纠正</span><span class="muted">约 ${esc(sizeText(p.bytes)||'1 KB')}${p.truncated?'，最早的记录已截断':''}</span></div>${all?`<div class="fb-chips">${all}</div>`:''}`;
+}
+async function openFeedback(){
+  const s=session();if(!s)return;
+  const opts={includeConversation:false,includeTools:false};
+  modal('导出反馈',`<p>把这个会话的报错、自动纠正和你的操作（停止、插话、拒绝授权、换模型）打包成一个 zip，发给开发者就能定位问题。</p>
+    <div class="fb-summary" id="fb-summary"><div class="fb-loading"><span class="spinner"></span><span>正在统计…</span></div></div>
+    <label class="q-option"><input type="checkbox" id="fb-conversation"><span class="fb-opt"><b>包含对话内容</b><small>你发的消息和模型的回复，不含思考过程</small></span></label>
+    <label class="q-option"><input type="checkbox" id="fb-tools"><span class="fb-opt"><b>包含工具参数和输出</b><small>命令、文件改动和工具结果，每项最多 2000 字</small></span></label>
+    <label for="fb-note">问题描述（可选）</label><textarea id="fb-note" rows="4" maxlength="4000" placeholder="发生了什么、你期望的结果、怎么复现"></textarea>
+    <p class="q-note">密钥、用户目录、项目和数据目录的路径、邮箱和手机号会被替换；对话和工具输出里的其他内容原样保留。文件只保存在你的电脑上，不会上传。</p>`,async()=>{
+      const r=await call('feedback:export',{sessionId:s.id,...opts,note:$('#fb-note')?.value??''});
+      if(!r)return;
+      toast(`反馈已导出：${r.path.split(/[\\/]/).pop()}`);
+      void call('feedback:reveal',{path:r.path}).catch(()=>{});
+    },{confirm:'导出…'});
+  let seq=0;
+  const paint=async()=>{const mine=++seq,el=()=>mine===seq?$('#fb-summary'):null;try{const p=await call('feedback:preview',{sessionId:s.id,...opts});const box=el();if(box)box.innerHTML=feedbackSummaryHtml(p);}catch(e){const box=el();if(box)box.innerHTML=`<div class="fb-loading">${icon('alert')}<span>${esc(e.message)}</span></div>`;}};
+  bind('#fb-conversation','change',e=>{opts.includeConversation=e.target.checked;void paint();});
+  bind('#fb-tools','change',e=>{opts.includeTools=e.target.checked;void paint();});
+  await paint();
 }
 /* ---------- first-run guide ---------- */
 // Shown on first launch, and whenever no environment is usable; it repaints as installs progress.
@@ -1699,6 +1870,7 @@ document.addEventListener('click',e=>{
     repaintParams();return;
   }
   if((el=hit('[data-open-settings]'))){closeGuide();openSettings(el.dataset.openSettings);return;}
+  if((el=hit('[data-update]'))){void action(()=>updateAction(el.dataset.update));return;}
   if((el=hit('[data-source-install]'))){void action(()=>call('source:install',{id:el.dataset.sourceInstall}));return;}
   if((el=hit('[data-source-cancel]'))){void action(()=>call('source:cancel',{id:el.dataset.sourceCancel}));return;}
   if((el=hit('[data-source-page]'))){void action(()=>call('source:openPage',{id:el.dataset.sourcePage}));return;}
@@ -1774,7 +1946,16 @@ document.addEventListener('click',e=>{
   if((el=hit('[data-open-runtime]'))){void action(()=>call('native:open',{runtimeId:el.dataset.openRuntime,projectId:state.projectId}));return;}
   if((el=hit('[data-file-path]'))){void action(()=>openFile(el.dataset.filePath,el.dataset.directory==='true'));return;}
   if((el=hit('[data-diff-file]'))){void action(()=>showDiff(el.dataset.diffFile));return;}
-  if((el=hit('[data-approval]'))){void action(()=>call('session:approve',{sessionId:state.sessionId,approvalId:el.dataset.approval,choice:el.dataset.choice}));return;}
+  if((el=hit('[data-approval]'))){
+    // A card can outlive its turn by a moment (the turn ended or was stopped): say so plainly and repaint.
+    const sessionId=state.sessionId,card=el.closest('.approval-card');card?.querySelectorAll('button').forEach(b=>{b.disabled=true;});
+    void call('session:approve',{sessionId,approvalId:el.dataset.approval,choice:el.dataset.choice}).catch(async error=>{
+      // The backend's "expired" record follows through the event stream and repaints the card.
+      if(/已结束或已过期/.test(error.message))toast('这条授权已经结束：任务已停止或这一轮已经结束。');
+      else{card?.querySelectorAll('button').forEach(b=>{b.disabled=false;});toast(error.message,true);}
+    });
+    return;
+  }
   if(hit('[data-approval-native]')){void openNative();return;}
   if((el=hit('[data-question]'))){answerQuestion(el.dataset.question);return;}
   if((el=hit('[data-quick]'))){
@@ -1813,6 +1994,7 @@ document.addEventListener('click',e=>{
     case'perm-chip':menu?.kind==='permission'?closeMenu():openMenu(hit('#perm-chip'),'permission');break;
     case'session-more':menu?.kind==='session'?closeMenu():openMenu(hit('#session-more'),'session');break;
     case'menu-rename':closeMenu();renameSession();break;
+    case'menu-feedback':closeMenu();void action(openFeedback);break;
     case'menu-reveal':closeMenu();void action(()=>call('project:reveal',{projectId:state.projectId}));break;
     case'rename-session':renameSession();break;
     case'native-session':void openNative();break;
@@ -1912,6 +2094,7 @@ matchMedia('(prefers-color-scheme: dark)').addEventListener('change',applyTheme)
 document.addEventListener('change',e=>{
   const t=e.target;
   if(t.matches?.('[data-svc-profile]')){const id=t.dataset.svcProfile;t.blur();void action(()=>serviceCall('bridgeService:configure',{id,defaultProfile:t.value}));return;}
+  if(t.matches?.('[data-update-auto]')){const enabled=t.checked;void action(async()=>{await call('update:auto-download',{enabled});toast(enabled?'已开启自动下载更新包':'已关闭自动下载更新包');await snapshot();refreshSettingsLive();renderUpdateSlot();});return;}
   if(t.matches?.('[data-svc-autostart]')){const id=t.dataset.svcAutostart,enabled=t.checked;void action(async()=>{try{await call('bridgeService:autostart',{id,enabled});toast(enabled?'已开启开机启动':'已关闭开机启动');}finally{await serviceCall(null,null);}});}
 });
 
@@ -1949,6 +2132,18 @@ window.workbench.onChange(()=>{
   refreshTimer=setTimeout(()=>void refreshFromBackend(),70);
 });
 window.workbench.onEvent(event=>{
+  if(event.type==='update-progress'){
+    // Progress arrives between snapshots; patch the download state and repaint only what shows it.
+    const d=state.snapshot?.updates?.download;
+    if(d&&d.status==='downloading'&&(!d.version||d.version===event.version)){d.received=event.received;d.total=event.total;renderUpdateSlot();if(state.settings==='about')refreshSettingsLive();}
+    return;
+  }
+  if(event.type==='catalog-diff'){
+    const name=sourceNames[event.source]??event.source,list=a=>a.slice(0,4).join('、')+(a.length>4?` 等 ${a.length} 个`:'');
+    const parts=[event.added?.length?`新增 ${list(event.added)}`:'',event.removed?.length?`下架 ${list(event.removed)}`:''].filter(Boolean);
+    if(parts.length)toast(`${name} 模型目录已更新：${parts.join('；')}`);
+    return;
+  }
   if(event.type==='source-job'){
     // Same stream as environment downloads; the catalog is refreshed by the backend once the component is ready.
     const component=state.snapshot?.sourceComponents?.find(x=>x.id===event.id);

@@ -11,8 +11,12 @@ export function successfulPermissionProbes(){return new Map(durable);}
 const labels={ask:'每次询问','auto-review':'自动审查',auto:'一键授权',readonly:'只读'};
 const mode=(id,description,native)=>({id,label:labels[id],description,native});
 export const KIMI_PERMISSION_IDS={ask:'default','auto-review':'auto',auto:'yolo',readonly:'plan'};
-export const CLAUDE_PERMISSION_MODES={ask:'default','auto-review':'auto',auto:'bypassPermissions',readonly:'plan'};
+export const CLAUDE_PERMISSION_MODES={ask:'default','auto-review':'acceptEdits',auto:'bypassPermissions',readonly:'plan'};
 const CLAUDE_NATIVE_MODES=['default','acceptEdits','auto','bypassPermissions','dontAsk','plan','manual'];
+// Bridge++ reviews the requests itself, so auto-review needs no native safety check:
+// acceptEdits is preferred and older CLIs fall back to manual/default exactly like ask.
+export const CLAUDE_AUTO_REVIEW_NATIVES=['acceptEdits','manual','default'];
+export function claudeAutoReviewNative(available=[]){return CLAUDE_AUTO_REVIEW_NATIVES.find(name=>available.includes(name))??null;}
 export function claudePermissionModes(help,error=''){
   let section=/--permission-mode\b/.exec(help)?.index;if(section!==undefined){section=help.slice(section).split(/\n\s*--/)[0];if(!/choices\s*:|\|/i.test(section))section='';}
   for(const text of [section,error])if(typeof text==='string'&&text){const modes=CLAUDE_NATIVE_MODES.filter(mode=>new RegExp(`(?<![A-Za-z])${mode}(?![A-Za-z])`).test(text));if(modes.length)return modes;}
@@ -70,8 +74,8 @@ export function permissionCatalog(runtime,evidence={}){
   }
   if(runtime.id==='claude'){
     // 2.1.319 renamed the ask mode to "manual"; older CLIs still list "default".
-    const available=evidence.modes??[],descriptions={ask:'原生 manual（旧版本叫 default）；写文件和执行命令前在 Bridge++ 里询问。','auto-review':'原生 auto；工作区内的编辑直接执行，其余操作由 Claude Code 原生自动模式判断（会多发模型请求）。',auto:'原生 bypassPermissions；跳过所有权限询问。',readonly:'原生 plan；只读规划，Bridge++ 拒绝所有工具执行请求。'};
-    for(const [id,fallback]of Object.entries(CLAUDE_PERMISSION_MODES)){const native=id==='ask'?available.includes('manual')?'manual':available.includes('default')?'default':null:fallback;if(native&&available.includes(native))modes.push(mode(id,descriptions[id],{mode:native}));}
+    const available=evidence.modes??[],descriptions={ask:'原生 manual（旧版本叫 default）；写文件和执行命令前在 Bridge++ 里询问。','auto-review':'工作区内的编辑直接执行；命令、联网和工作区外的操作先由当前模型审查（每次审查多一个小请求），拿不准的再问你。',auto:'原生 bypassPermissions；跳过所有权限询问。',readonly:'原生 plan；只读规划，Bridge++ 拒绝所有工具执行请求。'};
+    for(const [id,fallback]of Object.entries(CLAUDE_PERMISSION_MODES)){const native=id==='ask'?(available.includes('manual')?'manual':available.includes('default')?'default':null):id==='auto-review'?claudeAutoReviewNative(available):fallback;if(native&&available.includes(native))modes.push(mode(id,descriptions[id],{mode:native}));}
   }
   if(runtime.id==='antigravity'&&evidence.sandbox){
     if(evidence.auto)modes.push(mode('auto-review','原生 --mode auto --sandbox；由原生 auto 模式决定操作。它要确认的操作（实测包括新建文件）在 Bridge++ 里弹不出确认，这一轮会直接停止；要改文件请选“一键授权”或默认。',{args:antigravityPermissionArgs('auto-review')}));

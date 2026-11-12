@@ -4,8 +4,33 @@ import {randomUUID} from 'node:crypto';
 import {EventEmitter} from 'node:events';
 import {createReadStream} from 'node:fs';
 import {createInterface} from 'node:readline';
+import {isThinkingTicker,foldThinkingTicker} from '../services/session-events.mjs';
 
 const object=value=>value&&typeof value==='object'&&!Array.isArray(value);
+// Persisted update bookkeeping is descriptive only: malformed or outdated rows
+// fall back to "nothing known" instead of failing the whole workspace.
+function updateState(value){
+  const source=object(value)?value:{},version=value=>typeof value==='string'&&/^\d+\.\d+\.\d+$/.test(value)?value:null;
+  const latest=object(source.latest)&&version(source.latest.version)?{
+    version:version(source.latest.version),
+    tag:typeof source.latest.tag==='string'?source.latest.tag:'v'+source.latest.version,
+    name:typeof source.latest.name==='string'?source.latest.name:null,
+    publishedAt:typeof source.latest.publishedAt==='string'?source.latest.publishedAt:null,
+    url:typeof source.latest.url==='string'?source.latest.url:null,
+    notes:typeof source.latest.notes==='string'?source.latest.notes:null,
+    asset:object(source.latest.asset)&&typeof source.latest.asset.url==='string'?{
+      name:typeof source.latest.asset.name==='string'?source.latest.asset.name:null,
+      size:Number.isSafeInteger(source.latest.asset.size)&&source.latest.asset.size>0?source.latest.asset.size:null,
+      url:source.latest.asset.url,
+      digest:/^sha256:[a-f0-9]{64}$/i.test(source.latest.asset.digest??'')?String(source.latest.asset.digest).toLowerCase():null
+    }:null
+  }:null;
+  const downloaded=object(source.downloaded)&&version(source.downloaded.version)&&typeof source.downloaded.file==='string'&&source.downloaded.file?{
+    version:version(source.downloaded.version),file:source.downloaded.file,
+    sha256:/^[a-f0-9]{64}$/.test(source.downloaded.sha256??'')?source.downloaded.sha256:null
+  }:null;
+  return {lastCheckDay:typeof source.lastCheckDay==='string'&&/^\d{4}-\d{2}-\d{2}$/.test(source.lastCheckDay)?source.lastCheckDay:null,checkedAt:typeof source.checkedAt==='string'?source.checkedAt:null,latest,downloaded};
+}
 const validId=id=>typeof id==='string'&&/^[a-zA-Z0-9][a-zA-Z0-9_-]{0,127}$/.test(id);
 function workspaceState(text){
   const value=JSON.parse(text.replace(/^\uFEFF/,''));
@@ -15,8 +40,8 @@ function workspaceState(text){
 export class Store extends EventEmitter {
   constructor(root,{streamFlushMs=1000,streamFlushBytes=4096}={}){
     super();this.root=root;this.file=join(root,'workspace.json');this.backupFile=join(root,'workspace.backup.json');this.persisted=null;this.recovery=null;this.queue=Promise.resolve();this.handles=new Map();this.closed=false;
-    this.contexts=new Map();this.state={version:1,projects:[],sessions:[],catalog:{},preferences:{modelDefaults:{},runtimes:{},theme:'dark'}};
-    this.streamBuffers=new Map();this.streamFlushMs=streamFlushMs;this.streamFlushBytes=streamFlushBytes;
+    this.contexts=new Map();this.state={version:1,projects:[],sessions:[],catalog:{},preferences:{modelDefaults:{},runtimes:{},theme:'dark',autoDownloadUpdates:false},updates:{lastCheckDay:null,checkedAt:null,latest:null,downloaded:null}};
+    this.streamBuffers=new Map();this.streamFlushMs=streamFlushMs;this.streamFlushBytes=streamFlushBytes;this.thinkingTotals=new Map();
   }
   async open(){
     await mkdir(join(this.root,'sessions'),{recursive:true});
@@ -40,6 +65,8 @@ export class Store extends EventEmitter {
     this.state.preferences=object(this.state.preferences)?this.state.preferences:{};
     this.state.preferences.modelDefaults=object(this.state.preferences.modelDefaults)?this.state.preferences.modelDefaults:{};
     this.state.preferences.runtimes=object(this.state.preferences.runtimes)?this.state.preferences.runtimes:{};
+    this.state.preferences.autoDownloadUpdates=this.state.preferences.autoDownloadUpdates===true;
+    this.state.updates=updateState(this.state.updates);
     for(const session of this.state.sessions)if(['running','waiting','starting','stopping'].includes(session.status))session.status='interrupted';
     for(const catalog of Object.values(this.state.catalog))if(catalog?.status==='loading'){catalog.status='error';catalog.error='上次目录查询已中断，请刷新。';}
     await this.save();return this;
@@ -92,7 +119,20 @@ export class Store extends EventEmitter {
     }catch(error){await handle.close();throw error;}
   }
   async event(sessionId,event){
-    this.session(sessionId);const value={...event,id:event.type==='media'&&validId(event.id)?event.id:randomUUID(),at:new Date().toISOString(),sessionId};
+    this.session(sessionId);
+    // Per-batch thinking counters are folded into one estimate instead of a row each.
+    // Checked before the stream buffer so the drop never splits adjacent text chunks.
+    if(isThinkingTicker(event)){
+      const total=foldThinkingTicker(this.thinkingTotals.get(sessionId),event);
+      this.thinkingTotals.set(sessionId,total);return null;
+    }
+    const value={...event,id:event.type==='media'&&validId(event.id)?event.id:randomUUID(),at:new Date().toISOString(),sessionId};
+    if(value.type==='usage'&&object(value.data)&&value.data.thinking_token_estimate===undefined){
+      const total=this.thinkingTotals.get(sessionId);
+      if(total&&total.total>0)value.data={...value.data,thinking_token_estimate:total.total};
+    }
+    // The estimate belongs to the turn that produced it; the next turn starts from zero.
+    if(value.type==='turn-end')this.thinkingTotals.delete(sessionId);
     await this.enqueue(async()=>{
       // Merge only plain text chunks; a native payload (data) keeps one record per event.
       const stream=(['thinking','text'].includes(value.type)||value.type==='tool-output'&&value.data===undefined)&&typeof value.text==='string',prior=this.streamBuffers.get(sessionId);

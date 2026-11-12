@@ -31,6 +31,22 @@ test('Anthropic requests convert every content block without leaking sampling or
   assert.deepEqual(new Set(chat.bridge_omitted_media),new Set(['document','unknown_block']));
 });
 
+test('deferred tools reach the upstream only after a ToolSearch result has loaded them',()=>{
+  const tools=[{name:'Read',input_schema:{type:'object'}},{name:'ToolSearch',input_schema:{type:'object'}},{name:'WebFetch',defer_loading:true,description:'Fetch a page',input_schema:{type:'object',properties:{url:{type:'string'}}}},{name:'mcp__docs__search',defer_loading:true,input_schema:{type:'object'}}];
+  const names=chat=>chat.tools.map(tool=>tool.function.name);
+  assert.deepEqual(names(anthropicToChat({model:'fixture',tools,messages:[{role:'user',content:'Fetch example.com'}]})),['Read','ToolSearch']);
+  const loaded=anthropicToChat({model:'fixture',tools,messages:[
+    {role:'user',content:'Fetch example.com'},
+    {role:'assistant',content:[{type:'tool_use',id:'s1',name:'ToolSearch',input:{query:'select:WebFetch'}}]},
+    {role:'user',content:[{type:'tool_result',tool_use_id:'s1',content:[{type:'tool_reference',tool_name:'WebFetch'}]}]},
+  ]});
+  assert.deepEqual(names(loaded),['Read','ToolSearch','WebFetch']);
+  assert.deepEqual(loaded.tools[2].function.parameters.properties,{url:{type:'string'}});
+  assert.equal(loaded.messages.at(-1).content,'Tool definition loaded: WebFetch (now available in the tools list).');
+  // A name that is not among the request's tools is not invented.
+  assert.deepEqual(names(anthropicToChat({model:'fixture',tools,messages:[{role:'user',content:[{type:'tool_result',tool_use_id:'x',content:[{type:'tool_reference',tool_name:'Missing'}]}]}]})),['Read','ToolSearch']);
+});
+
 test('text-only conversion retains image omissions and tool result ordering',()=>{
   const chat=anthropicToChat({model:'fixture',messages:[{role:'user',content:[png,{type:'tool_result',tool_use_id:'a',content:['one',png]},{type:'tool_result',tool_use_id:'b',content:'two'},{type:'text',text:'after'}]}]});
   assert.equal(chat.messages[0].role,'tool');assert.match(chat.messages[0].content,/one\n\[Bridge\+\+ omitted image/);
@@ -189,7 +205,7 @@ test('Claude Code CLI completes a gateway tool round-trip',async t=>{
   for(const key of Object.keys(env))if(/^(ANTHROPIC_|CLAUDE|MCP_|OTEL_)/i.test(key))delete env[key];
   const gatewayBase=endpoint.baseURL.slice(0,-3),modelEnv={ANTHROPIC_MODEL:variant.id,ANTHROPIC_DEFAULT_OPUS_MODEL:variant.id,ANTHROPIC_DEFAULT_SONNET_MODEL:variant.id,ANTHROPIC_DEFAULT_HAIKU_MODEL:variant.id,ANTHROPIC_SMALL_FAST_MODEL:variant.id,CLAUDE_CODE_SUBAGENT_MODEL:variant.id};
   Object.assign(env,{CLAUDE_CONFIG_DIR:config,ANTHROPIC_BASE_URL:gatewayBase,ANTHROPIC_AUTH_TOKEN:endpoint.key,...modelEnv,CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC:'1',DISABLE_TELEMETRY:'1',DISABLE_ERROR_REPORTING:'1',DISABLE_AUTOUPDATER:'1',DISABLE_LOGIN_COMMAND:'1',CLAUDE_CODE_DISABLE_LAUNCHER_SIGN_IN:'1'});
-  const settings=JSON.stringify({skipWebFetchPreflight:true,model:variant.id,env:{ANTHROPIC_BASE_URL:gatewayBase,...modelEnv,CLAUDE_CODE_USE_BEDROCK:'0',CLAUDE_CODE_USE_VERTEX:'0',CLAUDE_CODE_USE_FOUNDRY:'0',CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC:'1',DISABLE_TELEMETRY:'1',DISABLE_ERROR_REPORTING:'1',DISABLE_AUTOUPDATER:'1'}});
+  const settings=JSON.stringify({skipWebFetchPreflight:true,autoMemoryEnabled:false,model:variant.id,env:{ANTHROPIC_BASE_URL:gatewayBase,...modelEnv,CLAUDE_CODE_USE_BEDROCK:'0',CLAUDE_CODE_USE_VERTEX:'0',CLAUDE_CODE_USE_FOUNDRY:'0',CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC:'1',DISABLE_TELEMETRY:'1',DISABLE_ERROR_REPORTING:'1',DISABLE_AUTOUPDATER:'1'}});
   const child=spawn(process.env.AWB_CLAUDE_EXE,['-p','--input-format','stream-json','--output-format','stream-json','--verbose','--include-partial-messages','--permission-prompt-tool','stdio','--permission-mode','default','--settings',settings],{cwd:work,env,stdio:['pipe','pipe','pipe']});
   let stderr='',stdoutBuffer='';
   child.stderr.setEncoding('utf8');child.stderr.on('data',data=>{stderr+=data;});

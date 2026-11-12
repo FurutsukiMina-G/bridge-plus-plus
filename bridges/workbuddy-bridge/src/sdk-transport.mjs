@@ -1,4 +1,7 @@
-import {query} from '@tencent-ai/agent-sdk';
+import sdk from '@tencent-ai/agent-sdk';
+const {query,unstable_v2_createSession}=sdk;
+import {HoldLane,nativeEligible} from './hold-lane.mjs';
+import {openHoldRuntime} from './hold-runtime.mjs';
 import {hasUsableTools,answerInstructions} from './final-answer.mjs';
 import {join,resolve} from 'node:path';
 import {randomUUID} from 'node:crypto';
@@ -43,25 +46,64 @@ export function sdkOptions(cfg,credential,body,dir,controller,onDenied,onStderr=
   const env={...process.env,CODEBUDDY_AUTH_TOKEN:credential.accessToken,CODEBUDDY_BASE_URL:'https://copilot.tencent.com/v2',ACC_USER_ID:credential.uid,
     CODEBUDDY_CUSTOM_HEADERS:`X-Domain: ${credential.domain}`,CODEBUDDY_CONFIG_DIR:join(dir,'home'),WORKBUDDY_CONFIG_DIR:join(dir,'home'),
     CODEBUDDY_CODE_DISABLE_BACKGROUND_TASKS:'1',CODEBUDDY_DISABLE_AUTO_MEMORY:'1',CODEBUDDY_DISABLE_CRON:'1',DISABLE_TELEMETRY:'1',
+    // Memory prompts are the only place the runtime writes its own session/home paths into the
+    // model's context. The interceptor flag above is not the agent-memory gate: that one is
+    // CODEBUDDY_CODE_DISABLE_AUTO_MEMORY (default on) and appends "# Persistent Agent Memory"
+    // with <CODEBUDDY_CONFIG_DIR>/projects/<escaped cwd>. Turn every memory layer off here so
+    // all runtime-start paths (chat, warm, hold) inherit it.
+    CODEBUDDY_CODE_DISABLE_AUTO_MEMORY:'1',CODEBUDDY_MEMORY_ENABLED:'0',CODEBUDDY_TYPED_MEMORY_ENABLED:'0',CODEBUDDY_TEAM_MEMORY_ENABLED:'0',
+    // The runtime also compacts its own history and then writes "read the full transcript at
+    // <CODEBUDDY_CONFIG_DIR>/projects/<escaped cwd>/<session>.jsonl" into the model context.
+    // Context is the host's job. The pre-message path is hard off here (the env value wins over
+    // the product feature flag); the emergency path is forced and ignores settings, so the only
+    // lever left is its trigger, held at the model's own window by threshold=100% and the
+    // largest window the runtime accepts. Compaction can then only happen at a real overflow.
+    // Both of those env levers only raise a threshold, so the product switch itself is also
+    // turned off below (--settings autoCompactEnabled=false, on by default in the runtime).
+    // Measured with .runtime/cc-work/f4/comp.mjs: control (no switches, small window) compacts
+    // and injects the transcript path; this configuration does not.
+    CODEBUDDY_PRE_MESSAGE_COMPACT:'0',
+    CODEBUDDY_AUTOCOMPACT_PCT_OVERRIDE:'100',CODEBUDDY_AUTO_COMPACT_WINDOW:'1000000',
     ...(process.env.WORKBUDDY_FULL_RUNTIME==='1'?{}:LEAN_RUNTIME_ENV),
     CODEBUDDY_CODE_MAX_OUTPUT_TOKENS:String(body.max_tokens),CODEBUDDY_API_KEY:undefined,CODEBUDDY_API_KEY_HELPER_DISABLED:'1',
     ACC_PRODUCT_CONFIG:undefined,ACC_PRODUCT_CONFIG_V2:undefined,ACC_PRODUCT_CONFIG_V3:undefined,ACC_PRODUCT_CONFIG_PATH:undefined,WORKBUDDY_BRIDGE_ACTUAL_CLI:cli};
   // Native turns stop at the first host call; the denial text becomes that call's interim result.
   const tools=native?hostTools(body):[],denial=native?(cfg.forwardedMessage??FORWARDED):'Host-owned tools';
-  return {model:body.model,cwd:dir,tools:[],disallowedTools:DENIED_TOOLS,settingSources:[],strictMcpConfig:true,mcpServers:tools.length?{[HOST]:hostServer(tools)}:{},agents:{},
+  return {model:body.model,cwd:dir,tools:[],disallowedTools:DENIED_TOOLS,settingSources:[],strictMcpConfig:true,
+    // Only this one key: --settings is the documented CLI channel and the runtime reads it at the
+    // highest priority, so no project or user settings file can re-enable compaction either.
+    extraArgs:{settings:JSON.stringify({autoCompactEnabled:false})},
+    mcpServers:tools.length?{[HOST]:hostServer(tools)}:{},agents:{},
     canUseTool:async name=>{onDenied(name);return {behavior:'deny',message:native?denial:'Only the external host can execute tools'};},
     hooks:{PreToolUse:[{hooks:[async input=>{onDenied(input?.tool_name);return {continue:false,stopReason:native?denial:'Only the external host executes tools',hookSpecificOutput:{hookEventName:'PreToolUse',permissionDecision:'deny',permissionDecisionReason:denial}};}]}]},
     systemPrompt:!hasUsableTools(body)?answerInstructions(body):cfg.hostPrompts?(native?cfg.hostPrompts.native:cfg.hostPrompts.decision):{append:native?NATIVE_INSTRUCTIONS:DECISION_INSTRUCTIONS},maxTurns:1,includePartialMessages:true,persistSession:false,effort:body.reasoning_effort,...(body.bridge_thinking_disabled?{thinking:{type:'disabled'}}:{}),
     abortController:controller,pathToCodebuddyCode:join(cfg.root??resolve(import.meta.dirname,'..'),'scripts/runtime-launcher.mjs'),executable:process.execPath,env,stderr:onStderr};
 }
 export class SdkTransport {
-  constructor(cfg,auth,{run=query}={}){
-    this.cfg=cfg;this.auth=auth;this.run=run;this.pool=new ContextPool(cfg);this.failures=new Map();
+  constructor(cfg,auth,{run=query,createSession}={}){
+    // Injecting the old query double must never accidentally launch the real V2 SDK.
+    createSession??=run===query?unstable_v2_createSession:()=>{throw new BridgeError(500,'session_factory_required','Native hold tests must inject createSession; legacy query doubles should explicitly select replay mode');};
+    this.pendingSlots=0;this.slotAllocation=Promise.resolve();
+    this.hold=new HoldLane(cfg,(binding)=>openHoldRuntime(cfg,binding,this.hold,createSession,(body,credential,dir,controller)=>sdkOptions(cfg,credential,body,dir,controller,()=>{})),runtime=>runtime.close(),()=>this.reserveSlot());
+    this.cfg=cfg;this.auth=auth;this.run=run;this.pool=new ContextPool(cfg);this.pool.externalMakeRoom=()=>this.reserveSlot();this.failures=new Map();
     this.warm=new WarmRuntimes({ttlMs:cfg.prewarmMs??0,max:cfg.maxWarm??4});this.pool.onRemove=record=>this.warm.discard(record.id);
     this.blank=new WarmRuntimes({ttlMs:cfg.prewarmMs??0,max:cfg.maxBlankWarm??0});this.blankPending=false;
     this.metrics={started:0,completed:0,deniedTools:0,hostCalls:0,decodedDsml:0,replays:0,correctionCalls:0,recoveredRequests:0,localDecisionRepairs:0,lastFailure:null,warm:this.warm.stats,blankWarm:this.blank.stats};
   }
-  async close(){this.closed=true;this.warm.close();this.blank.close();await this.pool.close();}
+  async reserveSlot(){
+    const previous=this.slotAllocation;let unlock;this.slotAllocation=new Promise(resolve=>{unlock=resolve;});await previous;
+    try{
+      while(this.pool.records.size+this.hold.sessions.size+this.pendingSlots>=(this.cfg.maxSessions??24)){
+        const idle=[...this.pool.records.values()].filter(r=>!r.busy).sort((a,b)=>a.touched-b.touched)[0];
+        if(idle)await this.pool.remove(idle);else if(!this.hold.closeIdleForCapacity()){
+          const counts=this.hold.capacity();counts.busy+=this.pendingSlots+[...this.pool.records.values()].filter(r=>r.busy).length;
+          throw new BridgeError(429,'sessions_busy',`All context slots are active (busy=${counts.busy}, awaiting=${counts.awaiting}, idle=${counts.idle})`,counts);
+        }
+      }
+      this.pendingSlots++;let released=false;return()=>{if(!released){released=true;this.pendingSlots--;}};
+    }finally{unlock();}
+  }
+  async close(){await this.hold.closeAll();this.closed=true;this.warm.close();this.blank.close();await this.pool.close();}
   optionsKey(body,credential,native){return {native,model:body.model,publicModel:body.bridge_public_model,nativeContextWindow:body.bridge_native_context_window,effort:body.reasoning_effort,max:body.max_tokens,tools:body.tools??[],choice:body.tool_choice,format:body.response_format,thinking:body.bridge_thinking_disabled,prompts:this.cfg.hostPrompts,token:credential.accessToken,uid:credential.uid,domain:credential.domain};}
   warmKey(record,body,credential,native){
     return digest({...this.optionsKey(body,credential,native),session:record.sessionId,dir:record.dir});
@@ -114,24 +156,66 @@ export class SdkTransport {
     if(fresh){await rm(record.dir,{recursive:true,force:true});record.dir=handle.dir;handle.blank=true;handle.adopted=true;}
     return handle;
   }
+  chatHold(body,credential,signal,context){
+    const metrics={mode:'hold',toolMode:'native',harness_tool_count:body.tools?.length??0,available_tool_definition_chars:JSON.stringify(body.tools??[]).length,sent_tool_definition_chars:0,attempts:[],knownUsage:null,warmStart:false,client_usage:null};
+    const local=new AbortController(),requestSignal=AbortSignal.any([signal,local.signal]);
+    const request={...body,_holdKey:digest({model:body.model,publicModel:body.bridge_public_model,context:body.bridge_native_context_window,
+      effort:body.reasoning_effort,thinking:body.bridge_thinking_disabled,max:body.max_tokens,uid:credential.uid,domain:credential.domain,token:credential.accessToken,prompts:this.cfg.hostPrompts})};
+    const id='chatcmpl-'+randomUUID(),created=Math.floor(Date.now()/1000),encoder=new TextEncoder();let closed=false;
+    const stream=new ReadableStream({start:sink=>{
+      const send=value=>{if(!closed)sink.enqueue(encoder.encode('data: '+(typeof value==='string'?value:JSON.stringify(value))+'\n\n'));};
+      const chunk=(delta,finish=null,usage=null)=>({id,created,model:body.model,object:'chat.completion.chunk',choices:[{index:0,delta,finish_reason:finish}],...(usage?{usage}:{} )});
+      void(async()=>{
+        try{
+          send(chunk({role:'assistant',content:''}));this.metrics.started++;
+          let shown='';
+          const completed=await this.hold.infer(request,{signal:requestSignal,runtimeContext:{body,credential},onActivity:context.onActivity,
+            onUsage:snapshot=>{metrics.knownUsage=snapshot.client_usage;metrics.usageAccounting=snapshot.accounting;},
+            onText:text=>{shown+=text;send(chunk({content:text}));},onThinking:text=>send(chunk({reasoning_content:text}))});
+          Object.assign(metrics,completed.report,{native:completed.report.native,warmStart:completed.report.warm_start,knownUsage:completed.report.client_usage,
+            localReplay:completed.report.local_response_replay,historyMode:completed.report.history_mode,lastPromptTokens:completed.report.client_usage?.prompt_tokens??null,
+            usageAccounting:completed.usage?.snapshot().accounting??usageAccounting([])});
+          const {reply}=completed;
+          if(!reply)throw new BridgeError(completed.report.stage==='upstream_stalled'?504:completed.report.error_status??502,
+            completed.report.error_code??completed.report.stage,completed.report.error??'WorkBuddy native request failed');
+          if(reply.content&&!shown)send(chunk({content:reply.content}));
+          if(reply.kind==='tool_calls'){
+            for(const [index,call]of reply.calls.entries()){
+              send(chunk({tool_calls:[{index,id:call.id,type:'function',function:{name:call.name,arguments:''}}]}));
+              for(let at=0;at<call.arguments.length;){let end=Math.min(at+32768,call.arguments.length);if(/[\uD800-\uDBFF]/.test(call.arguments[end-1]??''))end--;
+                send(chunk({tool_calls:[{index,function:{arguments:call.arguments.slice(at,end)}}]}));at=end;}
+            }
+            this.metrics.hostCalls+=reply.calls.length;
+          }
+          const terminal=chunk({},reply.kind==='tool_calls'?'tool_calls':reply.finish,completed.report.client_usage);if(completed.report.client_usage)terminal.bridge_usage={accounting:metrics.usageAccounting,correction_calls:completed.report.native.invalid_calls};send(terminal);send('[DONE]');this.metrics.completed++;
+        }catch(error){const safe=publicError(requestSignal.aborted?requestSignal.reason:error,{diagnostic:redactSecrets(error?.message??String(error),credential)});
+          if(metrics.knownUsage)send({id,created,model:body.model,object:'chat.completion.chunk',choices:[],usage:metrics.knownUsage});
+          send(safe.body);this.metrics.lastFailure={code:safe.body.error.code};
+        }finally{if(!closed){closed=true;sink.close();}}
+      })();
+    },cancel:()=>{closed=true;local.abort(new DOMException('Disconnected','AbortError'));}});
+    const response=new Response(stream,{headers:{'content-type':'text/event-stream'}});response.bridgeMetrics=metrics;return response;
+  }
   async chat(body,signal,context={}){
     // Compile BEFORE spawning a runtime or making a billable request.
     const validators=compileTools(body.tools);const credential=await this.auth.get();signal.throwIfAborted();
-    const native=this.cfg.toolMode==='native'&&nativeSupported(body.tools),mode=native?'native':'json';
+    if(nativeEligible(body,this.cfg))return this.chatHold(body,credential,signal,context);
+    const native=['native','replay'].includes(this.cfg.toolMode)&&nativeSupported(body.tools),mode=native?'replay':'json';
     const failureKey=digest({body,uid:credential.uid,domain:credential.domain,mode});
     for(const [key,f]of this.failures)if(Date.now()-f.at>120000)this.failures.delete(key);
     const cachedFailure=this.failures.get(failureKey);
     if(cachedFailure){
       // Reject before touching the context pool: a local replay must not evict,
       // discard or create another lane of the waiting parent conversation.
-      const response=new Response('data: '+JSON.stringify({choices:[],usage:{...replayUsage(),bridge_usage_source:'local-rejection-replay'},bridge_usage:{accounting:usageAccounting([]),correction_calls:0}})+'\n\ndata: '+JSON.stringify(cachedFailure.body)+'\n\n',{headers:{'content-type':'text/event-stream'}});
-      response.bridgeMetrics={localReplay:true,historyMode:'replay',sentMessageCount:0,promptCharacters:0,toolMode:mode,attempts:[]};return response;
+      const response=new Response('data: '+JSON.stringify(cachedFailure.body)+'\n\n',{headers:{'content-type':'text/event-stream'}});
+      response.bridgeMetrics={localReplay:true,historyMode:'replay',sentMessageCount:0,promptCharacters:0,toolMode:mode,mode,client_usage:null,client_cache_usage:'omitted',localReplayReason:'local-rejection-replay',harness_tool_count:body.tools?.length??0,available_tool_definition_chars:JSON.stringify(body.tools??[]).length,sent_tool_definition_chars:0,attempts:[]};return response;
     }
     const lease=await this.pool.acquire(body,credential,signal,{mode});const {record,metrics}=lease;
-    Object.assign(metrics,{toolMode:mode,attempts:[],firstTextMs:null,firstThinkingMs:null,firstModelEventMs:null,warmStart:false,runtimeReadyMs:null});
-    let prompt=native?nativeInput(body,{messages:lease.messages,delta:lease.reused,batching:this.cfg.nativeBatching!==false}):decisionInput(body,{messages:lease.messages,toolsReused:lease.toolsReused,delta:lease.reused});
+    Object.assign(metrics,{mode,toolMode:mode,harness_tool_count:body.tools?.length??0,available_tool_definition_chars:JSON.stringify(body.tools??[]).length,sent_tool_definition_chars:lease.toolsReused?0:JSON.stringify(body.tools??[]).length,attempts:[],firstTextMs:null,firstThinkingMs:null,firstModelEventMs:null,warmStart:false,runtimeReadyMs:null});
+    metrics.native={mode,window:lease.replay?'continue':lease.reused?(lease.messages.some(m=>m.role==='tool')?'results':'continue'):'new',calls:0,host_calls:0,invalid_calls:0,handoff_stop:false,oversized_results:0,rebuild_reason:metrics.rebuild_reason??null,tools_changed:null,warm_start:false,warm_miss_reason:null};
+    let prompt;try{prompt=native?nativeInput(body,{messages:lease.messages,delta:lease.reused,batching:this.cfg.nativeBatching!==false}):decisionInput(body,{messages:lease.messages,toolsReused:lease.toolsReused,delta:lease.reused});
     metrics.promptCharacters=prompt.length;metrics.fullPromptCharacters=(native?nativeInput(body):decisionInput(body)).length;
-    metrics.charactersAvoided=Math.max(0,metrics.fullPromptCharacters-prompt.length);
+    metrics.charactersAvoided=Math.max(0,metrics.fullPromptCharacters-prompt.length);}catch(error){await lease.discard();lease.release();throw error;}
     if(lease.replay)Object.assign(metrics,{historyMode:'replay',sentMessageCount:0,promptCharacters:0,charactersAvoided:0});
     const controller=new AbortController();const abort=()=>controller.abort(signal.reason);signal.addEventListener('abort',abort,{once:true});
     if(signal.aborted)abort();
@@ -155,12 +239,12 @@ export class SdkTransport {
           try{
             send(chunk({role:'assistant',content:''}));
             const failure=this.failures.get(failureKey);
-            if(failure){metrics.localReplay=true;metrics.usageAccounting=usageAccounting([]);send(chunk({},null,{...replayUsage(),bridge_usage_source:'local-rejection-replay'}));send(failure.body);success=!!record.sessionId;return;}
+            if(failure){metrics.localReplay=true;metrics.usageAccounting=usageAccounting([]);metrics.client_usage=null;metrics.client_cache_usage='omitted';send(failure.body);success=!!record.sessionId;return;}
             if(lease.replay){
               metrics.usageAccounting=usageAccounting([]);
               signal.throwIfAborted();this.metrics.replays++;
               for(const delta of lease.replay.deltas)send(chunk(delta));
-              send(chunk({},lease.replay.finish,replayUsage()));send('[DONE]');success=true;return;
+              metrics.client_usage=null;metrics.client_cache_usage='omitted';send(chunk({},lease.replay.finish));send('[DONE]');success=true;return;
             }
             let decision,source,format,projector,gate,repairs;const rejected=new Set();
             const retryLimit=this.cfg.decisionRetries??2;
@@ -198,7 +282,7 @@ export class SdkTransport {
               const closeCall=()=>{if(!open)return;let input;try{input=open.json.trim()?JSON.parse(open.json):{};}catch{input=undefined;}
                 if(!callIds.has(open.id)){callIds.add(open.id);calls.push({id:open.id,name:open.name,input});}open=null;};
               try{
-                for await(const m of q){
+                for await(const m of abortableMessages(q,controller.signal)){
                   signal.throwIfAborted();if(m.isReplay)continue;onActivity();
                   // After a denied host call the runtime reports only its own turn limit.
                   if(native&&m.type==='assistant'&&(m.message?.content??[]).every(b=>b.type==='text')&&RUNTIME_STOP.test((m.message?.content??[]).map(b=>b.text).join('').trim()))continue;
@@ -315,6 +399,7 @@ export class SdkTransport {
                 // Retries stay in the same native transcript, model, deadline and budget.
               }
             }
+            Object.assign(metrics.native,{calls:decision.calls?.length??0,host_calls:decision.calls?.length??0,invalid_calls:metrics.attempts.filter(a=>a.errorCode).length,warm_start:metrics.warmStart,handoff_stop:native&&decision.action==='tool_calls'});
             const baseUsage=requestUsage(usages);
             const usage=baseUsage?{...baseUsage,bridge_decision_source:source,bridge_decision_format:format}:null;
             if(format==='dsml'||format==='native-text')this.metrics.decodedDsml++;
@@ -351,7 +436,7 @@ export class SdkTransport {
             const finish=decision.finishReason??(decision.action==='final'?'stop':'tool_calls');
             lease.commit({id,created,deltas,finish},message,{echo});
             if(metrics.attempts.length>1)this.metrics.recoveredRequests++;
-            metrics.lastPromptTokens=usages.at(-1)?.prompt_tokens??null;
+            metrics.client_usage=usage;metrics.client_cache_usage=usage?.prompt_tokens_details?'reported':'omitted';metrics.lastPromptTokens=usages.at(-1)?.prompt_tokens??null;
             metrics.outputTokensPerSecond=usage&&metrics.firstModelEventMs!==null?usage.completion_tokens/Math.max(.001,(performance.now()-start-metrics.firstModelEventMs)/1000):null;
             const terminal=chunk({},finish,usage);terminal.bridge_usage={accounting:metrics.usageAccounting,correction_calls:metrics.correctionCalls??0};
             send(terminal);send('[DONE]');success=true;prewarmNext=native&&finish==='tool_calls';
@@ -377,7 +462,7 @@ export class SdkTransport {
             send(safe.body);
           }finally{
             controller.abort();signal.removeEventListener('abort',abort);
-            if(!success||!record.sessionId)await lease.discard();lease.release();
+            if(!success&&signal.aborted){record.cancelled=true;record.sessionId=null;}else if(!success||!record.sessionId)await lease.discard();lease.release();
             if(!closed){closed=true;sink.close();}
             if(prewarmNext)this.prewarm(record,body,credential,native);
             if(success)void this.prewarmBlank(body,credential,native).catch(()=>{});
@@ -388,4 +473,11 @@ export class SdkTransport {
     });
     const response=new Response(stream,{headers:{'content-type':'text/event-stream'}});response.bridgeMetrics=metrics;return response;
   }
+}
+
+/** An SDK iterator that ignores an abort must still release its context lease. */
+async function* abortableMessages(query,signal){
+  const iterator=query[Symbol.asyncIterator]();
+  try{for(;;){const next=await abortable(iterator.next(),signal);if(next.done)return;yield next.value;}}
+  finally{if(signal.aborted){query.cleanup?.();query.close?.();void Promise.resolve(iterator.return?.()).catch(()=>{});}}
 }

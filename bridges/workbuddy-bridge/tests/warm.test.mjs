@@ -31,7 +31,7 @@ async function fixture(t,steps,cfg={}){
     })();
     return Object.assign(query,{connect:async()=>{entry.connected++;},cleanup:()=>{entry.cleaned++;}});
   };
-  const transport=new SdkTransport({runtime,cliPath:process.execPath,toolMode:'native',prewarmMs:5000,maxWarm:2,...cfg},{get:async()=>credential},{run});
+  const transport=new SdkTransport({runtime,cliPath:process.execPath,toolMode:'replay',prewarmMs:5000,maxWarm:2,...cfg},{get:async()=>credential},{run});
   t.after(async()=>{await transport.close();await rm(runtime,{recursive:true,force:true});});return {transport,runs};
 }
 async function collect(transport,request){
@@ -46,6 +46,10 @@ test('the next turn runs on a runtime that booted while the host executed the ca
   const first=await collect(transport,body);await sleep(450);
   assert.equal(runs.length,2);assert.equal(runs[1].prestarted,true);assert.equal(runs[1].connected,1);assert.equal(runs[1].started,false);
   assert.equal(runs[1].options.resume,'warm-session');assert.equal(runs[1].options.mcpServers.host.type,'sdk');
+  // A prestarted runtime must carry the same memory and compaction switches as a cold one.
+  assert.equal(runs[1].options.env.CODEBUDDY_CODE_DISABLE_AUTO_MEMORY,'1');
+  assert.equal(runs[1].options.env.CODEBUDDY_PRE_MESSAGE_COMPACT,'0');
+  assert.equal(runs[1].options.env.CODEBUDDY_AUTOCOMPACT_PCT_OVERRIDE,'100');
   const second=await collect(transport,next(first));
   assert.equal(runs.length,2);assert.equal(second.metrics.warmStart,true);assert.equal(second.result.choices[0].message.content,'a.ts 已检查完毕。');
   assert.match(runs[1].prompt,/HOST_RESULT/);assert.equal(runs[1].cleaned,0);assert.equal(transport.warm.stats.used,1);assert.equal(second.metrics.attempts[0].warm,true);
@@ -89,7 +93,7 @@ test('one bounded blank runtime serves only a fresh matching conversation and cl
       yield {type:'result',subtype:'success',is_error:false};
     })(),{connect:async()=>{},cleanup:()=>{entry.cleaned++;}});
   };
-  const transport=new SdkTransport({runtime,cliPath:process.execPath,toolMode:'native',prewarmMs:5000,maxBlankWarm:1},{get:async()=>credential},{run});
+  const transport=new SdkTransport({runtime,cliPath:process.execPath,toolMode:'replay',prewarmMs:5000,maxBlankWarm:1},{get:async()=>credential},{run});
   t.after(async()=>{await transport.close();await rm(runtime,{recursive:true,force:true});});
   const request={...body,tools:[],prompt_cache_key:undefined,response_format:{type:'json_object'}};
   const first=await collect(transport,request);await sleep(100);assert.equal(runs.length,2);assert.equal(runs[1].options.resume,undefined);

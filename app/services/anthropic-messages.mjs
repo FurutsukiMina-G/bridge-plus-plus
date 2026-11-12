@@ -76,6 +76,18 @@ function systemContent(system,omitted){
   }
   return kept.length?normalContent(kept,false,omitted):'';
 }
+/** Names a ToolSearch result has loaded (`tool_reference` blocks anywhere in the history, usually inside tool_result). */
+export function referencedToolNames(messages){
+  const names=new Set();
+  const visit=value=>{
+    if(Array.isArray(value)){for(const item of value)visit(item);return;}
+    if(!value||typeof value!=='object')return;
+    if(value.type==='tool_reference'&&typeof value.tool_name==='string')names.add(value.tool_name);
+    if(Array.isArray(value.content))visit(value.content);
+  };
+  for(const message of Array.isArray(messages)?messages:[])visit(message?.content);
+  return names;
+}
 export function anthropicToChat(body,{images=false}={}){
   if(!body||typeof body!=='object'||!Array.isArray(body.messages))throw new Error('Anthropic messages 必须是非空数组');
   const omitted=new Set(),messages=[];
@@ -115,7 +127,10 @@ export function anthropicToChat(body,{images=false}={}){
     }
     throw new Error('Unsupported Anthropic message role: '+String(message?.role));
   }
-  const tools=(body.tools??[]).filter(tool=>tool?.defer_loading!==true&&(!tool.type||tool.type==='custom')).map(tool=>({type:'function',function:{name:tool.name,description:tool.description??'',parameters:chatToolParameters(tool.input_schema)}}));
+  // Deferred tools stay out until a ToolSearch result has loaded them, as on the Anthropic API; dropping them for
+  // good made every loaded tool (WebFetch, MCP tools…) unknown to the upstream runtime when the model called it.
+  const loaded=referencedToolNames(body.messages);
+  const tools=(body.tools??[]).filter(tool=>(tool?.defer_loading!==true||loaded.has(tool.name))&&(!tool.type||tool.type==='custom')).map(tool=>({type:'function',function:{name:tool.name,description:tool.description??'',parameters:chatToolParameters(tool.input_schema)}}));
   const choice=toolChoice(body.tool_choice),parallel=body.disable_parallel_tool_use===true||body.tool_choice?.disable_parallel_tool_use===true;
   return {model:body.model,messages,...body.stream!==undefined?{stream:body.stream}:{},...body.stream===true?{stream_options:{include_usage:true}}:{},...body.max_tokens!==undefined?{max_tokens:body.max_tokens}:{},...body.stop_sequences!==undefined?{stop:body.stop_sequences}:{},...tools.length?{tools}:{},...choice!==undefined?{tool_choice:choice}:{},...parallel?{parallel_tool_calls:false}:{},...omitted.size?{bridge_omitted_media:[...omitted]}:{}};
 }

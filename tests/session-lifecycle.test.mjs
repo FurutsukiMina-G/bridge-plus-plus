@@ -32,3 +32,16 @@ test('exhausted gateway correction closes the runtime and ignores a later native
   await f.manager.prompt(f.session.id,'continue');await first.emit({type:'error',source:'gateway',fatal:true,text:'stale'});
   await f.instances[1].emit({type:'text',text:'Fixture inspection completed.'});await f.instances[1].emit({type:'turn-end',status:'completed'});assert.equal(f.session.status,'completed');
 });
+
+test('one settled approval journals exactly one choice row while the native decision mirror survives as data',async t=>{
+  const f=await fixture(t);f.gate.resolve();await f.manager.prompt(f.session.id,'work');
+  const adapter=f.instances[0];adapter.approve=async(id,choice)=>{await adapter.emit({type:'approval-resolved',approvalId:id,choice});};
+  await adapter.emit({type:'approval',approvalId:'dsh:remote:e1'});
+  await f.manager.approve(f.session.id,'dsh:remote:e1','approve');
+  await adapter.emit({type:'native-event',name:'approval/decided',data:{id:'d1',outcome:'allowed-once'}});
+  await adapter.emit({type:'text',text:'Fixture approval completed.'});await adapter.emit({type:'turn-end',status:'completed'});
+  const events=await f.store.events(f.session.id);
+  const settled=events.filter(e=>e.type==='approval-resolved');
+  assert.equal(settled.length,1);assert.equal(settled[0].approvalId,'dsh:remote:e1');assert.equal(settled[0].choice,'approve');
+  const mirror=events.find(e=>e.type==='native-event'&&e.name==='approval/decided');assert.deepEqual(mirror.data,{id:'d1',outcome:'allowed-once'});
+});

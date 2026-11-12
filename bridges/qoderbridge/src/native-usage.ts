@@ -4,7 +4,7 @@ import type {Config} from './client.js';
 
 type Row={id:string|null;credits:number|null;original_credits:number|null;billable:boolean|null;context_usage_ratio:number|null;
   text_deltas:number;text_chars:number;thinking_deltas:number;thinking_chars:number;input_json_deltas:number;input_json_chars:number;
-  input_json_max_delta_chars:number;tool_input_chars:number;stop_reason:string|null;context_window:number|null};
+  input_json_max_delta_chars:number;tool_input_chars:number;stop_reason:string|null;stop_reasons:string[];context_window:number|null};
 export class NativeUsage{
   readonly rows:Row[]=[];private current?:Row;
   totalCredits:number|null=null;apiErrors:string[]=[];sdkErrors:string[]=[];sdkErrorCode:string|number|null=null;sessionId:string|null=null;
@@ -16,7 +16,7 @@ export class NativeUsage{
     const event=message.event as {type:string;message?:{id?:string};usage?:Record<string,unknown>;delta?:{type?:string;text?:string;thinking?:string;partial_json?:string;stop_reason?:string}};
     if(event.type==='message_start'){
       this.current={id:event.message?.id??null,credits:null,original_credits:null,billable:null,context_usage_ratio:null,text_deltas:0,text_chars:0,
-        thinking_deltas:0,thinking_chars:0,input_json_deltas:0,input_json_chars:0,input_json_max_delta_chars:0,tool_input_chars:0,stop_reason:null,context_window:contextWindow};
+        thinking_deltas:0,thinking_chars:0,input_json_deltas:0,input_json_chars:0,input_json_max_delta_chars:0,tool_input_chars:0,stop_reason:null,stop_reasons:[],context_window:contextWindow};
       this.rows.push(this.current);
     }
     const row=this.current;if(!row)return;
@@ -27,7 +27,7 @@ export class NativeUsage{
       const chars=delta.partial_json?.length??0;row.input_json_deltas++;row.input_json_chars+=chars;row.input_json_max_delta_chars=Math.max(row.input_json_max_delta_chars,chars);
     }
     if(event.type==='message_delta'){
-      row.stop_reason=delta?.stop_reason??row.stop_reason;
+      if(delta?.stop_reason){row.stop_reasons.push(delta.stop_reason);if(row.stop_reason!=='tool_use'||delta.stop_reason==='tool_use')row.stop_reason=delta.stop_reason;}
       if(typeof event.usage?.credits==='number')row.credits=event.usage.credits;
       if(typeof event.usage?.original_credits==='number')row.original_credits=event.usage.original_credits;
       if(typeof event.usage?.billable==='boolean')row.billable=event.usage.billable;

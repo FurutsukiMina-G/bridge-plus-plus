@@ -1,8 +1,24 @@
 import {once} from 'node:events';
 import {cacheUsage} from './usage-view.mjs';
 const number=value=>typeof value==='number'&&Number.isFinite(value)&&value>=0?value:null;
+/** One auxiliary-request rule for every route (OpenAI chat, Anthropic messages, Codex
+ * Responses), so a side request (title, review, compaction) is marked the same way:
+ * an explicit `x-bridge-auxiliary` from a client that knows its own intent wins; without
+ * that header a request is auxiliary when it declares no tools at all, or forbids tool
+ * calls with `tool_choice:'none'`. `tools_count` is the tool count the *gateway client*
+ * declared, kept across the Responses→chat hop by `x-bridge-tool-count` so a converted
+ * request cannot silently drop the tools the client actually sent. */
+export function requestKind(body,headers={}){
+  const fromHeader=Number(headers['x-bridge-tool-count']);
+  const declared=Array.isArray(body?.tools)?body.tools.length:0;
+  const toolsCount=Number.isSafeInteger(fromHeader)&&fromHeader>=0?fromHeader:declared;
+  const choice=body?.tool_choice;
+  const forbidden=choice==='none'||(choice!==null&&typeof choice==='object'&&choice.type==='none');
+  const stated=headers['x-bridge-auxiliary'];
+  return {auxiliary:stated===undefined?declared===0||forbidden:stated==='1',toolsCount};
+}
 /** Observe provider usage once; publish it before terminal frames can end a native turn. */
-export async function relayCompletion(upstream,res,{signal,includeUsage,auxiliary=false,model,contextWindow,onUsage=async()=>{},onNotice=async()=>{},onFailure=async()=>{},onSuccess=async()=>{},sanitizeError=value=>value,started=performance.now()}){
+export async function relayCompletion(upstream,res,{signal,includeUsage,auxiliary=null,toolsCount=null,model,contextWindow,onUsage=async()=>{},onNotice=async()=>{},onFailure=async()=>{},onSuccess=async()=>{},sanitizeError=value=>value,started=performance.now()}){
   let usage=null,extra=null,firstToken=null,published=false,failurePublished=false,limited=false,limitPublished=false;const toolIndices=new Set();
   const failure=async frame=>{if(frame?.error){frame.error=sanitizeError(frame.error);if(!failurePublished){failurePublished=true;await onFailure(frame.error);}}};
   const observe=frame=>{
@@ -12,7 +28,7 @@ export async function relayCompletion(upstream,res,{signal,includeUsage,auxiliar
   const publish=async()=>{
     if(limited&&!limitPublished){limitPublished=true;await onNotice({type:'native-event',source:'gateway',name:'gateway/output-limit',data:{reason:'max_output_tokens'}});}
     if(published||!usage&&!extra?.accounting)return;published=true;
-    await onUsage({type:'usage',scope:'request',source:'gateway',data:{model,prompt_tokens:number(usage?.prompt_tokens),completion_tokens:number(usage?.completion_tokens),reasoning_tokens:number(usage?.completion_tokens_details?.reasoning_tokens),...cacheUsage(usage??{},extra),context_window:contextWindow??null,first_token_ms:firstToken,duration_ms:performance.now()-started,...(auxiliary?{auxiliary:true}:{}),...(extra?.accounting?{usage_accounting:extra.accounting}:{}),...(Number.isInteger(extra?.correction_calls)?{correction_calls:extra.correction_calls}:{})}});
+    await onUsage({type:'usage',scope:'request',source:'gateway',data:{model,prompt_tokens:number(usage?.prompt_tokens),completion_tokens:number(usage?.completion_tokens),reasoning_tokens:number(usage?.completion_tokens_details?.reasoning_tokens),...cacheUsage(usage??{},extra),context_window:contextWindow??null,first_token_ms:firstToken,duration_ms:performance.now()-started,...(typeof auxiliary==='boolean'?{auxiliary}:{}),...(Number.isSafeInteger(toolsCount)?{tools_count:toolsCount}:{}),...(extra?.accounting?{usage_accounting:extra.accounting}:{}),...(Number.isInteger(extra?.correction_calls)?{correction_calls:extra.correction_calls}:{})}});
   };
   const write=async text=>{signal.throwIfAborted();if(!res.write(text))await once(res,'drain',{signal});};
   if(!String(upstream.headers.get('content-type')).includes('text/event-stream')){

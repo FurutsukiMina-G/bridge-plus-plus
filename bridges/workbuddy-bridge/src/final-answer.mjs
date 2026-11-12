@@ -3,7 +3,7 @@ import {BridgeError} from './errors.mjs';
 import {parseJsonText} from './json-text.mjs';
 import {leakedProtocol} from './protocol-text.mjs';
 export const hasUsableTools=body=>!!body.tools?.length&&body.tool_choice!=='none';
-export const answerInstructions=body=>'Return the final answer directly, following the original conversation role priorities. Do not add a bridge envelope. '+(body.response_format?'Return a complete JSON document matching response_format: '+JSON.stringify(body.response_format):'Plain text is permitted.');
+export const answerInstructions=body=>'Return the final answer directly, following the original conversation role priorities. Do not add a bridge envelope. '+(body.response_format?'Return a complete JSON document matching response_format: '+JSON.stringify(body.response_format):'Reply exactly as the conversation above instructs.');
 export function finalAnswer(text,body,onRepair=()=>{}){
   if(!String(text).trim())throw new BridgeError(502,'invalid_decision','WorkBuddy returned an empty answer');
   let value,repairs=[];const trimmed=text.trim(),source=trimmed.startsWith('<{')?trimmed.slice(1):trimmed;

@@ -10,7 +10,9 @@ export function dshEvent(event){const d=event.data??{};
   if(event.type==='tool/call')return {type:'tool-start',name:d.name??d.call?.name??d.toolCall?.name,toolId:d.callId??d.id??d.call?.id,data:d};
   if(event.type==='tool/result')return {type:'tool-end',toolId:d.id??d.message?.toolCallId,data:d};
   if(event.type==='approval/asked')return {type:'approval',approvalId:`dsh:${d.id??d.requestId??event.seq}`,name:d.toolName??d.tool??'DSH approval',data:d,choices:['native']};
-  if(event.type==='approval/decided')return {type:'approval-resolved',approvalId:d.id||d.requestId||d.approvalId?`dsh:${d.id??d.requestId??d.approvalId}`:undefined,data:d};
+  // The Bridge++ settlement already records one approval-resolved with its choice; keep the native
+  // decision mirror as raw journal information only, so one authorization never counts twice.
+  if(event.type==='approval/decided')return {type:'native-event',name:'approval/decided',data:d};
   if(event.type==='turn/end'){const kind=d.reason?.kind??d.reason??d.cause?.kind??d.cause,cancelled=['cancelled','aborted','interrupted'].includes(kind),message=[...new Set([failureText(d.reason),failureText(d.cause)].filter(Boolean))].join('；');return {type:'turn-end',status:kind==='completed'?'completed':cancelled?'interrupted':'failed',...kind==='completed'?{}:{reason:cancelled?{kind:'cancelled',message:message||'DSH 本轮已取消。'}:runtimeReason({message,code:d.reason?.code??d.cause?.code},'DSH 本轮未成功结束，未返回具体原因。')}};}
   if(event.type==='step/end'&&d.usage)return {type:'usage',data:d.usage};
   if(event.type==='workspace/changes')return {type:'diff',data:d};

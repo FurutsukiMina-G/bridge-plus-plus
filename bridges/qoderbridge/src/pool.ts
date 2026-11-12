@@ -16,7 +16,7 @@ import {sdkMediaPrompt} from './media-input.js';
 import {IsolationCache} from './isolation-cache.js';
 import {startupTransport,runtimeMemory,DISABLED_RUNTIME_MEMORY,type StartupAttempt} from './startup-phases.js';
 import {hasUsableTools} from './final-answer.js';
-import {NativeLane,nativeEligible} from './native-lane.js';
+import {NativeLane,nativeEligible,nativeSkipReason} from './native-lane.js';
 import {NATIVE_SYSTEM} from './native-prompt.js';
 import type {HostBinding,HostToolTable} from './native-tools.js';
 
@@ -83,12 +83,13 @@ export class QoderPool {
   private sweeper = setInterval(() => this.sweepIdle(), SWEEP_MS);
   constructor(readonly config: Config, private readonly startRuntime: typeof startup = startup) {
     this.sweeper.unref();
-    this.native=new NativeLane(config,(binding,table,names)=>this.open('native',{binding,table,names}),record=>this.close(record as unknown as RecordSession),scope=>this.sweep(scope));
+    this.native=new NativeLane(config,(binding,table,names,maxTokens)=>this.open('native',{binding,table,names,maxTokens}),record=>this.close(record as unknown as RecordSession),scope=>this.sweep(scope));
     if(!Number.isSafeInteger(config.blankWarmLimit??2)||(config.blankWarmLimit??2)<0||(config.blankWarmLimit??2)>4||!Number.isSafeInteger(config.blankWarmTtlMs??120000)||(config.blankWarmTtlMs??120000)<1){clearInterval(this.sweeper);throw new Error('Invalid Qoder blank runtime limit or TTL');}
     // The runtime cuts any function result above 50,000 characters to a preview; the receipt path must trigger below it.
     const nativeRange=(value:number|undefined,min:number,max:number)=>value===undefined||Number.isSafeInteger(value)&&value>=min&&value<=max;
     if(!nativeRange(config.nativeResultCharLimit,1,49000)||!nativeRange(config.nativeWarmLimit,0,2)||!nativeRange(config.nativeInvalidRounds,1,10)||
-      !nativeRange(config.nativeMaxTurns,10,1_000_000)||!nativeRange(config.nativeMcpOutputTokens,25_000,2_000_000_000)){
+      !nativeRange(config.nativeMaxTurns,10,1_000_000)||!nativeRange(config.nativeMcpOutputTokens,25_000,2_000_000_000)||
+      !nativeRange(config.idleTimeoutMs,1_000,600_000)||!nativeRange(config.awaitingIdleMs,60_000,3_600_000)){
       clearInterval(this.sweeper);throw new Error('Invalid Qoder native tool settings');}
     try{pruningThreshold(config.prunedHistoryReuseRatio);}catch(error){clearInterval(this.sweeper);throw error;}
     try { decisionRetryLimit(config.decisionRetries); }
@@ -135,8 +136,8 @@ export class QoderPool {
     }).catch(()=>{this.cacheInfo={enabled:true,hit:false,status:'unavailable',cli_version:null,declared_cli_version:null};return null;});return this.cacheReady;
   }
   private open(kind?:'json'):Promise<RecordSession>;
-  private open(kind:'native',native:{binding:HostBinding;table?:HostToolTable;names:string[]}):Promise<import('./native-lane.js').NativeRuntime>;
-  private async open(kind:'json'|'native'='json',native?:{binding:HostBinding;table?:HostToolTable;names:string[]}):Promise<RecordSession|import('./native-lane.js').NativeRuntime> {
+  private open(kind:'native',native:{binding:HostBinding;table?:HostToolTable;names:string[];maxTokens?:number}):Promise<import('./native-lane.js').NativeRuntime>;
+  private async open(kind:'json'|'native'='json',native?:{binding:HostBinding;table?:HostToolTable;names:string[];maxTokens?:number}):Promise<RecordSession|import('./native-lane.js').NativeRuntime> {
     const openingAt=performance.now(),attempts:StartupAttempt[]=[];
     await mkdir('.runtime', { recursive: true });
     const cache=await this.cache();
@@ -168,6 +169,8 @@ export class QoderPool {
         options.mcpServers={host:native.binding.config(native.names)};
         options.systemPrompt=NATIVE_SYSTEM(this.config.hostName);options.maxTurns=this.config.nativeMaxTurns??100000;
         options.env={...options.env,QODERCN_CLI_MAX_MCP_OUTPUT_TOKENS:String(this.config.nativeMcpOutputTokens??1000000)};
+        // The Qoder CLI accepts an output budget per process; a runtime cannot change it after startup.
+        if(native.maxTokens!==undefined)options.extraArgs={...options.extraArgs,'max-output-tokens':String(native.maxTokens)};
         options.hooks={PreToolUse:[{hooks:[(input:any)=>Promise.resolve(this.native.preToolUse(native.binding,input))]}],PostToolUse:[{hooks:[(input:any)=>Promise.resolve(this.native.postToolUse(native.binding,input))]}]};
         options.canUseTool=(name,input)=>Promise.resolve(this.native.canUseTool(native.binding,name,input));
       }
@@ -312,6 +315,8 @@ export class QoderPool {
   async infer(request: ChatRequest, hooks: InferHooks = {}):Promise<any> {
     // Native traffic is demand too: it keeps the blank JSON runtimes (auxiliary tool-less requests) replenished.
     if(this.isNative(request)){this.lastDemand=Date.now();return this.native.infer(request,hooks);}
+    // One reason per tool-carrying request for staying on the JSON path: the audit trail for native coverage.
+    const nativeSkip=request.tools?.length?nativeSkipReason(request,this.config):null;
     const start = performance.now();
     this.lastDemand=Date.now();if(this.oneShot(request))this.warmTarget=Math.min(2,this.config.blankWarmLimit??2);
     const requestHash = createHash('sha256').update(JSON.stringify({ model: request.model,
@@ -372,7 +377,7 @@ export class QoderPool {
             credits_delta:0,total_session_credits:record.lastCredits,model_requests:0,
             local_response_replay:true,normalized_usage_source:'local_replay',client_usage:null as OpenAIUsage|null,
             client_cache_usage:'omitted',cache_estimate_tokens:null as number|null,cache_estimate_ratio:null as number|null,
-            decision_recovery:localRecovery,
+            decision_recovery:localRecovery,native_skip_reason:nativeSkip,
           }};
       }
       if (record.lastSuccessHash === requestHash && record.lastDecision && Date.now() - record.touched < 120_000) {
@@ -392,7 +397,7 @@ export class QoderPool {
             // No usage frame: a replay costs nothing, and a zero prompt would read as an empty context to clients.
             normalized_usage_source: 'local_replay', client_usage: null as OpenAIUsage | null,
             client_cache_usage: 'omitted', cache_estimate_tokens: null as number | null,
-            cache_estimate_ratio: null as number | null } };
+            cache_estimate_ratio: null as number | null, native_skip_reason: nativeSkip } };
       }
       const exactPrefix = reused && !record.nativeReleased && hasConversationPrefix(record.messages, request.messages);
       const pruned=reused&&!record.nativeReleased&&!exactPrefix&&pruningAllowed(record.contextUsageRatio,pruningThreshold(this.config.prunedHistoryReuseRatio))?prunedConversationPrefix(record.messages,request.messages):null;
@@ -578,7 +583,7 @@ export class QoderPool {
         thinking_chars:attemptReports.reduce((n,r)=>n+(r.thinking_chars as number),0),
         ttft_ms:attemptReports[0]!.ttft_ms as number|null,
         first_event_ms:attemptReports[0]!.first_event_ms as number|null,
-        decision_recovery:recovery}};
+        decision_recovery:recovery,native_skip_reason:nativeSkip}};
     } finally {
       signal.removeEventListener('abort', abort);
       release();
