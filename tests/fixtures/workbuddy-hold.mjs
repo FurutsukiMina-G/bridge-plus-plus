@@ -17,7 +17,9 @@ class HoldSession {
   emit(message){this.events.push({session_id:'hold-fixture',...message});this.wake?.();}
   fail(error){this.events.push(error);this.wake?.();}
   async send(prompt){
-    assert.equal(this.closed,false);this.prompts.push(prompt);
+    assert.equal(this.closed,false);const content=typeof prompt==='string'?prompt:prompt?.message?.content;
+    if(typeof prompt!=='string'){assert.equal(prompt.type,'user');assert.equal(prompt.message.role,'user');}
+    assert.equal(typeof content,'string');this.prompts.push(content);
     this.emit({type:'system',subtype:'init',model:this.options.model,mcp_servers:[{name:'host',status:'connected'}]});
     await this.onSend(this,prompt,this.prompts.length);
   }

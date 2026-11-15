@@ -36,7 +36,7 @@ test('session metrics report context fill, last and cumulative cache hits, and m
   assert.equal(m.context(null).window,200000);
   assert.equal(m.rate(Date.parse(at(60000))).value,100);
   assert.equal(m.rate(Date.parse(at(60000))).estimated,false);
-  assert.deepEqual(m.turn('t1'),{requests:1,input:12000,output:400,cacheRatio:0.5,cacheStatus:'reported'});
+  assert.deepEqual(m.turn('t1'),{requests:1,input:12000,output:400,cacheRatio:0.5,cacheStatus:'reported',credits:null,creditsPartial:false});
   m.feed({type:'thinking',text:'思考中的流式文字',turnId:'t3',at:at(9000)});
   m.feed({type:'thinking',text:'继续输出更多内容',turnId:'t3',at:at(9500)});
   const live=m.rate(Date.parse(at(10000)),true);
@@ -96,4 +96,16 @@ test('session totals add every request up to a turn end, side requests and parti
   native.feed({type:'usage',scope:'native-session',at:at(1000),data:{last:{inputTokens:5000,outputTokens:100}}});
   native.feed({type:'usage',scope:'native-session',at:at(3000),data:{last:{inputTokens:9000,outputTokens:300}}});
   assert.equal(native.totalUntil(end(2000)).input,5000);assert.equal(native.totalUntil(end(4000)).output,300);assert.equal(native.totalUntil(end(500)),null);
+});
+
+test('a turn sums the credits its requests reported and marks a partial sum',()=>{
+  const m=new SessionMetrics(),at=ms=>new Date(Date.UTC(2026,10,16,3,0,0)+ms).toISOString();
+  m.feed({type:'usage',turnId:'q',at:at(1000),data:{prompt_tokens:1000,completion_tokens:10,credits:0.2}});
+  m.feed({type:'usage',turnId:'q',at:at(2000),data:{prompt_tokens:1200,completion_tokens:20,credits:0.25}});
+  assert.equal(Number(m.turn('q').credits.toFixed(2)),0.45);assert.equal(m.turn('q').creditsPartial,false);
+  m.feed({type:'usage',turnId:'w',at:at(3000),data:{prompt_tokens:900,completion_tokens:5}});
+  assert.equal(m.turn('w').credits,null,'no metering, no credits');
+  m.feed({type:'usage',turnId:'mix',at:at(4000),data:{prompt_tokens:900,completion_tokens:5,credits:0.1}});
+  m.feed({type:'usage',turnId:'mix',at:at(5000),data:{prompt_tokens:900,completion_tokens:5}});
+  assert.equal(m.turn('mix').credits,0.1);assert.equal(m.turn('mix').creditsPartial,true);
 });

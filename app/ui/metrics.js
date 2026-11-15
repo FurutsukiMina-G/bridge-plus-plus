@@ -142,8 +142,11 @@ export class SessionMetrics{
     const sum=key=>rows.every(r=>r[key]!==null)?rows.reduce((n,r)=>n+r[key],0):null;
     // Cost counts every request of the turn; the cache ratio describes the main conversation when it has any.
     const known=rows.filter(r=>r.cached!==null&&r.input>0),mainKnown=known.filter(r=>!r.auxiliary),cachedRows=mainKnown.length?mainKnown:known;
+    // Credits are the source's own metering; a request that reported none keeps the sum a lower bound.
+    const priced=rows.filter(r=>r.credits!==null);
     return{requests:rows.length,input:sum('input'),output:sum('output'),
       cacheRatio:cachedRows.length?cachedRows.reduce((n,r)=>n+r.cached,0)/cachedRows.reduce((n,r)=>n+r.input,0):null,
-      cacheStatus:cachedRows.some(r=>r.cacheStatus==='estimated')?'estimated':cachedRows.length?'reported':'not_reported'};
+      cacheStatus:cachedRows.some(r=>r.cacheStatus==='estimated')?'estimated':cachedRows.length?'reported':'not_reported',
+      credits:priced.length?priced.reduce((n,r)=>n+r.credits,0):null,creditsPartial:priced.length>0&&priced.length<rows.length};
   }
 }

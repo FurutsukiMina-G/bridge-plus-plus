@@ -17,13 +17,15 @@ import {assertRuntimeReady} from './runtime-availability.mjs';
 import {failureText,failureValue,runtimeReason} from './failure-details.mjs';
 import {interjectCapability,queuedBatch} from './session-input.mjs';
 import {AgentRules,rulesPrefix} from './agent-rules.mjs';
+import {commandKey,commandView,slashInput,findCommand,commandConflict} from './slash-commands.mjs';
 
 const defaults={dsh:DshAdapter,kimi:KimiAcpAdapter,codex:CodexAdapter,claude:ClaudeAdapter,antigravity:AntigravityAdapter};
 export class Sessions {
-  constructor(store,providers,gateway,runtimes,{constructors=defaults,identifyProcess=processIdentity,media,capabilities,runtimeReady,now=Date.now,adapterIdleMs=600000,adapterMaxIdle=4,adapterSweepMs=60000}={}){
+  constructor(store,providers,gateway,runtimes,{constructors=defaults,identifyProcess=processIdentity,media,capabilities,runtimeReady,now=Date.now,adapterIdleMs=600000,adapterMaxIdle=4,adapterSweepMs=60000,commandTimeoutMs=15000}={}){
     this.media=media;this.capabilities=capabilities;this.runtimeReady=runtimeReady;this.now=now;this.adapterIdleMs=adapterIdleMs;this.adapterMaxIdle=adapterMaxIdle;
     this.agentRules=new AgentRules(store,{providers,gateway});
     this.inputLocks=new Map();this.sendingQueue=new Set();this.draining=new Set();
+    this.commandTimeoutMs=Math.min(15000,Math.max(1,commandTimeoutMs));this.commandFlights=new Map();this.adapterFlights=new Map();
     Object.assign(this,{store,providers,gateway,runtimes,constructors,identifyProcess});this.adapters=new Map();this.adapterUsed=new Map();this.runs=new Map();this.rebinding=new Set();this.permissionChanging=new Set();this.external=new Map();this.closed=false;this.adapterTimer=setInterval(()=>{void this.recycleAdapters().catch(()=>{});},adapterSweepMs);this.adapterTimer.unref();
     for(const session of store.state?.sessions??[])if(Number.isSafeInteger(session.nativeClientPid)&&session.nativeClientPid>0){try{process.kill(session.nativeClientPid,0);this.external.set(session.id,{restoredPid:session.nativeClientPid});}catch(error){if(error.code!=='ESRCH')this.external.set(session.id,{restoredPid:session.nativeClientPid});}}
     if(gateway){gateway.requestContext=id=>this.runs.get(id)?.id;gateway.onUsage=async(id,event,turnId)=>{if(await this.agentRules.acceptUsage(id,event))return;const run=this.runs.get(id);if(!run||run.id!==turnId)return;return this.receive(this.store.session(id),run.adapter,event);};gateway.onSuccess=(id,turnId)=>gateway.onUsage(id,{type:'native-event',source:'gateway',name:'gateway/request-completed'},turnId);}
@@ -58,6 +60,10 @@ export class Sessions {
     await this.store.mutate(s=>{s.sessions.unshift(session);});return session;
   }
   async adapter(session,run){
+    if(run?.cancelled||this.closed)throw new CancelledError();
+    let flight=this.adapterFlights.get(session.id);if(!flight){flight=this.createAdapter(session,run);this.adapterFlights.set(session.id,flight);void flight.finally(()=>{if(this.adapterFlights.get(session.id)===flight)this.adapterFlights.delete(session.id);}).catch(()=>{});}return flight;
+  }
+  async createAdapter(session,run){
     this.ensureReady(session.runtimeId);
     session.selection=this.validate(session.runtimeId,session.selection);
     if(run?.cancelled||this.closed)throw new CancelledError();
@@ -84,7 +90,29 @@ export class Sessions {
     }
     adapter=new this.constructors[session.runtimeId](options);this.adapters.set(session.id,adapter);this.touchAdapter(session.id);return adapter;
   }
+  runtimeCommands(runtimeId,modelKey){
+    if(!this.runtimes.some(r=>r.id===runtimeId))throw new Error('未知执行环境');
+    const base=commandView(runtimeId,modelKey),cached=this.store.state.commandCatalogs?.[commandKey(runtimeId,modelKey)];
+    return cached?structuredClone(cached):{...base,commands:[],stale:true};
+  }
+  async cacheCommands(session,view){
+    const value={runtimeId:session.runtimeId,source:view.source,commands:view.commands,note:view.note??null,stale:false},key=commandKey(session.runtimeId,session.selection.modelKey);
+    const changed=JSON.stringify(session.commandCatalog?.view)!==JSON.stringify(value);
+    await this.store.mutate(state=>{state.commandCatalogs??={};state.commandCatalogs[key]=value;session.commandCatalog={modelKey:session.selection.modelKey,view:value};});
+    if(changed)this.store.emit('event',{type:'commands',sessionId:session.id,runtimeId:session.runtimeId});return structuredClone(value);
+  }
+  async commands(id){
+    if(this.closed)throw new Error('工作区正在关闭');const session=this.store.session(id);
+    const fallback=()=>({...((session.commandCatalog?.modelKey===session.selection.modelKey?session.commandCatalog.view:null)??this.runtimeCommands(session.runtimeId,session.selection.modelKey)),stale:true});
+    const base=commandView(session.runtimeId,session.selection.modelKey);
+    if(base.source!=='native')return this.cacheCommands(session,base);
+    if(this.nativeBusy(id)||this.rebinding.has(id)||this.permissionChanging.has(id))return fallback();
+    let flight=this.commandFlights.get(id);
+    if(!flight){const selection=JSON.stringify(session.selection);if(!session.nativeId)session.rulesPending=true;flight=(async()=>{const adapter=await this.adapter(session);if(typeof adapter.commands!=='function')throw new Error('执行环境未提供命令列表');const view=await adapter.commands();if(this.closed||JSON.stringify(session.selection)!==selection||this.adapters.get(id)!==adapter)throw new Error('会话执行环境已经改变');return this.cacheCommands(session,view);})();this.commandFlights.set(id,flight);void flight.finally(()=>{if(this.commandFlights.get(id)===flight)this.commandFlights.delete(id);}).catch(()=>{});}
+    let timer;try{return await Promise.race([flight,new Promise((resolve,reject)=>{timer=setTimeout(()=>reject(new Error('命令列表握手超时')),this.commandTimeoutMs);})]);}catch{return fallback();}finally{clearTimeout(timer);}
+  }
   receive(session,adapter,event){
+    if(event.type==='commands'){if(!this.closed&&this.adapters.get(session.id)===adapter)return this.cacheCommands(session,event);return Promise.resolve();}
     if(event.type==='usage'&&adapter?.endpoint&&event.source!=='gateway')return Promise.resolve();
     const run=this.runs.get(session.id);
     if(!run||run.terminal||run.adapter!==adapter||this.adapters.get(session.id)!==adapter)return Promise.resolve();
@@ -152,7 +180,7 @@ export class Sessions {
     if(status==='completed'){
       if(run.upstreamFailure){await this.store.event(session.id,{type:'error',source:'task-completion',code:'unfinished_task',turnId:run.id,text:run.upstreamFailure.message});await this.finish(session,run,'failed',event);return;}
       if(run.hasError){await this.finish(session,run,'failed',event);return;}
-      const issue=unfinishedTask({intent:run.intent,text:run.tailText|| (run.hasMedia?'Generated media artifact returned.':''),plan:run.plan});
+      const issue=run.command?null:unfinishedTask({intent:run.intent,text:run.tailText|| (run.hasMedia?'Generated media artifact returned.':''),plan:run.plan});
       if(issue){
         if(session.queue?.length){
           await this.finish(session,run,'paused',{...event,reason:{kind:'unfinished',code:'unfinished_task',message:'模型停下了，还有未完成的工作；先发送用户排队的消息。',pending:issue.pending}});return;
@@ -286,6 +314,7 @@ export class Sessions {
     if(!Array.isArray(attachmentIds)||attachmentIds.some(id=>typeof id!=='string'))throw new Error('无效附件 id 列表');
     if(this.closed)throw new Error('工作区正在关闭');const session=this.store.session(id);this.ensureReady(session.runtimeId);
     if(typeof text!=='string'||!text.trim()&&!attachmentIds?.length||text.length>500000)throw new Error('请输入有效开发任务或添加附件');
+    const slash=slashInput(text),conflict=slash&&commandConflict(session.runtimeId,session.selection.modelKey,slash.name,this.adapters.get(id)?.availableCommands);if(conflict)throw new Error(conflict);
     if(this.external.get(id)?.restoredPid)await this.refreshNative(id);
     if(delivery!==undefined&&!['steer','queue'].includes(delivery))throw new Error('无效的消息送达方式');
     if(this.nativeBusy(id))throw new Error('此会话正在原生窗口中使用，请先退出原生客户端再继续');
@@ -295,6 +324,7 @@ export class Sessions {
     this.validate(session.runtimeId,session.selection);
     if(this.runs.has(id)){
       if(!delivery)throw new Error('当前会话仍在运行，请选择插话或排队');
+      if(delivery==='steer'&&slash&&(session.runtimeId==='dsh'||session.runtimeId==='codex'&&session.selection.modelKey!=='native')&&findCommand(session.commandCatalog?.view??this.runtimeCommands(session.runtimeId,session.selection.modelKey),slash.name))return this.queueInput(session,text,attachmentIds,{note:'原生命令已排队，将在当前轮次结束后执行。'});
       return this.interject(session,text,attachmentIds,delivery);
     }
     let prepared;const run={id:randomUUID(),cancelled:false,terminal:false,adapter:null,events:Promise.resolve(),approvals:new Set(),prepared:new Promise(resolve=>{prepared=resolve;}),intent:null,plan:[],tailText:'',hasError:false,continuations:0,stats:{requests:0,failedRequests:0,corrections:0},endedNativeTurns:new Set()};
@@ -311,8 +341,6 @@ export class Sessions {
       }
       const history=await this.store.taskContext(id);
       let runtimeText=text;
-      const globalRules=session.runtimeId==='claude'||session.runtimeId==='codex'&&session.selection.modelKey!=='native'&&(!session.nativeId||session.nativeHome==='bridge');
-      if(!globalRules&&!history.users.length&&!session.nativeId&&!fromQueue){const rules=await this.agentRules.injection();if(rules.text){runtimeText=rulesPrefix(rules.text)+text;await this.store.mutate(()=>{session.rulesVersion=rules.version;});}}
       run.intent=taskIntent([...history.users,text]);
       if(run.intent.continuation)run.plan=planEntries(history.plan);
       await this.store.mutate(()=>{session.status='starting';session.updatedAt=new Date().toISOString();if(session.title==='新会话')session.title=text.trim().slice(0,45)||attachments[0]?.name||'新会话';session.mediaAttachments??=[];session.mediaAttachments.push(...attachments.map(a=>this.media.public(a)));});
@@ -323,10 +351,19 @@ export class Sessions {
       if(run.cancelled)throw new CancelledError();
       run.adapter=await this.adapter(session,run);
       if(run.cancelled)throw new CancelledError();
+      const view=slash?await this.commands(id):null,command=slash&&findCommand(view,slash.name);
+      const commandError=slash&&commandConflict(session.runtimeId,session.selection.modelKey,slash.name,run.adapter.availableCommands);if(commandError)throw new Error(commandError);
+      run.command=!!command||session.runtimeId==='antigravity'&&text.startsWith('/');
+      run.adapter.commandInput=run.command;
+      const globalRules=session.runtimeId==='claude'||session.runtimeId==='codex'&&session.selection.modelKey!=='native'&&(!session.nativeId||session.nativeHome==='bridge');
+      if(run.command&&!session.nativeId&&!session.rulesVersion)session.rulesPending=true;
+      if(!run.command&&!globalRules&&!session.rulesVersion&&(!history.users.length&&!session.nativeId||session.rulesPending)&&(!fromQueue||session.rulesPending)){const rules=await this.agentRules.injection();if(rules.text){runtimeText=rulesPrefix(rules.text)+text;await this.store.mutate(()=>{session.rulesVersion=rules.version;delete session.rulesPending;});}}
+      if(run.cancelled)throw new CancelledError();
       await this.store.mutate(()=>{session.status='running';});
       if(run.cancelled)throw new CancelledError();
       if(fromQueue){await this.store.mutate(()=>{session.queueDispatch={ids:fromQueue,turnId:run.id,at:new Date().toISOString()};});run.submitted=true;}
-      await run.adapter.prompt(runtimeText,attachments);
+      if(command&&run.adapter.executeCommand){const result=await run.adapter.executeCommand(command,slash.args,text,attachments);if(!result?.pending){await run.events;if(!run.terminal)await this.finish(session,run,result?.status??'completed');}}
+      else await run.adapter.prompt(runtimeText,attachments);
       if(fromQueue&&!run.queueDispatched){run.queueDispatched=true;await this.store.mutate(()=>{session.queue=(session.queue??[]).filter(row=>!fromQueue.includes(row.id));delete session.queueDispatch;});}
       return {delivery:'turn'};
     }catch(error){

@@ -13,7 +13,9 @@ export class FakeSession{
  constructor(options){this.options=options;this.binding=options.mcpServers.host[HOST_BINDING];this.prompts=[];this.events=[];this.handlers=[];this.controllers=[];this.response=0;this.closed=0;this.interrupts=0;}
  async connect(){this.listed=(await this.binding.listTools()).tools;await this.connectGate;}
  async getAvailableModes(){this.controlInitialized=true;return [];}
- async send(prompt){if(this.closed)throw new Error('closed fake');this.prompts.push({message:{content:prompt}});this.emit({type:'system',subtype:'init',model:this.options.model,mcp_servers:[{name:'host',status:'connected'}]});}
+ // Like the official stream-json input: a string or a full user message is a prompt. Any other line (a bare content
+ // array) is dropped without an error, and the runtime starts an empty turn whose init reports model "unknown".
+ async send(prompt){if(this.closed)throw new Error('closed fake');const content=typeof prompt==='string'?prompt:prompt?.type==='user'?prompt.message?.content:undefined;if(content===undefined){this.dropped=(this.dropped??0)+1;this.emit({type:'system',subtype:'init',model:'unknown',tools:[],mcp_servers:[]});this.emit({type:'result',subtype:'success',is_error:false,result:''});return;}this.prompts.push({message:{content}});this.emit({type:'system',subtype:'init',model:this.options.model,mcp_servers:[{name:'host',status:'connected'}]});}
  emit(message){this.events.push({session_id:'fake-session',...message});this.wake?.();}
  async *stream(){for(;;){if(this.events.length){const m=this.events.shift();if(m instanceof Error)throw m;yield m;if(m.type==='result')return;continue;}if(this.closed)return;await new Promise(r=>{this.wake=r;});}}
  close(){if(this.closed)return;this.closed++;this.wake?.();for(const c of this.controllers)c.abort();}

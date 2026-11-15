@@ -32,7 +32,8 @@ export async function openHoldRuntime(cfg,binding,lane,createSession,makeOptions
     const verify=message=>{
       if(message.isReplay)return false;
       if(message.type==='system'&&message.subtype==='init'){
-        if(message.model!==body.model)throw new BridgeError(502,'model_mismatch','Official WorkBuddy runtime selected a different model');
+        if(message.model==='unknown')throw new BridgeError(502,'sdk_incomplete','Official WorkBuddy runtime started without the prompt (model "unknown"); the message was not delivered');
+        if(message.model!==body.model)throw new BridgeError(502,'model_mismatch',`Official WorkBuddy runtime selected ${String(message.model).slice(0,60)} instead of ${body.model}`);
         if(message.plugins?.length||message.skills?.length||(message.mcp_servers??[]).some(s=>s.name!=='host'))throw new BridgeError(502,'isolation_failed','Official runtime loaded external tools, plugins or skills');
         initialized=true;
         if(!(message.mcp_servers??[]).some(s=>s.name==='host'&&s.status==='connected'))throw new BridgeError(502,'native_tools_unavailable','Official runtime did not connect the host function server');
@@ -47,7 +48,9 @@ export async function openHoldRuntime(cfg,binding,lane,createSession,makeOptions
     const queue={push(message){
       tail=tail.then(async()=>{
         if(closed)return;
-        await session.send(message.message.content);
+        // The SDK only wraps a string; a content array (text plus images) must go out as a full user message,
+        // or the runtime drops the line and starts an empty turn with model "unknown".
+        await session.send({type:'user',session_id:'',message:{role:'user',content:message.message.content},parent_tool_use_id:null});
         let terminal=false;
         for await(const message of session.stream()){
           if(closed)return;

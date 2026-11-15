@@ -8,6 +8,7 @@ import {failureText,failureValue,runtimeReason} from '../services/failure-detail
 import {createClaudeReviewer} from './claude-review.mjs';
 import {CLAUDE_AUTO_REVIEW_NATIVES} from '../services/runtime-permissions.mjs';
 import {rulesDocument,writeRulesFile} from '../services/agent-rules.mjs';
+import {commandView} from '../services/slash-commands.mjs';
 
 const PERMISSIONS={readonly:'plan',ask:'default','auto-review':'acceptEdits',auto:'bypassPermissions'};
 const MODEL_ENV=['ANTHROPIC_MODEL','ANTHROPIC_DEFAULT_OPUS_MODEL','ANTHROPIC_DEFAULT_SONNET_MODEL','ANTHROPIC_DEFAULT_HAIKU_MODEL','ANTHROPIC_SMALL_FAST_MODEL','CLAUDE_CODE_SUBAGENT_MODEL'];
@@ -83,7 +84,7 @@ export class ClaudeAdapter extends RuntimeLifecycle {
     this.checkOpen();const credentials=join(this.configDir,'.credentials.json');if(existsSync(credentials))throw new Error(`Bridge++ 的 Claude Code 私有配置目录里出现了登录凭据文件，Bridge++ 保持非登录态；请删除 ${credentials} 后重试`);
     await mkdir(this.configDir,{recursive:true});
     const rules=await this.agentRules?.injection();await writeRulesFile(join(this.configDir,'CLAUDE.md'),rulesDocument(rules?.text??''));
-    if(rules?.version)await this.saveNative(this.session.nativeId,{rulesVersion:rules.version});
+    if(rules?.version&&!this.commandDiscovery)await this.saveNative(this.session.nativeId,{rulesVersion:rules.version});
     const resume=!!this.session.nativeId&&await hasNativeRecord(this.configDir,this.session.id);
     if(this.session.nativeId&&!resume)await this.emit({type:'notice',text:'没有找到 Claude Code 原生会话记录，已用同一 ID 新开原生会话（之前的原生上下文不可用）。'});
     const {args,env}=claudeLaunchSettings({...this,resume});
@@ -93,9 +94,12 @@ export class ClaudeAdapter extends RuntimeLifecycle {
     this.child.stderr.setEncoding?.('utf8');this.child.stderr.on('data',data=>{this.stderr=(this.stderr+String(data)).slice(-16000);});
     const failed=error=>{void this.enqueue(()=>this.processFailed(error));};this.child.on('error',failed);this.child.stdin.on('error',failed);this.child.on('close',(code,signal)=>{void this.enqueue(()=>this.processClosed(code,signal));});
     let initialized;try{initialized=await this.control('initialize',{},60000);}catch(error){await stopProcess(this.child);throw error;}if(initialized.account?.tokenSource!=='ANTHROPIC_AUTH_TOKEN'){await this.close();throw new Error('Claude Code 未使用 Bridge++ 网关凭据，已停止');}
+    if(Array.isArray(initialized.commands))await this.updateCommands(initialized.commands);
     if(!this.session.nativeId)await this.saveNative(this.session.id);
     this.checkOpen();
   }
+  async updateCommands(raw=this.availableCommands){if(!raw)return;this.availableCommands=raw;await this.emit({type:'commands',...commandView('claude',this.session.selection?.modelKey,raw,{skills:this.commandSkills,terminal:this.terminalCommands})});}
+  async commands(){if(!this.ready)this.commandDiscovery=true;await this.ensureStarted();if(!this.availableCommands)throw new Error('Claude Code 未返回命令列表');return commandView('claude',this.session.selection?.modelKey,this.availableCommands,{skills:this.commandSkills,terminal:this.terminalCommands});}
   send(message){this.checkOpen();if(!this.child||this.child.stdin.destroyed)throw new Error('Claude Code 原生连接已关闭');this.child.stdin.write(JSON.stringify(message)+'\n');}
   control(subtype,fields={},timeoutMs=60000){
     const requestId=`bridge_${++this.controlSeq}`;return new Promise((resolve,reject)=>{const timer=setTimeout(()=>{this.pending.delete(requestId);reject(new Error(`Claude Code 原生控制请求超时：${subtype}`));},timeoutMs);this.pending.set(requestId,{resolve,reject,timer,subtype});try{this.send({type:'control_request',request_id:requestId,request:{subtype,...fields}});}catch(error){clearTimeout(timer);this.pending.delete(requestId);reject(error);}});
@@ -122,6 +126,7 @@ export class ClaudeAdapter extends RuntimeLifecycle {
           if(parent){this.subagentTools.set(part.id,part.name);await this.emit({type:'tool-output',toolId:parent,text:`子代理 → ${part.name} ${oneLine(part.input,120)}\n`});}
           else await this.emit({type:'tool-start',toolId:part.id,name:part.name,data:part});
         }else if(parent&&part.type==='text'&&part.text)await this.emit({type:'tool-output',toolId:parent,text:`${String(part.text).replace(/\s+$/,'').slice(0,2000)}\n`});
+        else if(part.type==='text'&&part.text&&(m.message?.model==='<synthetic>'||m.local_command_source||m.local_command_run)){this.localCommandText=true;await this.emit({type:'text',text:part.text});}
       }return;
     }
     if(m.type==='user'){
@@ -131,7 +136,11 @@ export class ClaudeAdapter extends RuntimeLifecycle {
       }return;
     }
     if(m.type==='system'){
+      if(m.subtype==='commands_changed'){await this.updateCommands(m.commands);return;}
+      if(m.subtype==='compact_boundary'){await this.emit({type:'notice',source:'commands',text:'Claude Code 已压缩对话上下文。'});return;}
+      if(m.subtype==='local_command_output'){this.localCommandText=true;await this.emit({type:'text',text:String(m.content??'命令已执行。')});return;}
       if(m.subtype==='init'){
+        this.commandSkills=m.skills??[];this.terminalCommands=m.terminal_slash_commands??[];await this.updateCommands();
         if(!this.connected){this.connected=true;await this.emit({type:'notice',text:`Claude Code ${m.claude_code_version??''} 已连接（私有配置、非登录）。`});return;}
         if(!this.running){void this.control('interrupt',{cancel_queued:true},10000).catch(()=>{});await this.emit({type:'notice',text:'Claude Code 自行开始了新的一轮，Bridge++ 已停止它。'});return;}
       }
@@ -143,6 +152,8 @@ export class ClaudeAdapter extends RuntimeLifecycle {
     await this.emit({type:'native-event',name:m.type??'event',data:m});
   }
   async result(m){
+    if(m.num_turns===0&&!this.localCommandText)await this.emit({type:'notice',source:'commands',text:typeof m.result==='string'&&m.result?m.result:'Claude Code 本地命令已执行。'});
+    this.localCommandText=false;
     const success=m.subtype==='success',carry=[...this.steers.values()].filter(row=>row.state==='pending'||row.state==='queued');
     if(carry.length&&!this.cancelled){
       if(!success){
@@ -227,7 +238,7 @@ export class ClaudeAdapter extends RuntimeLifecycle {
     if(!['approve','approve-session'].includes(choice))throw new Error('未知 Claude Code 授权选择');if(choice==='approve-session'&&!request.permission_suggestions?.length)throw new Error('此工具没有会话级授权建议');
     this.toolResponse(message.request_id,{behavior:'allow',updatedInput:request.input??{},...(choice==='approve-session'?{updatedPermissions:request.permission_suggestions.map(item=>({...item,destination:'session'}))}:{})});this.requests.delete(id);
   }
-  async prompt(text,attachments=[]){await this.ensureStarted();this.checkOpen();if(this.running)throw new Error('Claude Code 当前仍在执行');const content=await claudeContent(text,attachments);this.cancelled=false;this.running=true;this.lastUserRequest=typeof text==='string'?text.slice(-2000):'';this.roundText='';this.send({type:'user',session_id:'',message:{role:'user',content},parent_tool_use_id:null,uuid:randomUUID()});}
+  async prompt(text,attachments=[]){await this.ensureStarted();this.checkOpen();if(this.running)throw new Error('Claude Code 当前仍在执行');if(this.commandDiscovery&&this.commandInput!==true){const rules=await this.agentRules?.injection();await writeRulesFile(join(this.configDir,'CLAUDE.md'),rulesDocument(rules?.text??''));if(rules?.version)await this.saveNative(this.session.nativeId,{rulesVersion:rules.version});this.commandDiscovery=false;}const content=await claudeContent(text,attachments);this.localCommandText=false;this.cancelled=false;this.running=true;this.lastUserRequest=typeof text==='string'?text.slice(-2000):'';this.roundText='';this.send({type:'user',session_id:'',message:{role:'user',content},parent_tool_use_id:null,uuid:randomUUID()});}
   async steer(text,attachments=[],id=randomUUID()){
     this.checkOpen();if(!this.running)throw new Error('原生轮次尚未开始或已经结束');this.lastUserRequest=typeof text==='string'?text.slice(-2000):'';const content=await claudeContent(text,attachments);this.checkOpen();if(!this.running)throw new Error('原生轮次尚未开始或已经结束');
     const admitted=new Promise((resolve,reject)=>{const timer=setTimeout(()=>{const error=new Error('等待 Claude Code 确认插话超时');error.nativeAdmissionUnknown=true;reject(error);},5000);this.steers.set(id,{id,state:'pending',resolve,reject,timer});});

@@ -289,7 +289,8 @@ export class SdkTransport {
                   output.observe(m);
                   if(m.type==='assistant'||m.type==='result'||m.event?.usage||m.event?.message?.usage)snapshotUsage();
                   if(m.type==='system'&&m.subtype==='init'){
-                    if(m.model!==body.model)throw new BridgeError(502,'model_mismatch','Official WorkBuddy runtime selected a different model');
+                    if(m.model==='unknown')throw new BridgeError(502,'sdk_incomplete','Official WorkBuddy runtime started without the prompt (model "unknown"); the message was not delivered');
+                    if(m.model!==body.model)throw new BridgeError(502,'model_mismatch',`Official WorkBuddy runtime selected ${String(m.model).slice(0,60)} instead of ${body.model}`);
                     const servers=m.mcp_servers??[],hosted=native&&hostTools(body).length>0;
                     if(m.plugins?.length||m.skills?.length||servers.some(s=>!hosted||s.name!==HOST))throw new BridgeError(502,'isolation_failed','Official runtime loaded external tools, plugins or skills');
                     if(hosted&&servers.find(s=>s.name===HOST)?.status!=='connected')throw new BridgeError(502,'native_tools_unavailable','Official runtime did not connect the host function server; set WORKBUDDY_TOOL_MODE=json to use the text protocol');

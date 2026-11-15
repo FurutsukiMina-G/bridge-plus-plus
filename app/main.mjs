@@ -50,7 +50,7 @@ if(timing)diagnostics.subscribe('child_process',({process:child})=>{const row={s
 async function step(name,task){if(!timing)return task();const start=ms();timing.current=name;try{return await task();}finally{timing.steps.push({step:name,start,ms:ms()-start});}}
 async function writeTiming(label){if(timing)await writeFile(join(app.getPath('userData'),'startup-timing.json'),JSON.stringify({label,version:app.getVersion(),at:new Date().toISOString(),...timing},null,1)).catch(error=>console.error('写入启动计时失败：'+error.message));}
 let window,store,providers,gateway,sessions,runtimes,media,modelServices,environments,sourceComponents,appUpdates,closing=false,dirtyEditors=false,exitCode=0;const terminals=new Terminals(),nativeWindows=new Set(),nativeMediaCatalog=new NativeMediaCatalog(),boot=new BootState();
-const environmentMethods=new Set(['session:create','session:prompt','session:rebind','session:rebind-cancel','session:permission','runtime:refresh','runtime:permission','runtime:configure','native:models','native:open','environment:check','environment:install','environment:update','environment:configure','provider:refresh']);
+const environmentMethods=new Set(['session:create','session:commands','runtime:commands','session:prompt','session:rebind','session:rebind-cancel','session:permission','runtime:refresh','runtime:permission','runtime:configure','native:models','native:open','environment:check','environment:install','environment:update','environment:configure','provider:refresh']);
 const attachmentCapabilityService=new AttachmentCapabilities({runtimes:()=>runtimes,sessions:()=>sessions,providers:()=>providers,cwd:()=>store.root,catalog:nativeMediaCatalog});
 const attachmentCapabilities=(runtimeId,selection)=>attachmentCapabilityService.forSelection(runtimeId,selection);
 const send=(name,data)=>{if(window&&!window.isDestroyed())window.webContents.send(name,data);};
@@ -118,6 +118,8 @@ const methods={
   async 'preference:theme'({theme}){if(!['system','light','dark'].includes(theme))throw new Error('Invalid theme');await store.mutate(s=>{s.preferences.theme=theme;});applyChrome();},
   async 'preference:save'({modelKey,value}){if(typeof modelKey!=='string'||!value||typeof value!=='object')throw new Error('Invalid preference');await store.mutate(s=>{s.preferences.modelDefaults[modelKey]={runtimeId:value.runtimeId,nativeModel:value.nativeModel,reasoning:value.reasoning,contextTokens:value.contextTokens,contextBudget:value.contextBudget};});},
   async 'session:create'(args){return sessions.create(args);},
+  async 'session:commands'({sessionId}){return sessions.commands(id(sessionId));},
+  async 'runtime:commands'({runtimeId,modelKey}){if(typeof modelKey!=='string')throw new Error('请选择模型');return sessions.runtimeCommands(id(runtimeId),modelKey);},
   async 'session:events'({sessionId}){const key=id(sessionId),source=store.session(key).selection?.modelKey?.split(':')[0];return coalesceSessionEvents(await store.events(key)).map(e=>usageForDisplay(e,source));},
   async 'session:prompt'({sessionId,text='',attachments=[],delivery}){return sessions.prompt(id(sessionId),text,attachments,{delivery});},
   async 'session:dequeue'({sessionId,queueId}){return sessions.dequeue(id(sessionId),id(queueId));},

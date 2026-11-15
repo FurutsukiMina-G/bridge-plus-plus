@@ -7,6 +7,7 @@ import {CodexExecAdapter} from './codex-exec.mjs';
 import {runtimeReason,failureText,failureValue} from '../services/failure-details.mjs';
 import {codexSessionHome,prepareCodexHome} from '../services/codex-config.mjs';
 import {CodexRolloutMedia} from '../services/codex-rollout-media.mjs';
+import {commandView} from '../services/slash-commands.mjs';
 
 export function codexLaunchSettings({endpoint,variant,model,session,permissionMode=session?.permissionMode,runtime,catalogPath,nativeHome}){
   const selection=session.selection,args=[],env={};
@@ -69,10 +70,28 @@ export function codexEvent(message){
   if(method==='error')return {type:'error',text:failureText(p.error?.message??p.message??'Codex error'),data:failureValue(p)};
   if(method==='turn/diff/updated')return {type:'diff',text:p.diff??''};
   if(method==='turn/plan/updated')return {type:'plan',data:p};
+  if(method==='thread/compacted')return {type:'notice',source:'commands',text:'Codex 已压缩对话上下文。'};
+  if(method==='item/completed'&&p.item?.type==='agentMessage')return {type:'text',text:p.item.text??'',itemId:p.item.id};
   return {type:'native-event',name:method,data:p};
 }
 export class CodexAppServerAdapter extends RuntimeLifecycle {
   constructor(options){super(options);this.requests=new Map();}
+  rememberCommandTurn(id){if(!id)return;this.completedCommands??=new Set();this.completedCommands.add(id);if(this.completedCommands.size>32)this.completedCommands.delete(this.completedCommands.values().next().value);}
+  async commands(){return commandView('codex',this.session.selection.modelKey);}
+  async executeCommand(command,args,line,attachments=[]){
+    if(attachments.length)throw new Error('Codex 斜杠命令暂不支持附件，请单独发送文字命令。');
+    if(!this.ready)this.commandDiscovery=true;await this.ensureStarted();this.checkOpen();this.running=true;this.turnId=null;this.compacted=false;this.command=command.name;
+    try{
+      if(command.name==='compact'){await this.rpc.request('thread/compact/start',{threadId:this.threadId});return {pending:true};}
+      if(command.name==='review'){
+        const base=/^base\s+(\S+)\s*$/.exec(args),commit=/^commit\s+(\S+)(?:\s+([\s\S]+))?$/.exec(args);
+        const target=!args?{type:'uncommittedChanges'}:base?{type:'baseBranch',branch:base[1]}:commit?{type:'commit',sha:commit[1],title:commit[2]??null}:{type:'custom',instructions:args};
+        const result=await this.rpc.request('review/start',{threadId:this.threadId,target,delivery:'inline'});if(this.running)this.turnId=result.turn?.id;return {pending:true};
+      }
+      const method=!args?'get':args==='clear'?'clear':'set',result=await this.rpc.request('thread/goal/'+method,{threadId:this.threadId,...method==='get'?{}:{origin:'user'},...method==='set'?{objective:args}:{}});
+      await this.emit({type:'notice',source:'commands',text:method==='clear'?'已清除长期目标。':result.goal?.objective?`长期目标：${result.goal.objective}${result.goal.status?'（'+result.goal.status+'）':''}`:method==='set'?'已设定长期目标。':'当前没有长期目标。'});this.running=false;this.command=null;return {pending:false};
+    }catch(error){this.running=false;this.command=null;throw error;}
+  }
   async start(){
     this.checkOpen();if(!this.endpoint)throw new Error('app-server 仅用于网关 Codex 会话');
     const catalog=await this.catalogFile().catch(()=>null);
@@ -115,11 +134,19 @@ export class CodexAppServerAdapter extends RuntimeLifecycle {
     this.checkOpen();await this.rpc.request('initialize',{clientInfo:{name:'agent_workbench',title:'Bridge++',version:'0.1.15'},capabilities:{experimentalApi:false}});this.checkOpen();this.rpc.notify('initialized');
     const permissions=codexPermissionSettings(this.permissionMode);if(!this.runtime.permissions?.observed?.autoReview)delete permissions.approvalsReviewer;
     const threadSettings={cwd:this.project.path,...permissions,...(this.endpoint?{model:this.variant.id,modelProvider:'agentworkbench'}:this.session.selection.nativeModel?{model:this.session.selection.nativeModel}:{})};
-    const result=await this.rpc.request(this.session.nativeId?'thread/resume':'thread/start',this.session.nativeId?{...threadSettings,threadId:this.session.nativeId}:threadSettings);this.threadId=result.thread.id;await this.saveNative(this.threadId,this.nativeHome?{nativeHome:'bridge',rulesVersion:this.rulesVersion}:{});
+    const result=await this.rpc.request(this.session.nativeId?'thread/resume':'thread/start',this.session.nativeId?{...threadSettings,threadId:this.session.nativeId}:threadSettings);this.threadId=result.thread.id;await this.saveNative(this.threadId,this.nativeHome?{nativeHome:'bridge',...this.commandDiscovery?{}:{rulesVersion:this.rulesVersion}}:{});
     if(!codexPermissionResultMatches(this.permissionMode,result,{autoReview:!!this.runtime.permissions?.observed?.autoReview}))throw new Error('原生 Codex 未应用所选授权/沙箱设置，已停止，未发送任务。');
     this.checkOpen();this.ready=true;
   }
   async message(message){
+    const nativeTurn=message.params?.turnId??message.params?.turn?.id;if(nativeTurn&&this.completedCommands?.has(nativeTurn)&&['thread/compacted','turn/completed'].includes(message.method))return;
+    if(message.method==='item/agentMessage/delta'){this.streamedItems??=new Set();this.streamedItems.add(message.params?.itemId);}
+    if(message.method==='item/completed'&&message.params?.item?.type==='agentMessage'&&this.streamedItems?.delete(message.params.item.id))return;
+    if(this.command==='compact'&&message.method==='thread/compacted'){
+      if(!this.compacted)await this.emit(codexEvent(message));this.compacted=true;this.rememberCommandTurn(nativeTurn??this.turnId);this.command=null;this.running=false;this.turnId=null;await this.emit({type:'turn-end',status:'completed'});return;
+    }
+    if(message.method==='item/completed'&&message.params?.item?.type==='contextCompaction'&&this.command==='compact'){if(!this.compacted)await this.emit({type:'notice',source:'commands',text:'Codex 已压缩对话上下文。'});this.compacted=true;return;}
+    if(message.method==='turn/completed'&&this.command==='compact'){if(!this.compacted)await this.emit({type:'notice',source:'commands',text:message.params?.turn?.status==='completed'?'Codex 已压缩对话上下文。':'Codex 压缩未完成。'});this.rememberCommandTurn(nativeTurn??this.turnId);}
     const image=message.params?.item;
     if(message.method==='item/completed'&&image?.type==='imageGeneration'){
       if(image.result)await this.emit({type:'media-output',data:image.result,mime:'image/png',origin:{runtimeId:'codex',itemId:image.id,tool:'imageGeneration'}});
@@ -135,9 +162,9 @@ export class CodexAppServerAdapter extends RuntimeLifecycle {
       this.rpc.reject(message.id,'Open the native Codex CLI to use this client interaction');await this.emit({type:'notice',text:`原生交互 ${message.method} 请使用原生窗口。`});return;
     }
     if(message.method==='turn/started')this.turnId=message.params?.turn?.id??this.turnId;
-    const event=codexEvent(message);if(event.type==='turn-end'){this.running=false;this.turnId=null;this.requests.clear();}await this.emit(event);
+    const event=codexEvent(message);if(event.type==='turn-end'){this.running=false;this.turnId=null;this.command=null;this.compacted=false;this.requests.clear();}await this.emit(event);
   }
-  async prompt(text,attachments=[]){await this.ensureStarted();this.checkOpen();const input=[...(text?[{type:'text',text,text_elements:[]}]:[]),...attachments.map(a=>{if(a.kind!=='image'&&a.kind!=='audio')throw new Error('Codex 未核实支持此附件');return {type:a.kind==='image'?'localImage':'localAudio',path:a.path};})];this.running=true;this.turnId=null;try{const result=await this.rpc.request('turn/start',{threadId:this.threadId,input,...(this.session.selection.reasoning?{effort:this.session.selection.reasoning}:{})});if(this.running)this.turnId=result.turn?.id;}catch(e){this.running=false;throw e;}}
+  async prompt(text,attachments=[]){await this.ensureStarted();this.checkOpen();if(this.commandDiscovery){if(this.nativeHome&&this.rulesVersion)await this.saveNative(this.threadId,{rulesVersion:this.rulesVersion});this.commandDiscovery=false;}const input=[...(text?[{type:'text',text,text_elements:[]}]:[]),...attachments.map(a=>{if(a.kind!=='image'&&a.kind!=='audio')throw new Error('Codex 未核实支持此附件');return {type:a.kind==='image'?'localImage':'localAudio',path:a.path};})];this.running=true;this.turnId=null;try{const result=await this.rpc.request('turn/start',{threadId:this.threadId,input,...(this.session.selection.reasoning?{effort:this.session.selection.reasoning}:{})});if(this.running)this.turnId=result.turn?.id;}catch(e){this.running=false;throw e;}}
   async steer(text,attachments=[],id=randomUUID()){
     this.checkOpen();if(!this.running||!this.turnId)throw new Error('Codex 原生轮次尚未开始或已经结束');
     const input=[...(text?[{type:'text',text,text_elements:[]}]:[]),...attachments.map(a=>{if(a.kind!=='image'&&a.kind!=='audio')throw new Error('Codex 未核实支持此附件');return {type:a.kind==='image'?'localImage':'localAudio',path:a.path};})];

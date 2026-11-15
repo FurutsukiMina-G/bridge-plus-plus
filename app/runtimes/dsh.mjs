@@ -4,6 +4,7 @@ import {RuntimeLifecycle} from '../core/lifecycle.mjs';
 import {readFile} from 'node:fs/promises';
 import {DSH_PERMISSION_PRESETS,permissionCatalog} from '../services/runtime-permissions.mjs';
 import {runtimeReason,failureText} from '../services/failure-details.mjs';
+import {commandView} from '../services/slash-commands.mjs';
 export function reconcileDshContent(type,full,streamed,attemptId){if(full===streamed)return null;if(full.startsWith(streamed))return {type,text:full.slice(streamed.length),attemptId};return {type:'content-replace',channel:type,text:full,attemptId};}
 export function dshEvent(event){const d=event.data??{};
   if(event.type==='assistant/message'){const message=d.message??d;return {type:'assistant-message',content:message.content??[],data:message};}
@@ -20,6 +21,18 @@ export function dshEvent(event){const d=event.data??{};
   return {type:'native-event',name:event.type,data:d};
 }
 export class DshAdapter extends RuntimeLifecycle {
+  async commands(){await this.ensureStarted();const raw=await this.host.rpc('commands/list',{agentId:this.nativeId});if(!Array.isArray(raw))throw new Error('DSH 命令列表格式无效');this.availableCommands=raw;const view=commandView('dsh',this.session.selection.modelKey,raw);await this.emit({type:'commands',...view});return view;}
+  async executeCommand(command,args,line,attachments=[]){
+    await this.ensureStarted();this.checkOpen();if(attachments.length)throw new Error('当前 DSH 斜杠命令暂不支持附件，请单独发送文字命令。');
+    await this.connectApprovals();this.running=true;
+    try{
+      const value=await this.host.rpc('commands/execute',{agentId:this.nativeId,line,submittedAttachments:[]}),result=value?.result;
+      if(!result||!['success','error'].includes(result.kind))throw new Error('DSH 未返回有效的命令执行结果');
+      await this.emit({type:'notice',source:'commands',text:result.text||'DSH 命令已执行。',data:{kind:result.kind}});
+      const pending=result.kind==='success'&&(command.name==='plan'&&!!args&&args!=='off'||command.name==='goal'&&!!args&&!['clear','pause'].includes(args));
+      if(!pending)this.running=false;else if(!this.stopStream)this.poll();return {pending,status:result.kind==='success'?'completed':'failed'};
+    }catch(error){this.running=false;throw error;}
+  }
   constructor(options){super(options);this.lastSeq=-1;this.onHostClosed=error=>{this.ready=false;this.stopStream?.();this.stopStream=null;this.approvalStream?.stop();this.approvalStream=null;void this.enqueue(async()=>{if(!this.closed&&this.running){this.running=false;const reason=runtimeReason(error,'DSH 原生后端已退出，请重试以恢复会话。');await this.emit({type:'error',text:reason.message});await this.emit({type:'turn-end',status:'failed',reason});}});};this.host.on?.('closed',this.onHostClosed);}
   async start(){this.checkOpen();await this.host.ready();this.checkOpen();const provider=await this.host.configure(this.model,{...this.variant,contextWindow:this.session.selection.contextBudget??this.variant.contextWindow},this.endpoint,this.session.id);this.checkOpen();
     if(!this.session.nativeId){const result=await this.host.rpc('session/create',{request:{cwd:this.project.path}});await this.saveNative(result.sessionId);this.nativeId=result.sessionId;}else this.nativeId=this.session.nativeId;
@@ -49,9 +62,12 @@ export class DshAdapter extends RuntimeLifecycle {
     catch(error){if(!this.steers.has(requestId)||this.steers.get(requestId)?.itemId)return {};if(error.rpcRejected){this.steers.delete(requestId);throw error;}error.nativeAdmissionUnknown=true;throw error;}
     return {};
   }
+  async connectApprovals(){
+    if(!this.approvalStream&&this.host.followApprovals){try{this.approvalStream=await this.host.followApprovals(this.nativeId,event=>this.enqueue(()=>this.emit(event)),(id,choice)=>this.enqueue(()=>this.emit({type:'approval-resolved',approvalId:id,...choice?{choice}:{}})),error=>this.enqueue(async()=>{this.approvalStream?.stop();this.approvalStream=null;await this.emit({type:'notice',text:'DSH 审批连接中断，请在完整工具界面处理：'+error.message});}));}catch(error){await this.emit({type:'notice',text:'DSH 审批接口不可用，请在完整工具界面处理：'+error.message});}this.checkOpen();}
+  }
   async prompt(text,attachments=[]){await this.ensureStarted();this.checkOpen();
     this.steers??=new Map((this.session.pendingSteers??[]).map(row=>[row.id,{requestId:row.id,itemId:null}]));
-    if(!this.approvalStream&&this.host.followApprovals){try{this.approvalStream=await this.host.followApprovals(this.nativeId,event=>this.enqueue(()=>this.emit(event)),(id,choice)=>this.enqueue(()=>this.emit({type:'approval-resolved',approvalId:id,...choice?{choice}:{}})),error=>this.enqueue(async()=>{this.approvalStream?.stop();this.approvalStream=null;await this.emit({type:'notice',text:'DSH 审批连接中断，请在完整工具界面处理：'+error.message});}));}catch(error){await this.emit({type:'notice',text:'DSH 审批接口不可用，请在完整工具界面处理：'+error.message});}this.checkOpen();}
+    await this.connectApprovals();
     const content=await this.content(text,attachments);
     this.running=true;await this.host.rpc('session/prompt',{request:{sessionId:this.nativeId,requestId:randomUUID(),mode:'queue',clientTimeZone:Intl.DateTimeFormat().resolvedOptions().timeZone,content}});if(!this.stopStream)this.poll();}
   async frame(value){if(value.type==='snapshot')return;if(value.type==='event'){await this.handleEvent(value.event);return;}if(value.type==='assistant-stream'){const frame=value.frame;if(frame.type==='start'){this.currentAttemptId=frame.attemptId??randomUUID();this.streamedText='';this.streamedThinking='';return;}if(frame.type==='chunk'){const chunk=frame.chunk??{};let text=chunk.delta??chunk.text??'';if(typeof text!=='string')text=text.text??'';if(['text-delta','text_delta','text'].includes(chunk.type)&&text){this.streamedText=(this.streamedText??'')+text;await this.emit({type:'text',text,attemptId:this.currentAttemptId});}else if(['thinking-delta','reasoning-delta','thinking_delta','thinking','reasoning'].includes(chunk.type)&&text){this.streamedThinking=(this.streamedThinking??'')+text;await this.emit({type:'thinking',text,attemptId:this.currentAttemptId});}else await this.emit({type:'native-event',name:'assistant-stream',data:frame});}}}

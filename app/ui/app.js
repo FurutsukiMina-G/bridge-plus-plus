@@ -8,6 +8,7 @@ import {PendingAttachments,KINDS,allowedKinds,capabilityKey,fileSize,formatsText
 import {cjkEmphasis} from './markdown-cjk.js';
 import {foldRuns,foldSummary,toolStatus} from './tool-groups.js';
 import {rulesPageHtml,ruleNoticeHtml} from './rules.js';
+import {slashQuery,matchCommands,completeSlash,slashMenuHtml} from './slash.js';
 import {limitNotice,sameUpstream,stopLabel,stopNote,turnExtras,upstreamHtml} from './upstream.js';
 import {mathExtension,replaceMath} from './math.js';
 import {fileLinks,toolFilePath,webLink} from './file-links.js';
@@ -335,13 +336,22 @@ function autosize(el){el.style.height='auto';el.style.height=`${Math.min(el.scro
 function mountComposer(){
   const slot=$('.composer-slot');
   if(!slot)return;
-  slot.innerHTML=`<div class="composer${session()?'':' centered'}"><div id="composer-banner"></div><div class="queue-strip" id="queue-strip" hidden></div><div class="composer-box"><div class="attach-tray" id="attach-tray" hidden></div><textarea id="prompt" rows="1" aria-label="任务" spellcheck="false"></textarea><div class="composer-row" id="composer-controls"></div><div class="drop-hint" id="drop-hint" hidden></div></div><div class="composer-footer" id="composer-footer"></div></div>`;
+  slot.innerHTML=`<div class="composer${session()?'':' centered'}"><div id="composer-banner"></div><div class="queue-strip" id="queue-strip" hidden></div><div class="composer-box"><div class="slash-menu" id="slash-menu" hidden></div><div class="attach-tray" id="attach-tray" hidden></div><textarea id="prompt" rows="1" aria-label="任务" spellcheck="false"></textarea><div class="composer-row" id="composer-controls"></div><div class="drop-hint" id="drop-hint" hidden></div></div><div class="composer-footer" id="composer-footer"></div></div>`;
   const prompt=$('#prompt');
   prompt.value=state.draft;
-  prompt.addEventListener('input',e=>{state.draft=e.target.value;stashDraft();autosize(e.target);syncDraftMark();});
+  prompt.addEventListener('input',e=>{state.draft=e.target.value;stashDraft();autosize(e.target);syncDraftMark();updateSlash();});
   prompt.addEventListener('compositionstart',e=>{e.target.dataset.composing='true';});
   prompt.addEventListener('compositionend',e=>{e.target.dataset.composing='false';state.draft=e.target.value;stashDraft();});
-  prompt.addEventListener('keydown',e=>{if(e.key==='Enter'&&!e.shiftKey&&!e.isComposing){e.preventDefault();void submit();}});
+  prompt.addEventListener('keydown',e=>{
+    if(slash.open&&!e.isComposing&&slashKey(e))return;
+    if(e.key==='Enter'&&!e.shiftKey&&!e.isComposing){e.preventDefault();closeSlash();void submit();}
+  });
+  // The caret can leave or re-enter the command word without typing.
+  prompt.addEventListener('keyup',e=>{if(['ArrowLeft','ArrowRight','Home','End'].includes(e.key))updateSlash();});
+  prompt.addEventListener('click',()=>updateSlash());
+  prompt.addEventListener('blur',()=>setTimeout(()=>{if(document.activeElement!==$('#prompt'))closeSlash();},150));
+  // Clicking a command must not take the focus away from the prompt.
+  $('#slash-menu').addEventListener('mousedown',e=>e.preventDefault());
   prompt.addEventListener('paste',e=>{
     const files=[...(e.clipboardData?.files??[])];
     if(!files.length)return;
@@ -358,6 +368,56 @@ function mountComposer(){
 function syncDraftMark(){
   const box=$('.composer-box');
   if(box)box.classList.toggle('has-draft',!!state.draft.trim()||pending.list(attachKey()).some(x=>x.status!=='error'));
+}
+/* ---------- the `/` menu: the environment's own slash commands ---------- */
+const slash={open:false,items:[],active:0,query:'',target:null,error:null,loading:null},slashViews=new Map();
+/** Whose commands the menu shows: the open session's, or (no session yet) the chosen environment's last known list. */
+const slashTarget=()=>{const s=session();return s?`s:${s.id}`:`rt:${state.runtimeId??''}:${state.modelKey??''}`;};
+async function loadSlash(target){
+  if(slashViews.has(target)||slash.loading===target)return;
+  slash.loading=target;slash.error=null;
+  try{
+    const s=session(),view=s&&target===`s:${s.id}`?await call('session:commands',{sessionId:s.id}):await call('runtime:commands',{runtimeId:state.runtimeId,modelKey:state.modelKey??null});
+    slashViews.set(target,{...view,runtimeName:state.snapshot?.runtimes?.find(r=>r.id===view?.runtimeId)?.name??view?.runtimeId??''});
+  }catch(e){if(slash.target===target)slash.error=e.message;}
+  finally{if(slash.loading===target)slash.loading=null;if(slash.open&&slash.target===target)paintSlash();}
+}
+function updateSlash(){
+  const prompt=$('#prompt');
+  const q=prompt&&prompt.selectionStart===prompt.selectionEnd?slashQuery(prompt.value,prompt.selectionStart):null;
+  if(!q){closeSlash();return;}
+  const target=slashTarget();
+  if(slash.target!==target){slash.target=target;slash.error=null;slash.active=0;}
+  if(!slash.open){slash.open=true;slash.active=0;}
+  if(slash.query!==q.query){slash.query=q.query;slash.active=0;}
+  if(!slashViews.has(target))void loadSlash(target);
+  paintSlash();
+}
+function paintSlash(){
+  const el=$('#slash-menu');if(!el)return;
+  if(!slash.open){el.hidden=true;el.innerHTML='';return;}
+  const view=slashViews.get(slash.target);
+  slash.items=view?matchCommands(view.commands,slash.query):[];
+  if(slash.active>=slash.items.length)slash.active=0;
+  el.innerHTML=slashMenuHtml(view,{items:slash.items,active:slash.active,loading:slash.loading===slash.target,error:slash.error,query:slash.query});
+  el.hidden=false;
+  el.querySelector('.slash-item.active')?.scrollIntoView({block:'nearest'});
+}
+function closeSlash(){if(!slash.open)return;slash.open=false;paintSlash();}
+function pickSlash(index){
+  const c=slash.items[index],prompt=$('#prompt');if(!c||!prompt)return;
+  const next=completeSlash(prompt.value,c.name);
+  prompt.value=next.text;prompt.setSelectionRange(next.caret,next.caret);
+  state.draft=next.text;stashDraft();autosize(prompt);syncDraftMark();closeSlash();prompt.focus();
+}
+/** Keys while the menu is open. Enter on a fully typed command sends it; otherwise Enter and Tab fill in the highlighted one. */
+function slashKey(e){
+  const n=slash.items.length;
+  if(e.key==='ArrowDown'||e.key==='ArrowUp'){if(!n)return false;e.preventDefault();slash.active=(slash.active+(e.key==='ArrowDown'?1:-1)+n)%n;paintSlash();return true;}
+  if(e.key==='Escape'){e.preventDefault();closeSlash();return true;}
+  if(e.key==='Tab'&&n){e.preventDefault();pickSlash(slash.active);return true;}
+  if(e.key==='Enter'&&!e.shiftKey&&n&&slash.items[slash.active].name!==slash.query){e.preventDefault();pickSlash(slash.active);return true;}
+  return false;
 }
 /** How a message typed during a run goes out: into the running turn when the runtime can take it, otherwise after it. */
 function deliveryFor(s){return s?.interject?.steer===true&&state.delivery!=='queue'?'steer':'queue';}
@@ -833,6 +893,7 @@ function turnEndBlock(e){
   if(t?.input!=null)parts.push(`输入 ${compact(t.input)}`);
   if(t?.output!=null)parts.push(`输出 ${compact(t.output)}`);
   if(t?.cacheRatio!=null)parts.push(`缓存 ${t.cacheStatus==='estimated'?'≈':''}${pct(t.cacheRatio)}`);
+  if(t?.credits!=null)parts.push(`积分 ${t.creditsPartial?'≥':''}${creditText(t.credits)}`);
   parts.push(...turnExtras(e.stats));
   return`<div class="turn-end ${esc(e.status)}"><span>${parts.map(esc).join(' · ')}</span></div>`;
 }
@@ -1928,6 +1989,7 @@ document.addEventListener('click',e=>{
   if((el=hit('[data-rule-delete]'))){const id=el.dataset.ruleDelete;void action(async()=>{state.rules=await call('rules:delete',{id});renderSettings();toast('已删除');});return;}
   if((el=hit('[data-rule-undo]'))){const id=el.dataset.ruleUndo;el.disabled=true;void action(async()=>{try{const view=await call('rules:undo',{id});if(state.rules)state.rules=view;toast('已撤销这条长期要求');}finally{el.disabled=false;}});return;}
   if((el=hit('[data-open-rules]'))){openSettings('rules');return;}
+  if((el=hit('[data-slash-index]'))){pickSlash(Number(el.dataset.slashIndex));return;}
   if((el=hit('[data-balance-refresh]'))){
     const source=el.dataset.balanceRefresh;if(balanceLoading.has(source))return;
     balanceLoading.add(source);renderTopbar();
@@ -2205,6 +2267,12 @@ window.workbench.onEvent(event=>{
     // Progress arrives between snapshots; patch the download state and repaint only what shows it.
     const d=state.snapshot?.updates?.download;
     if(d&&d.status==='downloading'&&(!d.version||d.version===event.version)){d.received=event.received;d.total=event.total;renderUpdateSlot();if(state.settings==='about')refreshSettingsLive();}
+    return;
+  }
+  if(event.type==='commands'){
+    // A session's runtime reported its command list: drop it and that environment's new-session cache, reread when shown.
+    slashViews.delete(`s:${event.sessionId}`);for(const key of [...slashViews.keys()])if(key.startsWith(`rt:${event.runtimeId}:`))slashViews.delete(key);
+    if(slash.open)updateSlash();
     return;
   }
   if(event.type==='rules-change'){

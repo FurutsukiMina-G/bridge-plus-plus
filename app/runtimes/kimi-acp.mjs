@@ -9,6 +9,7 @@ import {RuntimeLifecycle} from '../core/lifecycle.mjs';
 import {randomUUID} from 'node:crypto';
 import {KIMI_PERMISSION_IDS} from '../services/runtime-permissions.mjs';
 import {runtimeReason,failureText,failureValue} from '../services/failure-details.mjs';
+import {commandView} from '../services/slash-commands.mjs';
 export function mergeKimiConfig(base,overlay,originalHome){const result={...base,...overlay,providers:{...base.providers,...overlay.providers},models:{...base.models,...overlay.models},thinking:{...base.thinking,...overlay.thinking}};if(base.default_permission_mode)result.default_permission_mode=base.default_permission_mode;for(const [field,folder]of [['extra_skill_dirs','skills'],['extra_agent_dirs','agents']]){const path=join(originalHome,folder);result[field]=[...new Set([...(base[field]??[]),...(existsSync(path)?[path]:[])])];}return result;}
 export function kimiAcpConfig({model,variant,endpoint,session}){
   const q=JSON.stringify,selection=session.selection;
@@ -92,7 +93,8 @@ export function kimiPermissionQuestionResult(params,choice,answer={}){
   const chosen=options.find(option=>option!==skip&&typeof option?.name==='string'&&option.name===label);
   return {outcome:chosen?{outcome:'selected',optionId:chosen.optionId}:{outcome:'cancelled'}};
 }export class KimiAcpAdapter extends RuntimeLifecycle {
-  constructor(options){super(options);this.requests=new Map();this.nativeTurn=0;}
+  constructor(options){super(options);this.requests=new Map();this.nativeTurn=0;this.commandsReady=new Promise(resolve=>{this.resolveCommands=resolve;});}
+  async commands(){await this.ensureStarted();if(!this.availableCommands)await this.commandsReady;this.checkOpen();return commandView('kimi',this.session.selection?.modelKey,this.availableCommands);}
   async start(){
     const env={};if(this.endpoint){const home=join(this.dir,'kimi-home');await mkdir(home,{recursive:true});const original=process.env.KIMI_CODE_HOME??join(homedir(),'.kimi-code');let base={};try{base=parse(await readFile(join(original,'config.toml'),'utf8'));}catch(e){if(e.code!=='ENOENT')throw new Error('原生 Kimi 配置不可读取，请先在原生程序中修复。');}await writeFile(join(home,'config.toml'),stringify(mergeKimiConfig(base,parse(kimiAcpConfig(this)),original)),{mode:0o600});env.KIMI_CODE_HOME=home;env.AWB_GATEWAY_KEY=this.endpoint.key;
       // Preserve the user's explicit MCP configuration in the private home when present.
@@ -111,7 +113,7 @@ export function kimiPermissionQuestionResult(params,choice,answer={}){
     }
     this.checkOpen();if(!this.endpoint&&this.session.selection.nativeModel)await this.rpc.request('session/set_config_option',{sessionId:this.nativeId,configId:'model',value:this.session.selection.nativeModel});this.checkOpen();this.ready=true;
   }
-  async message(m){if(m.method==='session/update'){if(!this.loading)await this.emit(kimiAcpEvent(m.params.update));return;}
+  async message(m){if(m.method==='session/update'){const update=m.params.update;if(update.sessionUpdate==='available_commands_update'){this.availableCommands=update.availableCommands??[];this.resolveCommands();await this.emit({type:'commands',...commandView('kimi',this.session.selection?.modelKey,this.availableCommands)});return;}if(!this.loading)await this.emit(kimiAcpEvent(update));return;}
     // JSON-RPC IDs restart with the native process; persisted approval IDs cannot.
     if(m.id!==undefined&&m.method==='elicitation/create'){
       if(this.permissionMode==='readonly'){this.rpc.respond(m.id,{action:'decline'});await this.emit({type:'error',source:'native-permission',code:'permission_denied',text:'只读模式下已自动放弃 Kimi 提问；本轮不自动续作。'});return;}
@@ -134,5 +136,5 @@ export function kimiPermissionQuestionResult(params,choice,answer={}){
     if(m.method==='session/request_permission'&&m.params?.toolCall?.title==='AskUserQuestion'){this.rpc.respond(m.id,kimiPermissionQuestionResult(m.params,choice,answer));this.requests.delete(id);return;}
 const kinds={approve:'allow_once','approve-session':'allow_always',reject:'reject_once','reject-session':'reject_always'},chosen=(m.params.options??[]).find(o=>o.kind===kinds[choice]);if(!chosen)throw new Error('此操作未提供所选授权范围，请在 Kimi 原生窗口中处理');this.rpc.respond(m.id,{outcome:{outcome:'selected',optionId:chosen.optionId}});this.requests.delete(id);}
   async cancel(){this.rpc?.notify('session/cancel',{sessionId:this.nativeId});}
-  async close(){this.closed=true;this.running=false;this.ready=false;this.requests.clear();await this.rpc?.close();}
+  async close(){this.closed=true;this.running=false;this.ready=false;this.resolveCommands();this.requests.clear();await this.rpc?.close();}
 }
