@@ -32,15 +32,16 @@ test('missing result receives the Qoder error receipt',async t=>{
 test('oversized result and trailing message stop after changed-ID post hooks and follow with exact full text',async t=>{
  const f=await fixture(t,{nativeResultCharLimit:20}),r=toolRequest(),{pending,s}=await begin(f,r),batch=calls('a','b'),h=await s.toolStep(batch),first=await pending;
  const text='完整 " \\ '.repeat(30),next=resultRequest(r,first.reply,[text,'small'],[{role:'user',content:'continue please'}]),p=f.infer(next);
- assert.match((await h[0]).content[0].text,/complete output follows/);await h[1];assert.equal((await s.post(batch)).continue,false);s.result();
- await waitFor(()=>s.prompts.length===2);assert.ok(s.prompts[1].message.content.includes(text));assert.match(s.prompts[1].message.content,/continue please/);
+ assert.match((await h[0]).content[0].text,/complete output follows/);assert.match((await h[1]).content[0].text,/small\n\n\[The host added these messages after the function results\]\ncontinue please/);assert.equal((await s.post(batch)).continue,false);s.result();
+ await waitFor(()=>s.prompts.length===2);assert.ok(s.prompts[1].message.content.includes(text));assert.doesNotMatch(s.prompts[1].message.content,/continue please/);
  s.final('done');const second=await p;assert.equal(second.report.native.handoff_stop,true);assert.equal(second.report.native.oversized_results,1);
 });
 test('late follow-up is queued without a concurrent V2 send',async t=>{
  const f=await fixture(t,{nativeResultCharLimit:20}),r=toolRequest(),{pending,s}=await begin(f,r),h=await s.toolStep(calls('a')),first=await pending;
  const next=resultRequest(r,first.reply,['x'.repeat(60)]),p=f.infer(next);await h[0];
  const h2=await s.toolStep([{id:'later',name:'Read',input:{path:'b'}}]);const second=await p;assert.equal(second.reply.calls[0].id,'later');assert.equal(s.prompts.length,1);
- const p3=f.infer(resultRequest(next,second.reply,['ok']));await h2[0];s.result();await waitFor(()=>s.prompts.length===2);s.final('done');await p3;
+ const shown=[];let returned=false;const p3=f.infer(resultRequest(next,second.reply,['ok']),{onText:text=>shown.push(text)}).then(value=>{returned=true;return value;});await h2[0];s.final('first turn');await waitFor(()=>s.prompts.length===2);assert.equal(returned,false);s.final('done');const final=await p3;
+ assert.equal(final.reply.content,'first turn\n\ndone');assert.equal(final.reply.content,shown.join(''));assert.equal(final.record.queuedTurns,0);
 });
 test('invalid arguments correct locally and stop at the invalid round cap',async t=>{
  const f=await fixture(t,{nativeInvalidRounds:2}),{pending,s}=await begin(f);

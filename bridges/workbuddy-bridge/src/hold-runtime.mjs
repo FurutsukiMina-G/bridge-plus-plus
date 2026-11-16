@@ -22,7 +22,9 @@ export async function openHoldRuntime(cfg,binding,lane,createSession,makeOptions
       systemPrompt:cfg.hostPrompts?.native?cfg.hostPrompts.native+'\n\n'+NATIVE_SYSTEM()+' This session holds native calls until the host returns their real results. Max turns handoff markers only describe historical replay; do not wait for a new user message after each call.':{append:NATIVE_SYSTEM()},
       hooks:{PreToolUse:[{hooks:[async input=>lane.preToolUse(binding,input)]}],PostToolUse:[{hooks:[async input=>lane.postToolUse(binding,input)]}]},
       canUseTool:async(name,input)=>lane.canUseTool(binding,name,input)});
-    options.env={...options.env,WORKBUDDY_BRIDGE_HOLD:'1'};
+    // The runtime spills an MCP result over 4*MAX_MCP_OUTPUT_TOKENS chars to a file the model cannot open;
+    // keep that ceiling at or above the inline result limit (receipts are only for results beyond it).
+    options.env={...options.env,WORKBUDDY_BRIDGE_HOLD:'1',MAX_MCP_OUTPUT_TOKENS:String(Math.max(cfg.nativeMcpOutputTokens??1000000,Math.ceil((cfg.nativeResultCharLimit??4000000)/4)))};
     session=createSession(options);
     await abortable(Promise.resolve(session.connect()),AbortSignal.any([controller.signal,AbortSignal.timeout(20000),...(binding.openSignal?[binding.openSignal]:[])]));
     // connect() only boots the process in 0.3.286. This public, local control

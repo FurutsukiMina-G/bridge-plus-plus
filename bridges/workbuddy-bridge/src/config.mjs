@@ -16,7 +16,9 @@ export function config(env=process.env) {
     idleTimeoutMs:number('WORKBUDDY_IDLE_TIMEOUT_MS',180000,10000,1800000),
     concurrency:number('WORKBUDDY_CONCURRENCY',3,1,16),queueLimit:32,bodyLimit:32*1024*1024,heartbeatMs:10000,
     maxSessions:number('WORKBUDDY_MAX_SESSIONS',24,1,64),sessionIdleMs:number('WORKBUDDY_SESSION_IDLE_MS',3600000,60000,86400000),
-    nativeResultCharLimit:number('WORKBUDDY_NATIVE_RESULT_CHAR_LIMIT',40000,1,49999),nativeMaxTurns:number('WORKBUDDY_NATIVE_MAX_TURNS',100000,2,1000000),nativeInvalidRounds:number('WORKBUDDY_NATIVE_INVALID_ROUNDS',3,1,10),nativeWarmLimit:number('WORKBUDDY_NATIVE_WARM_LIMIT',1,0,1),
+    // WorkBuddy ignores the PostToolUse stop that a "receipt + follow-up" handoff needs, so results go inline:
+    // the hold runtime gets MAX_MCP_OUTPUT_TOKENS=nativeMcpOutputTokens and passes 4 chars/token unchanged.
+    nativeResultCharLimit:number('WORKBUDDY_NATIVE_RESULT_CHAR_LIMIT',4000000,1,4000000),nativeMcpOutputTokens:number('WORKBUDDY_NATIVE_MCP_OUTPUT_TOKENS',1000000,25000,1000000),nativeMaxTurns:number('WORKBUDDY_NATIVE_MAX_TURNS',100000,2,1000000),nativeInvalidRounds:number('WORKBUDDY_NATIVE_INVALID_ROUNDS',3,1,10),nativeWarmLimit:number('WORKBUDDY_NATIVE_WARM_LIMIT',1,0,1),
     replayMs:number('WORKBUDDY_REPLAY_MS',120000,0,600000),decisionRetries:number('WORKBUDDY_DECISION_RETRIES',2,0,2),
     prewarmMs:number('WORKBUDDY_PREWARM_MS',120000,0,600000),maxWarm:number('WORKBUDDY_MAX_WARM',4,0,16),maxBlankWarm:number('WORKBUDDY_MAX_BLANK_WARM',1,0,1)};
 }

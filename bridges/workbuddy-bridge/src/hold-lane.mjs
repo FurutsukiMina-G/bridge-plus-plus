@@ -64,6 +64,13 @@ const textContent = (content) => {
   return String(content);
 };
 const emptyTable = () => ({ signature: "[]", tools: [], byExposed: new Map(), byHost: new Map() });
+// Normalize the alternate inline-image shape before history comparison/replay.
+function imageMessages(messages) {
+  return messages.map(message => ({ ...message, content: Array.isArray(message.content) ? message.content.map(part =>
+    part?.type === 'image' && part.source?.type === 'base64'
+      ? { type: 'image_url', image_url: { url: `data:${part.source.media_type};base64,${part.source.data}` } }
+      : part) : message.content }));
+}
 const toolError = (text) => ({ content: [{ type: "text", text }], isError: true });
 const TOOL_IMAGE_BYTES = 5 * 1024 * 1024, TOOL_IMAGE_COUNT = 8;
 const imageBytes = (data) => Math.floor(data.length * 3 / 4) - (data.endsWith("==") ? 2 : data.endsWith("=") ? 1 : 0);
@@ -76,12 +83,12 @@ function inlineImage(part) {
   if (!match) return { reason: typeof raw === "string" && /^(?:https?:)?\/\//i.test(raw) ? "remote" : "unsupported" };
   return { image: { mimeType: match[1], data: match[2] } };
 }
-function toolResult(content) {
+function toolResult(content, initialImages = []) {
   if (!Array.isArray(content)) {
     const text2 = textContent(content);
     return { text: text2, isError: text2.startsWith("[tool error] ") };
   }
-  const text = [], images = [];
+  const text = [], images = [...initialImages];
   let dropped = 0;
   for (const part of content) {
     if (typeof part === "string") {
@@ -118,6 +125,23 @@ function toolResult(content) {
   const body = text.join("\n");
   return { text: body, isError: body.startsWith("[tool error] "), ...images.length ? { images } : {}, ...dropped ? { dropped } : {} };
 }
+// Keep trailing images in the same bounded MCP result as the call they followed.
+function foldTrailing(result, trailing) {
+  const images = [];
+  const messages = trailing.map(message => ({ ...message, content: Array.isArray(message.content) ? message.content.filter(part => {
+    if (message.role === 'user' && ['image', 'image_url'].includes(part?.type)) { images.push(part); return false; }
+    return true;
+  }) : message.content }));
+  const media = toolResult(images, result.images);
+  // The chat conversion splits a tool_result's own pictures into this trailing user message. Pictures alone
+  // stay plain parts of the result: a "host added messages" header made the model read its own screenshot
+  // as one the user had sent. Only real text (an interruption, a reminder) gets the header.
+  const rest = messages.filter((message) => message.role !== 'user' || textContent(message.content).trim());
+  if (rest.length) result.text += '\n\n' + followUpPrompt([], rest).text;
+  if (media.text) result.text += (result.text ? '\n' : '') + media.text;
+  result.images = media.images;
+  result.dropped = (result.dropped ?? 0) + (media.dropped ?? 0);
+}
 const PARALLEL_TRIM = "Only one function call per step is allowed here. Repeat this call in a later step after you have the previous result.";
 const choiceCorrection = (pinned) => pinned ? `The host requires exactly the function ${pinned} in this step. Call it now.` : "The host requires a function call in this step. Call one of the host functions now.";
 const isProtocol = text=>scanHoldProtocol(text,{final:true}).leak>=0;
@@ -132,7 +156,7 @@ const NATIVE_SKIP_REASONS = [
   "non_object_schema",
   "invalid_tool_table"
 ];
-const unsupportedContent = (request) => request.messages.some((message) => Array.isArray(message.content) && message.content.some((part) => part && typeof part === "object" && "type" in part && typeof part.type === "string" && !["text", "image_url"].includes(part.type)));
+const unsupportedContent = (request) => imageMessages(request.messages).some((message) => Array.isArray(message.content) && message.content.some((part) => part && typeof part === "object" && "type" in part && typeof part.type === "string" && !["text", "image_url"].includes(part.type)));
 function nativeSkipReason(request, config) {
   if ((config.toolMode ?? "json") !== "native") return "tool_mode_json";
   if (!request.tools?.length) return "no_tools";
@@ -208,6 +232,8 @@ class HoldLane {
     handoff_stops: 0,
     invalid_calls: 0,
     late_followups: 0,
+    queued_turn_continuations: 0,
+    stale_rebuilds: 0,
     awaiting_expired: 0,
     warm_hit_not_ready: 0,
     warm_expired: 0
@@ -219,7 +245,7 @@ class HoldLane {
   /** Why the last warm start failed; a dropped entry would otherwise look like "no entry". */
   warmFailure = null;
   limit(name) {
-    const defaults = { nativeResultCharLimit: 4e4, nativeMcpOutputTokens: 1e6, nativeMaxTurns: 1e5, nativeWarmLimit: 1, nativeInvalidRounds: 3 };
+    const defaults = { nativeResultCharLimit: 4e6, nativeMcpOutputTokens: 1e6, nativeMaxTurns: 1e5, nativeWarmLimit: 1, nativeInvalidRounds: 3 };
     return this.config[name] ?? defaults[name];
   }
   stats() {
@@ -385,6 +411,7 @@ class HoldLane {
       runtime,
       binding,
       inbox,
+      queuedTurns: 0,
       table,
       signature: table.signature,
       bridgeScope: request.bridge_scope,
@@ -499,6 +526,7 @@ class HoldLane {
     return {};
   }
   push(session, content) {
+    session.queuedTurns++;
     session.runtime.queue.push({ type: "user", parent_tool_use_id: null, message: { role: "user", content } });
   }
   finishStep(session, response) {
@@ -550,6 +578,14 @@ class HoldLane {
   async readWindow(session, request, hooks, signal, window, warmStart, oversized = 0, trailing = 0) {
     const usage = new NativeUsage(), order = [];
     let current, last;
+    let streamedText = '', runtimeTurn = 0, emittedTurn = 0;
+    const publish = (response, text) => {
+      if (!text) return;
+      if (streamedText && emittedTurn !== response.turn) { streamedText += '\n\n'; hooks.onText?.('\n\n'); }
+      emittedTurn = response.turn;
+      streamedText += text;
+      hooks.onText?.(text);
+    };
     let waitingForResponseStart=window==='results';
     let invalidRounds = 0, protocolCorrected = false, handoffStop = false, resultMessage;
     const policyStart = session.runtime.policyCalls.length;
@@ -567,8 +603,8 @@ class HoldLane {
     // message_start is the model-response boundary. WorkBuddy's split assistant
     // snapshots have different message IDs, including an initial empty snapshot.
     const newResponse = () => {
-      const response = { id:`response-${order.length+1}`, text:"", streamed:false, stop:null, sawToolUse:false, handed:false, announced:[], complete:new Map() };
-      response.gate=new HoldTextGate(text=>hooks.onText?.(text),{enabled:!session.requiresCall&&!session.pinned,announce:false,canStreamFinal:this.config.canStreamFinal});
+      const response = { id:`response-${order.length+1}`, turn:runtimeTurn, text:"", streamed:false, stop:null, sawToolUse:false, handed:false, announced:[], complete:new Map() };
+      response.gate=new HoldTextGate(text=>publish(response,text),{enabled:!session.requiresCall&&!session.pinned,announce:false,canStreamFinal:this.config.canStreamFinal});
       order.push(response);
       return response;
     };
@@ -596,7 +632,7 @@ class HoldLane {
     const finishText=response=>{
       // A required/pinned window's text becomes publishable only after its call
       // contract passes. Rebuild the disabled gate with the complete text then.
-      if(!response.gate.enabled){response.gate=new HoldTextGate(text=>hooks.onText?.(text),{announce:false});response.gate.push(response.text);}
+      if(!response.gate.enabled){response.gate=new HoldTextGate(text=>publish(response,text),{announce:false});response.gate.push(response.text);}
       const leak=scanHoldProtocol(response.text,{final:true}).leak;
       if(leak>=0){response.gate.release(leak);response.gate.blocked=true;return response.gate.emittedText;}
       response.gate.pump(true);
@@ -656,8 +692,9 @@ class HoldLane {
             step.text=finishText(last);
             session.state = "awaiting";
             session.hostMessages = request.messages;
-            const reply = { kind: "tool_calls", calls: step.calls.filter((c) => step.hostCalls.includes(c.id)).map((c) => ({ id: c.id, name: c.host, arguments: JSON.stringify(c.input) })), content: step.text };
+            const reply = { kind: "tool_calls", calls: step.calls.filter((c) => step.hostCalls.includes(c.id)).map((c) => ({ id: c.id, name: c.host, arguments: JSON.stringify(c.input) })), content: streamedText };
             session.lastReply = reply;
+            session.lastFinalText = streamedText;
             return { reply, report: this.report(session, request, usage, resultMessage, { window, warmStart, calls: step.calls.length, hostCalls: step.hostCalls.length, invalidRounds, handoffStop, oversized, trailing, policyStart }), usage, resultMessage };
           }
           invalidRounds++;
@@ -665,6 +702,10 @@ class HoldLane {
           if (invalidRounds >= this.limit("nativeInvalidRounds")) throw new WindowError(violation ? "Native steps repeatedly missed the required host function." : "Native tool arguments remained invalid.", "native_invalid_calls");
         }
         if (message.type === "result") {
+          session.queuedTurns = Math.max(0, session.queuedTurns - 1);
+          // Separate queued/receipt follow-up output. Protocol correction keeps
+          // its existing text continuity (including a safe prefix already sent).
+          if (session.queuedTurns > 0 || session.step?.stopAfter) runtimeTurn++;
           resultMessage = message;
           current=undefined;
           if (session.step?.stopAfter) {
@@ -679,6 +720,12 @@ class HoldLane {
           }
           if (message.subtype !== "success" || message.is_error) throw new WindowError(`WorkBuddy result: ${message.subtype}`, "native");
           if(last?.sawToolUse&&!last.handed)throw new BridgeError(502,'sdk_incomplete','Native turn ended before all announced tool calls had complete assistant arguments');
+          if (session.queuedTurns > 0) {
+            if (last) finishText(last);
+            last = current = undefined;
+            this.counters.queued_turn_continuations++;
+            continue;
+          }
           const content = last?.text ?? "";
           if (isProtocol(content)) {
             if (protocolCorrected) throw new WindowError("Native model repeatedly wrote tool protocol as text.", "native_protocol_text");
@@ -705,9 +752,9 @@ class HoldLane {
             last=undefined;continue;
           }
           if(last)finishText(last);
-          const reply = { kind: "final", content, finish: last?.stop === "max_tokens" ? "length" : "stop" };
+          const reply = { kind: "final", content: streamedText, finish: last?.stop === "max_tokens" ? "length" : "stop" };
           session.lastReply = reply;
-          session.lastFinalText = content;
+          session.lastFinalText = streamedText;
           session.state = "idle";
           session.hostMessages = request.messages;
           session.step = null;
@@ -739,6 +786,7 @@ class HoldLane {
       handoff_stop: meta.handoffStop,
       oversized_results: meta.oversized,
       trailing_messages: meta.trailing,
+      trailing_folded: windowStats.trailing_folded ?? 0,
       rebuild_reason: session.rebuildReason ?? null,
       tools_changed: session.toolsChanged ?? null,
       warm_start: meta.warmStart,
@@ -811,6 +859,7 @@ class HoldLane {
   }
   allocation=Promise.resolve();
   async infer(request,hooks={}){
+    request = { ...request, messages: imageMessages(request.messages) };
     this.sweepIdle();
     const previous=this.allocation;let release;
     this.allocation=new Promise(resolve=>{release=resolve;});
@@ -838,6 +887,13 @@ class HoldLane {
       this.counters.rebuilds++;
       this.close(session);
       session = void 0;
+    }
+    if (session && session.state !== 'awaiting' && (session.inbox.items.length > 0 || session.queuedTurns > 0)) {
+      rebuildReason = 'stale_runtime_output';
+      this.counters.stale_rebuilds++;
+      this.counters.rebuilds++;
+      this.close(session);
+      session = undefined;
     }
     if (session) {
       const delta = request.messages.slice(session.hostMessages.length);
@@ -900,8 +956,6 @@ class HoldLane {
         if (!matched) throw new WindowError("Host results do not match the pending native calls.", "native");
         const step = session.step, large = [];
         for (const [id, result] of matched.results) {
-          session.windowStats.tool_images += result.images?.length ?? 0;
-          session.windowStats.tool_images_dropped += result.dropped ?? 0;
           if (result.text.length > this.limit("nativeResultCharLimit")) {
             const call = step.calls.find((c) => c.id === id);
             large.push({ id, host: call?.host ?? id, text: result.text });
@@ -909,9 +963,17 @@ class HoldLane {
           } else step.results.set(id, result);
         }
         const oversized = large.length, trailing = matched.trailing.length;
-        if (large.length || matched.trailing.length) {
+        if (trailing) {
+          foldTrailing(step.results.get(step.hostCalls.at(-1)), matched.trailing);
+          session.windowStats.trailing_folded = trailing;
+        }
+        for (const result of step.results.values()) {
+          session.windowStats.tool_images += result.images?.length ?? 0;
+          session.windowStats.tool_images_dropped += result.dropped ?? 0;
+        }
+        if (large.length) {
           step.stopAfter = true;
-          step.followUp = followUpPrompt(large, matched.trailing);
+          step.followUp = followUpPrompt(large, []);
         }
         this.settle(session);
         meta = { ...meta, calls: step.calls.length, hostCalls: step.hostCalls.length, oversized, trailing };

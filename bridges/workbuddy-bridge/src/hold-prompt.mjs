@@ -18,6 +18,7 @@ function fullPrompt(request, requirement) {
   const parts = [];
   const aliases=(request.tools??[]).filter(t=>hostToolAlias(t.function.name)!==t.function.name).map(t=>({host_name:t.function.name,native_name:PREFIX+hostToolAlias(t.function.name)}));
   if(aliases.length)parts.push('[Native host function aliases]\n'+JSON.stringify(aliases));
+  parts.push('Native function names: the host function X is called mcp__host__X in this runtime. Use these native names when continuing replayed calls; use the alias table above for renamed functions.');
   if (instructions.length) parts.push(`[Host instructions \u2014 follow them as your system instructions]
 ${instructions.map((m) => text(m.content)).join("\n")}`);
   if (rest.length === 1 && rest[0].role === "user") parts.push(`[User message]

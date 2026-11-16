@@ -43,6 +43,7 @@ type Hooks={signal?:AbortSignal;onText?:(text:string)=>void;onThinking?:(text:st
 
 class Inbox{
   private items:SDKMessage[]=[];private wake?:()=>void;private ended=false;
+  get hasItems(){return this.items.length>0;}
   push(message:SDKMessage){if(this.ended)return;this.items.push(message);this.wake?.();}
   close(){this.ended=true;this.wake?.();}
   async next(signal:AbortSignal):Promise<SDKMessage>{
@@ -153,7 +154,7 @@ type Response={id:string;text:string;streamed:boolean;stop:string|null;sawToolUs
 export class NativeLane{
   private sessions=new Map<string,Session>();private byToolId=new Map<string,string>();private byClient=new Map<string,string>();
   private warm:WarmEntry[]=[];private hint?:HostToolTable;private hintMaxTokens:number|undefined;private closed=false;
-  private counters={rebuilds:0,replays:0,handoff_stops:0,invalid_calls:0,late_followups:0,
+  private counters={rebuilds:0,replays:0,handoff_stops:0,invalid_calls:0,late_followups:0,stale_rebuilds:0,
     awaiting_expired:0,warm_hit_not_ready:0,warm_expired:0};
   /** A warm entry expired by TTL since the last session was created; reported as the next miss reason. */
   private warmExpired=false;
@@ -472,6 +473,9 @@ export class NativeLane{
     // An identical retry after a cancelled window has nothing new to send, and the runtime holds the
     // cancelled turn: rebuild from the host history instead of pushing an empty continuation.
     if(session&&!session.busy&&request.messages.length===session.hostMessages.length&&!session.lastReply){rebuildReason='retry_after_cancel';this.counters.rebuilds++;this.close(session);session=undefined;}
+    if(session&&session.state!=='awaiting'&&session.inbox.hasItems){
+      rebuildReason='stale_runtime_output';this.counters.stale_rebuilds++;this.counters.rebuilds++;this.close(session);session=undefined;
+    }
     if(session){const delta=request.messages.slice(session.hostMessages.length);
       if(!delta.length&&session.lastReply){this.counters.replays++;session.touched=Date.now();return{record:session,reply:session.lastReply,report:{...this.report(session,request,new NativeUsage(),undefined,{window:'continue',warmStart:false,calls:0,hostCalls:0,invalidRounds:0,handoffStop:false,oversized:0,trailing:0,policyStart:session.runtime.policyCalls.length}),stage:'native_replay',local_response_replay:true,credits_delta:0,model_requests:0,normalized_usage:null,client_usage:null,client_cache_usage:'omitted'}};}
       if(session.state==='awaiting'&&(session.reasoning!==reasoning||!matchResults(session.step!,delta))){rebuildReason=session.reasoning!==reasoning?'superseded':'history_rewritten';this.counters.rebuilds++;this.close(session);session=undefined;}
