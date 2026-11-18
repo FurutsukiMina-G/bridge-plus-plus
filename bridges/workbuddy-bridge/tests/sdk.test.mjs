@@ -11,7 +11,9 @@ test('SDK enables every lean runtime switch by default and preserves existing en
   const previous=process.env.WORKBUDDY_FULL_RUNTIME;delete process.env.WORKBUDDY_FULL_RUNTIME;
   t.after(()=>{if(previous===undefined)delete process.env.WORKBUDDY_FULL_RUNTIME;else process.env.WORKBUDDY_FULL_RUNTIME=previous;});
   const options=sdkOptions({cliPath:process.execPath},credential,body,tmpdir(),new AbortController(),()=>{});
-  for(const key of Object.keys(LEAN_RUNTIME_ENV))assert.equal(options.env[key],'1',key);
+  for(const [key,value] of Object.entries(LEAN_RUNTIME_ENV))assert.equal(options.env[key],value,key);
+  assert.equal(options.env.CODEBUDDY_USE_POWERSHELL_TOOL,'0');
+  assert.equal(options.env.DISABLE_GALILEO,'1');
   assert.equal(options.env.CODEBUDDY_AUTH_TOKEN,credential.accessToken);assert.equal(options.env.CODEBUDDY_BASE_URL,'https://copilot.tencent.com/v2');
   assert.equal(options.env.ACC_USER_ID,credential.uid);assert.equal(options.env.CODEBUDDY_CUSTOM_HEADERS,`X-Domain: ${credential.domain}`);
   assert.equal(options.env.CODEBUDDY_CODE_DISABLE_BACKGROUND_TASKS,'1');assert.equal(options.env.CODEBUDDY_DISABLE_AUTO_MEMORY,'1');

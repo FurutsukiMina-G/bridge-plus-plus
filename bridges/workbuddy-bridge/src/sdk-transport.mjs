@@ -17,7 +17,7 @@ import {normalizedUsage,requestUsage,replayUsage,addSdkUsage,usageAccounting} fr
 import {correctionInput} from './recovery.mjs';
 import {rejectedEvidence,decisionErrorEvidence,redactSecrets} from './rejection-evidence.mjs';
 import {HOST,PREFIX,FORWARDED,NATIVE_INSTRUCTIONS,nativeSupported,hostTools,hostServer,nativeInput,nativeCorrection,nativeDecision,NativeTextGate,structuredResponse} from './native.mjs';
-import {WarmRuntimes,promptQueue,userMessage} from './warm.mjs';
+import {BlankWarmSlots,WarmRuntimes,promptQueue,userMessage} from './warm.mjs';
 import {sdkMediaPrompt} from './media-input.mjs';
 export {normalizedUsage} from './usage.mjs';
 // Explicit denies complement tools:[] on WorkBuddy builds that still enumerate
@@ -32,6 +32,7 @@ export const LEAN_RUNTIME_ENV=Object.freeze({
   CODEBUDDY_DISABLE_BUILTIN_SUBAGENTS:'1',CODEBUDDY_DISABLE_GIT_PROMPT_CONTEXT:'1',CODEBUDDY_DISABLE_SYSTEM_INFO_GIT:'1',
   CODEBUDDY_GIT_REPO_SCAN_DISABLED:'1',CODEBUDDY_DISABLE_IDE:'1',CODEBUDDY_DISABLE_WORKFLOWS:'1',
   CODEBUDDY_DISABLE_HOT_RELOAD:'1',CODEBUDDY_DISABLE_INPROCESS_TEAMMATES:'1',CODEBUDDY_TEAM_IDLE_DETECTION_DISABLED:'1',
+  CODEBUDDY_USE_POWERSHELL_TOOL:'0',DISABLE_GALILEO:'1',
   CODEBUDDY_MEMORY_EXTRACTION_DISABLED:'1',CODEBUDDY_MEMORY_RELEVANCE_DISABLED:'1'
 });
 // The runtime's own message once a denied host call has used the single permitted turn.
@@ -84,10 +85,11 @@ export class SdkTransport {
     // Injecting the old query double must never accidentally launch the real V2 SDK.
     createSession??=run===query?unstable_v2_createSession:()=>{throw new BridgeError(500,'session_factory_required','Native hold tests must inject createSession; legacy query doubles should explicitly select replay mode');};
     this.pendingSlots=0;this.slotAllocation=Promise.resolve();
-    this.hold=new HoldLane(cfg,(binding)=>openHoldRuntime(cfg,binding,this.hold,createSession,(body,credential,dir,controller)=>sdkOptions(cfg,credential,body,dir,controller,()=>{})),runtime=>runtime.close(),()=>this.reserveSlot());
+    this.blankSlots=new BlankWarmSlots(Math.max(cfg.maxBlankWarm??0,cfg.nativeWarmLimit??1));
+    this.hold=new HoldLane(cfg,(binding)=>openHoldRuntime(cfg,binding,this.hold,createSession,(body,credential,dir,controller)=>sdkOptions(cfg,credential,body,dir,controller,()=>{})),runtime=>runtime.close(),()=>this.reserveSlot(),this.blankSlots);
     this.cfg=cfg;this.auth=auth;this.run=run;this.pool=new ContextPool(cfg);this.pool.externalMakeRoom=()=>this.reserveSlot();this.failures=new Map();
-    this.warm=new WarmRuntimes({ttlMs:cfg.prewarmMs??0,max:cfg.maxWarm??4});this.pool.onRemove=record=>this.warm.discard(record.id);
-    this.blank=new WarmRuntimes({ttlMs:cfg.prewarmMs??0,max:cfg.maxBlankWarm??0});this.blankPending=false;
+    this.warm=new WarmRuntimes({ttlMs:cfg.resumePrewarmMs??cfg.prewarmMs??0,max:cfg.maxWarm??4});this.pool.onRemove=record=>this.warm.discard(record.id);
+    this.blank=new WarmRuntimes({ttlMs:cfg.prewarmMs??0,max:cfg.maxBlankWarm??0});this.blankPending=new Set();
     this.metrics={started:0,completed:0,deniedTools:0,hostCalls:0,decodedDsml:0,replays:0,correctionCalls:0,recoveredRequests:0,localDecisionRepairs:0,lastFailure:null,warm:this.warm.stats,blankWarm:this.blank.stats};
   }
   async reserveSlot(){
@@ -103,7 +105,7 @@ export class SdkTransport {
       this.pendingSlots++;let released=false;return()=>{if(!released){released=true;this.pendingSlots--;}};
     }finally{unlock();}
   }
-  async close(){await this.hold.closeAll();this.closed=true;this.warm.close();this.blank.close();await this.pool.close();}
+  async close(){this.closed=true;this.warm.close();this.blank.close();await this.hold.closeAll();await this.pool.close();}
   optionsKey(body,credential,native){return {native,model:body.model,publicModel:body.bridge_public_model,nativeContextWindow:body.bridge_native_context_window,effort:body.reasoning_effort,max:body.max_tokens,tools:body.tools??[],choice:body.tool_choice,format:body.response_format,thinking:body.bridge_thinking_disabled,prompts:this.cfg.hostPrompts,token:credential.accessToken,uid:credential.uid,domain:credential.domain};}
   warmKey(record,body,credential,native){
     return digest({...this.optionsKey(body,credential,native),session:record.sessionId,dir:record.dir});
@@ -119,18 +121,19 @@ export class SdkTransport {
     return handle;
   }
   // Empty runtimes have never received a prompt or resume ID. Only fresh conversations may adopt them.
-  async prewarmBlank(body,credential,native){
-    if(this.closed||this.blankPending||this.blank.size||!this.blank.ttlMs||!this.blank.max||hasUsableTools(body))return;
-    this.blankPending=true;const dir=join(this.cfg.runtime,'sdk',randomUUID());
+  async prewarmBlank(key,body,credential,native){
+    const eligible=()=>!this.closed&&this.blankDemand?.key===key&&Date.now()-this.blankDemand.at<(this.cfg.blankWarmDemandMs??600000);
+    if(!eligible()||this.blankPending.has(key)||this.blank.entries.has(key)||this.blank.size>=this.blank.max||!this.blank.ttlMs)return;
+    const release=this.blankSlots.reserve();if(!release)return;
+    this.blankPending.add(key);const dir=join(this.cfg.runtime,'sdk',randomUUID());let started=false;
     try{
       await mkdir(dir,{recursive:true});await writeFile(join(dir,'.bridge-owner.json'),JSON.stringify({pid:process.pid}),{mode:0o600});
-      if(this.closed)return;
-      const started=this.blank.start('blank',digest(this.optionsKey(body,credential,native)),()=>{
+      if(!eligible())return;
+      started=this.blank.start(key,key,()=>{
         const handle=this.createWarm(body,credential,native,dir),close=handle.close;
         handle.close=()=>{close();if(!handle.adopted)void handle.ready.finally(()=>rm(dir,{recursive:true,force:true})).catch(()=>{});};return handle;
-      });
-      if(started)return;
-    }finally{this.blankPending=false;if(![...this.blank.entries.values()].some(e=>e.handle.dir===dir))await rm(dir,{recursive:true,force:true});}
+      },{readyTimeoutMs:WARM_READY_MS,release,onExpire:()=>{void this.prewarmBlank(key,body,credential,native).catch(()=>{});}});
+    }finally{this.blankPending.delete(key);if(!started){release();await rm(dir,{recursive:true,force:true});}}
   }
   /** Boot the runtime for this session's next turn while the host executes the tool calls. */
   prewarm(record,body,credential,native){
@@ -138,7 +141,7 @@ export class SdkTransport {
     const sessionId=record.sessionId;
     // Start after the finished runtime released the session, and never beside an active turn.
     setTimeout(()=>{
-      if(record.busy||record.sessionId!==sessionId||this.pool.closed||this.pool.records.get(record.id)!==record)return;
+      if(this.closed||record.busy||record.sessionId!==sessionId||this.pool.closed||this.pool.records.get(record.id)!==record)return;
       this.warm.start(record.id,this.warmKey(record,body,credential,native),()=>{
         return this.createWarm(body,credential,native,record.dir,sessionId);
       });
@@ -147,7 +150,9 @@ export class SdkTransport {
   async takeWarm(record,body,credential,native,signal){
     const fresh=!record.sessionId&&!record.history.length;
     const owner=fresh?this.blank:this.warm;
-    const handle=fresh?owner.take('blank',digest(this.optionsKey(body,credential,native))):owner.take(record.id,this.warmKey(record,body,credential,native));if(!handle)return null;
+    const key=fresh?digest(this.optionsKey(body,credential,native)):this.warmKey(record,body,credential,native);
+    const entryKey=fresh&&!owner.entries.has(key)&&owner.max===1?owner.entries.keys().next().value:fresh?key:record.id;
+    const handle=owner.take(entryKey,key);if(!handle)return null;
     let timer;const timeout=new Promise((_,reject)=>{timer=setTimeout(()=>reject(new Error('Prestarted runtime did not become ready')),WARM_READY_MS);});
     try{await abortable(Promise.race([handle.ready,timeout]),signal);}
     catch(error){owner.fail(handle);if(signal.aborted)throw error;return null;}
@@ -226,7 +231,7 @@ export class SdkTransport {
         const send=data=>{if(!closed)sink.enqueue(encoder.encode(`data: ${typeof data==='string'?data:JSON.stringify(data)}\n\n`));};
         const chunk=(delta,finish=null,usage=null)=>({id,created,model:body.model,object:'chat.completion.chunk',choices:[{index:0,delta,finish_reason:finish}],usage,...(usage?{bridge_usage:{accounting:metrics.usageAccounting??usageAccounting([]),correction_calls:metrics.correctionCalls??0}}:{})});
         void (async()=>{
-          let output=new DecisionOutput(),usageRecorded=false,attemptPriorUsage=record.lastSdkUsage,attemptResumed=!!record.sessionId;const usages=[];let success=false,prewarmNext=false;
+          let output=new DecisionOutput(),usageRecorded=false,attemptPriorUsage=record.lastSdkUsage,attemptResumed=!!record.sessionId;const usages=[];let success=false,prewarmNext=false,blankKey;
           // Reported out of band: a long tool-argument-only phase still proves the upstream is alive.
           const onActivity=typeof context.onActivity==='function'?context.onActivity:()=>{};
           const snapshotUsage=()=>{
@@ -245,6 +250,9 @@ export class SdkTransport {
               signal.throwIfAborted();this.metrics.replays++;
               for(const delta of lease.replay.deltas)send(chunk(delta));
               metrics.client_usage=null;metrics.client_cache_usage='omitted';send(chunk({},lease.replay.finish));send('[DONE]');success=true;return;
+            }
+            if(!record.sessionId&&!record.history.length&&!hasUsableTools(body)&&this.blank.ttlMs&&this.blank.max){
+              signal.throwIfAborted();blankKey=digest(this.optionsKey(body,credential,native));this.blankDemand={key:blankKey,at:Date.now()};
             }
             let decision,source,format,projector,gate,repairs;const rejected=new Set();
             const retryLimit=this.cfg.decisionRetries??2;
@@ -466,7 +474,10 @@ export class SdkTransport {
             if(!success&&signal.aborted){record.cancelled=true;record.sessionId=null;}else if(!success||!record.sessionId)await lease.discard();lease.release();
             if(!closed){closed=true;sink.close();}
             if(prewarmNext)this.prewarm(record,body,credential,native);
-            if(success)void this.prewarmBlank(body,credential,native).catch(()=>{});
+            if(success&&blankKey){
+              const {messages,...startupBody}=body;
+              void this.prewarmBlank(blankKey,startupBody,credential,native).catch(()=>{});
+            }
           }
         })();
       },

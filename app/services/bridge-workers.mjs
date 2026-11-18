@@ -1,8 +1,13 @@
 import {randomUUID} from 'node:crypto';
 import {join} from 'node:path';
+import {createRequire} from 'node:module';
 import {launch,JsonLines,stopProcess} from '../core/process.mjs';
 import {WorkerLog} from './worker-log.mjs';
 import {providerEnvironmentPatch} from './provider-environment.mjs';
+import {prepareProviderCompileCache} from './provider-compile-cache.mjs';
+import {sourceDefinition} from './source-packages.mjs';
+
+const appVersion=createRequire(import.meta.url)('../../package.json').version;
 
 /** A persistent worker per source/runtime isolates prompts, SDK sessions and replay caches. */
 export class BridgeWorkers {
@@ -10,8 +15,15 @@ export class BridgeWorkers {
   async ensure(source,runtimeId){
     if(this.closed)throw new Error('Bridge workers are closed');
     const componentEnv=this.components?await this.components.environment(source):{AWB_SOURCE_PACKAGE_DIR:undefined};
+    const userData=this.components?.userData;
+    if(userData&&process.env.NODE_DISABLE_COMPILE_CACHE!=='1'&&(!this.compileCache||Date.now()-this.compileCache.at>=600000)){
+      const version=JSON.stringify([appVersion,...['qoder','workbuddy'].map(id=>sourceDefinition(id).version)]);
+      this.compileCache={at:Date.now(),directory:prepareProviderCompileCache(userData,version).catch(()=>undefined)};
+    }
+    const directory=await this.compileCache?.directory;
+    if(this.closed)throw new Error('Bridge workers are closed');
     const scope=`${runtimeId}/${source}`,previous=this.entries.get(scope);if(previous)return previous.ready;
-    const config=this.catalog(source,runtimeId),child=launch(this.node.command,[...this.node.args,this.script,source,runtimeId],{cwd:this.cwd,stdio:['pipe','pipe','pipe','ipc'],env:{...this.node.env,...providerEnvironmentPatch(),...componentEnv,AWB_METADATA_ONLY:this.metadataOnly?'1':'0',AWB_PROVIDER_DIR:join(this.dataRoot,'providers',source,runtimeId,...this.metadataOnly?[randomUUID()]:[])}});
+    const config=this.catalog(source,runtimeId),child=launch(this.node.command,[...this.node.args,this.script,source,runtimeId],{cwd:this.cwd,stdio:['pipe','pipe','pipe','ipc'],env:{...this.node.env,...providerEnvironmentPatch(),...componentEnv,...directory?{NODE_COMPILE_CACHE:directory}:{},AWB_METADATA_ONLY:this.metadataOnly?'1':'0',AWB_PROVIDER_DIR:join(this.dataRoot,'providers',source,runtimeId,...this.metadataOnly?[randomUUID()]:[])}});
     const entry={child,revision:config.revision,pending:new Map(),failed:null,syncing:null,active:0};this.entries.set(scope,entry);
     const log=this.metadataOnly?{write(){},async close(){}}:new WorkerLog(join(this.dataRoot,'providers',source,runtimeId,'worker.log'));
     const lines=new JsonLines();child.stdout.on('data',b=>lines.push(b));child.stdout.on('end',()=>lines.end());child.stderr.on('data',b=>log.write(b));child.stderr.on('end',()=>{void log.close();});

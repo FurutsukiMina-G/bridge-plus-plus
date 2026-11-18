@@ -53,7 +53,9 @@ test('a matching native warm runtime is claimed without opening a replacement',a
 
 test('an unclaimed native warm runtime expires at the blank TTL',async()=>{
   const runtimes:FakeRuntime[]=[];
-  const pool=new QoderPool(nativeConfig({nativeWarmLimit:1,blankWarmTtlMs:20}),fakeStarter(runtimes));
+  // The demand window must outlast a loaded machine's delay before the prewarm starts, and end before the TTL so that
+  // the expired runtime is not replaced.
+  const pool=new QoderPool(nativeConfig({nativeWarmLimit:1,blankWarmTtlMs:1500,blankWarmDemandMs:1000}),fakeStarter(runtimes));
   try{
     const pending=pool.infer(toolRequest());
     await waitFor(()=>runtimes[0]?.prompts.length===1);

@@ -9,6 +9,8 @@ import { type ChatRequest, type Decision, type DecisionRepair, conversationPromp
 import { hasConversationPrefix, routeConversation, prefixIssue,evictionCandidate,prunedConversationPrefix } from './routing.js';
 import {pruningThreshold,pruningAllowed} from './history-pruning.js';
 import { abortable } from './async.js';
+import { qoderUpstreamIdleTimeout, upstreamSilence } from './timeouts.js';
+import { blankWarmSettings, BlankWarmSlots } from './blank-warm.js';
 import { prefixCacheEstimate, withCachedTokens, ZERO_USAGE, type OpenAIUsage } from './usage.js';
 import {recoverDecision,decisionRetryLimit,decisionCorrectionPrompt,type RecoveryTrace} from './decision-recovery.js';
 import { cacheFromCredits, sharedTierCalendar } from './billing.js';
@@ -60,12 +62,13 @@ export class QoderPool {
   private byToolId = new Map<string, string>();
   private byClientSession = new Map<string, string>();
   private nextWarm: Promise<RecordSession> | null = null;
-  private warmTimer?: ReturnType<typeof setTimeout>;
   private extraWarm:Promise<RecordSession>[]=[];
   private warmReady=new Map<Promise<RecordSession>,RecordSession>();
   private warmTimers=new Map<Promise<RecordSession>,ReturnType<typeof setTimeout>>();
-  private warmTarget=1;
-  private lastDemand=Date.now();
+  private warmReleases=new Map<Promise<RecordSession>,()=>void>();
+  private lastBlankDemand=-Infinity;
+  private readonly warmSettings:ReturnType<typeof blankWarmSettings>;
+  private readonly blankSlots:BlankWarmSlots;
   private openingControllers=new Set<AbortController>();
   private cacheReady?:Promise<IsolationCache|null>;
   private cacheInfo={enabled:false,hit:false,status:'disabled',cli_version:null as string|null,declared_cli_version:null as string|null};
@@ -81,13 +84,14 @@ export class QoderPool {
   private readonly native:NativeLane;
   // Idle SDK runtimes are otherwise released only when another session is opened.
   private sweeper = setInterval(() => this.sweepIdle(), SWEEP_MS);
-  constructor(readonly config: Config, private readonly startRuntime: typeof startup = startup) {
+  constructor(readonly config: Config, private readonly startRuntime: typeof startup = startup, blankSlots?:BlankWarmSlots) {
     this.sweeper.unref();
-    this.native=new NativeLane(config,(binding,table,names,maxTokens)=>this.open('native',{binding,table,names,maxTokens}),record=>this.close(record as unknown as RecordSession),scope=>this.sweep(scope));
-    if(!Number.isSafeInteger(config.blankWarmLimit??2)||(config.blankWarmLimit??2)<0||(config.blankWarmLimit??2)>4||!Number.isSafeInteger(config.blankWarmTtlMs??120000)||(config.blankWarmTtlMs??120000)<1){clearInterval(this.sweeper);throw new Error('Invalid Qoder blank runtime limit or TTL');}
+    try{this.warmSettings=blankWarmSettings(config);}catch(error){clearInterval(this.sweeper);throw error;}
+    this.blankSlots=blankSlots??new BlankWarmSlots(Math.max(this.warmSettings.blankWarmLimit,this.warmSettings.nativeWarmLimit));
+    this.native=new NativeLane(config,(binding,table,names,maxTokens)=>this.open('native',{binding,table,names,maxTokens}),record=>this.close(record as unknown as RecordSession),scope=>this.sweep(scope),this.warmSettings,this.blankSlots);
     // The runtime cuts any function result above 50,000 characters to a preview; the receipt path must trigger below it.
     const nativeRange=(value:number|undefined,min:number,max:number)=>value===undefined||Number.isSafeInteger(value)&&value>=min&&value<=max;
-    if(!nativeRange(config.nativeResultCharLimit,1,49000)||!nativeRange(config.nativeWarmLimit,0,2)||!nativeRange(config.nativeInvalidRounds,1,10)||
+    if(!nativeRange(config.nativeResultCharLimit,1,49000)||!nativeRange(config.nativeInvalidRounds,1,10)||
       !nativeRange(config.nativeMaxTurns,10,1_000_000)||!nativeRange(config.nativeMcpOutputTokens,25_000,2_000_000_000)||
       !nativeRange(config.idleTimeoutMs,1_000,600_000)||!nativeRange(config.awaitingIdleMs,60_000,3_600_000)){
       clearInterval(this.sweeper);throw new Error('Invalid Qoder native tool settings');}
@@ -106,14 +110,17 @@ export class QoderPool {
   }
   private dropWarm(pending:Promise<RecordSession>){
     clearTimeout(this.warmTimers.get(pending));this.warmTimers.delete(pending);this.warmReady.delete(pending);
+    this.warmReleases.get(pending)?.();this.warmReleases.delete(pending);
     if(this.nextWarm===pending)this.nextWarm=this.extraWarm.shift()??null;else this.extraWarm=this.extraWarm.filter(p=>p!==pending);
   }
-  private newWarm():Promise<RecordSession>{
+  private newWarm():Promise<RecordSession>|null{
+    const release=this.blankSlots.reserve();if(!release)return null;
     const pending=this.open();
+    this.warmReleases.set(pending,release);
     void pending.then(record => { this.prewarmError = null;
       if(this.closed){this.close(record);return;}
       if(this.nextWarm!==pending&&!this.extraWarm.includes(pending))return;
-      this.warmReady.set(pending,record);const timer=setTimeout(()=>{this.dropWarm(pending);this.close(record);},this.config.blankWarmTtlMs??120000);timer.unref();this.warmTimers.set(pending,timer);
+      this.warmReady.set(pending,record);const timer=setTimeout(()=>{this.dropWarm(pending);this.close(record);this.replenish();},this.warmSettings.blankWarmTtlMs);timer.unref();this.warmTimers.set(pending,timer);
     }, error => {
       this.dropWarm(pending);
       this.prewarmError = safeError(error);
@@ -121,13 +128,12 @@ export class QoderPool {
     });
     return pending;
   }
-  private primeNext():Promise<RecordSession>{if(this.nextWarm)return this.nextWarm;return this.nextWarm=this.newWarm();}
+  private primeNext():Promise<RecordSession>|null{return this.nextWarm??=this.newWarm();}
   private replenish(){
-    if(this.closed||Date.now()-this.lastDemand>(this.config.blankWarmTtlMs??120000)||!(this.config.blankWarmLimit??2))return;
-    void this.primeNext();
-    while(1+this.extraWarm.length<Math.min(this.warmTarget,this.config.blankWarmLimit??2))this.extraWarm.push(this.newWarm());
+    const {blankWarmDemandMs,blankWarmLimit}=this.warmSettings;
+    if(this.closed||Date.now()-this.lastBlankDemand>=blankWarmDemandMs||!blankWarmLimit||!this.primeNext())return;
+    while(1+this.extraWarm.length<blankWarmLimit){const extra=this.newWarm();if(!extra)break;this.extraWarm.push(extra);}
   }
-  prewarm() {this.lastDemand=Date.now();if(!(this.config.blankWarmLimit??2))return Promise.resolve();return this.primeNext().then(() => {});}
   private oneShot(request:ChatRequest){return !hasUsableTools(request)&&!request.prompt_cache_key&&request.messages.length===2&&request.messages[0]?.role==='system'&&request.messages[1]?.role==='user'&&request.messages.every(m=>typeof m.content==='string');}
   private async cache(){
     if(!this.config.isolationCacheDir)return null;
@@ -183,7 +189,7 @@ export class QoderPool {
           reasoning_effort: selected.parameters?.reasoningEffort ?? null });
         return selected;
       };
-      let mark=performance.now();try{warm = await this.startRuntime({ options, initializeTimeoutMs: this.config.timeout });}finally{phase.sdk_startup_ms=performance.now()-mark;phase.sdk_initialize_ms=phase.transport_initialize_ms===null?null:Math.max(0,phase.sdk_startup_ms-phase.transport_initialize_ms);}
+      let mark=performance.now();try{warm = await this.startRuntime({ options, initializeTimeoutMs: Math.min(this.config.timeout,300000) });}finally{phase.sdk_startup_ms=performance.now()-mark;phase.sdk_initialize_ms=phase.transport_initialize_ms===null?null:Math.max(0,phase.sdk_startup_ms-phase.transport_initialize_ms);}
       controller.signal.throwIfAborted();
       const q = warm.query(queue);
       mark=performance.now();const init=await q.initializationResult();phase.initialization_result_ms=performance.now()-mark;
@@ -279,10 +285,10 @@ export class QoderPool {
   }
   private async acquireNew(request: ChatRequest) {
     this.sweep(request.bridge_scope);
+    this.lastBlankDemand=Date.now();
     this.pendingSlots++;
     try{
     const pending = this.nextWarm,ready=!!pending&&this.warmReady.has(pending);
-    clearTimeout(this.warmTimer);
     // Refill immediately, including while the claimed runtime is still initializing.
     if(pending){this.dropWarm(pending);this.replenish();}const waitAt=performance.now();
     const record = pending ? await pending : await this.open();
@@ -305,7 +311,7 @@ export class QoderPool {
   isNative(request:ChatRequest){return nativeEligible(request,this.config);}
   stats() { return { sessions: [...this.sessions.values()].filter(row => !row.nativeReleased).length, busy: [...this.sessions.values()].filter(row => row.busy > 0).length,
     opening: this.openingByClient.size, prewarmed: this.nextWarm !== null, prewarm_error: this.prewarmError,
-    blank_runtimes:{target:Math.min(this.warmTarget,this.config.blankWarmLimit??2),limit:this.config.blankWarmLimit??2,ready:this.warmReady.size,pending:Number(!!this.nextWarm)+this.extraWarm.length-this.warmReady.size,ttl_ms:this.config.blankWarmTtlMs??120000},
+    blank_runtimes:{target:this.warmSettings.blankWarmLimit,limit:this.warmSettings.blankWarmLimit,ready:this.warmReady.size,pending:Number(!!this.nextWarm)+this.extraWarm.length-this.warmReady.size,ttl_ms:this.warmSettings.blankWarmTtlMs,demand_ms:this.warmSettings.blankWarmDemandMs},
     native:this.native.stats(),
     decision_recovery:{max_correction_calls:decisionRetryLimit(this.config.decisionRetries),
       recovered_requests:this.recoveredRequests,exhausted_requests:this.exhaustedRequests},
@@ -313,12 +319,10 @@ export class QoderPool {
     billing_calendar_overrides:sharedTierCalendar.learnedDates() }; }
   private guardTokens() { return this.config.reasoningGuardTokens ?? DEFAULT_REASONING_GUARD_TOKENS; }
   async infer(request: ChatRequest, hooks: InferHooks = {}):Promise<any> {
-    // Native traffic is demand too: it keeps the blank JSON runtimes (auxiliary tool-less requests) replenished.
-    if(this.isNative(request)){this.lastDemand=Date.now();return this.native.infer(request,hooks);}
+    if(this.isNative(request))return this.native.infer(request,hooks);
     // One reason per tool-carrying request for staying on the JSON path: the audit trail for native coverage.
     const nativeSkip=request.tools?.length?nativeSkipReason(request,this.config):null;
     const start = performance.now();
-    this.lastDemand=Date.now();if(this.oneShot(request))this.warmTarget=Math.min(2,this.config.blankWarmLimit??2);
     const requestHash = createHash('sha256').update(JSON.stringify({ model: request.model,
       messages: conversationMessages(request.messages), tools: request.tools, choice: request.tool_choice,
       temperature: request.temperature, max_tokens: request.max_tokens,response_format:request.response_format,parallel_tool_calls:request.parallel_tool_calls,
@@ -433,6 +437,7 @@ export class QoderPool {
           const policyStart = record.policyCalls.length;
           const attemptAt = new Date();
           let inferenceError: string | null = null;
+          let stalled = false;
           let inFlight:ReturnType<Query['next']>|null=null;
           const guard = this.guardTokens();
           let guardTripped = false;
@@ -449,12 +454,15 @@ export class QoderPool {
               void record.q.interrupt().catch(() => {});
             }
           };
+          const idleMs=qoderUpstreamIdleTimeout(this.config.idleTimeoutMs);
+          const idle=upstreamSilence(signal,idleMs,new Error(`Qoder produced no upstream event for ${Math.round(idleMs/1000)} s; the upstream stalled.`));
           try {
             signal.throwIfAborted();
             record.queue.push({ type: 'user', parent_tool_use_id: null, message: { role: 'user', content: sdkMediaPrompt(attemptPrompt,delta) } });
             while (true) {
-              inFlight=record.q.next();const step = await abortable(inFlight, signal);inFlight=null;
+              inFlight=record.q.next();const step = await abortable(inFlight, idle.signal);inFlight=null;
               if (step.done) throw new Error('Qoder stream closed');
+              idle.touch();
               telemetry.observe(step.value, hooks.onText, onThinking, hooks.onStatus);
               if (step.value.type === 'result') break;
             }
@@ -462,25 +470,30 @@ export class QoderPool {
             // An interrupted runaway turn leaves the SDK session usable; the recovery loop owns the retry.
             if (failed && !guardTripped) throw new Error(`Qoder result: ${telemetry.result?.subtype ?? 'missing'}`);
           } catch (error) {
+            stalled=idle.stalled()&&!signal.aborted;
+            idle.close();
             inferenceError = safeError(error);
             telemetry.captureException(error);
             let drained=false;
-            if(signal.aborted&&!record.closed){
-              abort();const drainSignal=AbortSignal.timeout(5000);
-              try{
-                await abortable(interruption!,drainSignal);
-                let step=await abortable(inFlight??record.q.next(),drainSignal);
-                for(let count=0;count<10000&&!step.done;count++){
-                  if(step.value.type==='result'){drained=true;break;}
-                  step=await abortable(record.q.next(),drainSignal);
-                }
-              }catch{/* An unverified SDK state must not be resumed. */}
+            if((signal.aborted||stalled)&&!record.closed){
+              abort();
+              if(interruption){
+                const drainSignal=AbortSignal.timeout(5000);
+                try{
+                  await abortable(interruption,drainSignal);
+                  let step=await abortable(inFlight??record.q.next(),drainSignal);
+                  for(let count=0;count<10000&&!step.done;count++){
+                    if(step.value.type==='result'){drained=true;break;}
+                    step=await abortable(record.q.next(),drainSignal);
+                  }
+                }catch{/* An unverified SDK state must not be resumed. */}
+              }
             }
             if(drained){
               record.messages=request.messages;record.toolSignature=toolSignature;
               record.lastSuccessHash=null;record.lastDecision=null;record.lastFailedDecision=null;record.replayMessages=undefined;record.lastPromptTokens=null;
             }else this.close(record);
-          } finally { policy.reasoning = null; }
+          } finally { idle.close();policy.reasoning = null; }
           const reasoningGuardStopped = guardTripped && !inferenceError &&
             (telemetry.result?.subtype !== 'success' || telemetry.result.is_error);
           record.touched = Date.now();
@@ -513,7 +526,7 @@ export class QoderPool {
           if (!inferenceError && measured) record.lastPromptTokens = measured.prompt_tokens;
           else if (!inferenceError && !reasoningGuardStopped) record.lastPromptTokens = report.normalized_usage?.prompt_tokens ?? null;
           const attemptReport={...report,response:telemetry.text,error:inferenceError,
-            stage:signal.aborted?'cancelled_or_timeout':reasoningGuardStopped?'reasoning_guard':'inference',
+            stage:stalled?'upstream_stalled':signal.aborted?'cancelled_or_timeout':reasoningGuardStopped?'reasoning_guard':'inference',
             requested_reasoning:reasoning??this.config.reasoning??null,
             reasoning_guard:guardTripped?{limit:guard,reasoning_tokens:telemetry.thinkingDeltaCount,stopped:reasoningGuardStopped}:null,
             reasoning_guard_stopped:reasoningGuardStopped,
@@ -590,10 +603,11 @@ export class QoderPool {
     }
   }
   closeAll() {
-    this.closed=true;this.native.closeAll();clearTimeout(this.warmTimer);
+    this.closed=true;this.native.closeAll();
     clearInterval(this.sweeper);
     for(const controller of this.openingControllers)controller.abort();this.openingControllers.clear();
     for(const timer of this.warmTimers.values())clearTimeout(timer);this.warmTimers.clear();this.warmReady.clear();
+    for(const release of this.warmReleases.values())release();this.warmReleases.clear();
     for (const record of this.sessions.values()) this.close(record);
     this.nextWarm?.then(record => this.close(record)).catch(() => {});
     for(const pending of this.extraWarm)void pending.then(record=>this.close(record)).catch(()=>{});this.extraWarm=[];

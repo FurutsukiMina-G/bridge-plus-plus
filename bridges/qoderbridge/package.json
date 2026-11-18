@@ -18,7 +18,7 @@
     "probe": "tsx src/main.ts probe",
     "gate": "tsx src/main.ts gate",
     "action": "tsx src/main.ts action",
-    "serve": "tsx src/main.ts serve --session-settings config/thin-cn.json --timeout 300000",
+    "serve": "tsx src/main.ts serve --session-settings config/thin-cn.json",
     "bridge:smoke": "tsx scripts/bridge-smoke.ts",
     "stream:smoke": "tsx scripts/streaming-smoke.ts",
     "metrics": "tsx scripts/metrics.ts",

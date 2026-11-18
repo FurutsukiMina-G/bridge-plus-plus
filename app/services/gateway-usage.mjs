@@ -17,8 +17,22 @@ export function requestKind(body,headers={}){
   const stated=headers['x-bridge-auxiliary'];
   return {auxiliary:stated===undefined?declared===0||forbidden:stated==='1',toolsCount};
 }
+
+const claudeClasses=new Set(['main','subagent','workflow','compaction','auxiliary','side_reply']);
+export function requestReportKind(runtimeId,auxiliary,headers={}){
+  if(auxiliary&&headers['x-bridge-auxiliary']==='1'){
+    if(runtimeId==='claude'&&headers['x-bridge-review']==='1')return 'bridge_review';
+    if(headers['x-bridge-rules']==='1')return 'bridge_rules';
+  }
+  if(runtimeId==='claude'){
+    const category=headers['x-claude-code-request-class'];
+    if(claudeClasses.has(category))return 'claude_'+category;
+    return auxiliary?'claude_auxiliary_unknown':'main';
+  }
+  return auxiliary?'auxiliary_unknown':'main';
+}
 /** Observe provider usage once; publish it before terminal frames can end a native turn. */
-export async function relayCompletion(upstream,res,{signal,includeUsage,auxiliary=null,toolsCount=null,model,contextWindow,onUsage=async()=>{},onNotice=async()=>{},onFailure=async()=>{},onSuccess=async()=>{},sanitizeError=value=>value,started=performance.now()}){
+export async function relayCompletion(upstream,res,{signal,includeUsage,auxiliary=null,toolsCount=null,reportKind=null,model,contextWindow,onUsage=async()=>{},onNotice=async()=>{},onFailure=async()=>{},onSuccess=async()=>{},sanitizeError=value=>value,started=performance.now()}){
   let usage=null,extra=null,firstToken=null,published=false,failurePublished=false,limited=false,limitPublished=false;const toolIndices=new Set();
   const failure=async frame=>{if(frame?.error){frame.error=sanitizeError(frame.error);if(!failurePublished){failurePublished=true;await onFailure(frame.error);}}};
   const observe=frame=>{
@@ -28,7 +42,7 @@ export async function relayCompletion(upstream,res,{signal,includeUsage,auxiliar
   const publish=async()=>{
     if(limited&&!limitPublished){limitPublished=true;await onNotice({type:'native-event',source:'gateway',name:'gateway/output-limit',data:{reason:'max_output_tokens'}});}
     if(published||!usage&&!extra?.accounting)return;published=true;
-    await onUsage({type:'usage',scope:'request',source:'gateway',data:{model,prompt_tokens:number(usage?.prompt_tokens),completion_tokens:number(usage?.completion_tokens),reasoning_tokens:number(usage?.completion_tokens_details?.reasoning_tokens),...cacheUsage(usage??{},extra),context_window:contextWindow??null,first_token_ms:firstToken,duration_ms:performance.now()-started,...(typeof auxiliary==='boolean'?{auxiliary}:{}),...(Number.isSafeInteger(toolsCount)?{tools_count:toolsCount}:{}),...(extra?.accounting?{usage_accounting:extra.accounting}:{}),...(Number.isInteger(extra?.correction_calls)?{correction_calls:extra.correction_calls}:{}),...(typeof extra?.credits==='number'&&Number.isFinite(extra.credits)&&extra.credits>=0?{credits:extra.credits}:{})}});
+    await onUsage({type:'usage',scope:'request',source:'gateway',data:{model,prompt_tokens:number(usage?.prompt_tokens),completion_tokens:number(usage?.completion_tokens),reasoning_tokens:number(usage?.completion_tokens_details?.reasoning_tokens),...cacheUsage(usage??{},extra),context_window:contextWindow??null,first_token_ms:firstToken,duration_ms:performance.now()-started,...(typeof auxiliary==='boolean'?{auxiliary}:{}),...(Number.isSafeInteger(toolsCount)?{tools_count:toolsCount}:{}),...(reportKind?{request_kind:reportKind}:{}),...(extra?.accounting?{usage_accounting:extra.accounting}:{}),...(Number.isInteger(extra?.correction_calls)?{correction_calls:extra.correction_calls}:{}),...(typeof extra?.credits==='number'&&Number.isFinite(extra.credits)&&extra.credits>=0?{credits:extra.credits}:{})}});
   };
   const write=async text=>{signal.throwIfAborted();if(!res.write(text))await once(res,'drain',{signal});};
   if(!String(upstream.headers.get('content-type')).includes('text/event-stream')){

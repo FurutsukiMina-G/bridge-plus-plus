@@ -6,11 +6,12 @@ import {responsesRoute} from './responses.mjs';
 import {recordCodexBaseInstructionsForSession} from './codex-config.mjs';
 import {anthropicError,anthropicMessagesRoute,writeAnthropicMessage} from './anthropic-messages.mjs';
 import {once} from 'node:events';
+import {Agent} from 'undici';
 import {BridgeWorkers} from './bridge-workers.mjs';
 import {validateSelection} from '../core/catalog.mjs';
 import {bridgePromptConfig} from './runtime-prompts.mjs';
 import {assertSamplingSupported} from './request-settings.mjs';
-import {relayCompletion,requestKind} from './gateway-usage.mjs';
+import {relayCompletion,requestKind,requestReportKind} from './gateway-usage.mjs';
 import {textHistory,historyText} from './history-content.mjs';
 import {stripBillingHeader} from './prompt-filters.mjs';
 import {publicServiceModel} from './model-service-catalog.mjs';
@@ -19,6 +20,7 @@ import {WebSearch,searchQuery,anthropicSearchResponse} from './web-search.mjs';
 const equal=(a,b)=>{const x=Buffer.from(a??''),y=Buffer.from(b);return x.length===y.length&&timingSafeEqual(x,y);};
 // `x-bridge-effort: none,low` → the first listed level the model supports; only light levels are honoured.
 const LIGHT_EFFORTS=new Set(['none','minimal','low','medium']);
+const BRIDGE_HEADERS_TIMEOUT_MS=1830000;
 export const lighterEffort=(header,supported=[])=>String(header??'').split(',').map(s=>s.trim()).find(e=>LIGHT_EFFORTS.has(e)&&supported.includes(e))??null;
 export const gatewayAuthorized=(req,key)=>equal(req.headers.authorization,`Bearer ${key}`)&&req.headers.origin===undefined&&/^127\.0\.0\.1:\d+$/.test(req.headers.host??'');
 
@@ -28,6 +30,12 @@ export class Gateway {
   catalog(source,runtimeId){const scope=`${runtimeId}/${source}`;return {models:[...this.variants.values()].filter(x=>x.model.source===source&&x.runtimeId===runtimeId),revision:this.revisions.get(scope)??0};}
   async register(model,variant,selection,runtimeId,sessionId){if(this.closed)throw new Error('Gateway closed');if(!['qoder','workbuddy'].includes(model.source))throw new Error('This source must use its native runtime');bridgePromptConfig(runtimeId);if(sessionId!==undefined&&(typeof sessionId!=='string'||!/^[a-zA-Z0-9][a-zA-Z0-9_-]{0,127}$/.test(sessionId)))throw new Error('Invalid gateway session');const scope=`${runtimeId}/${model.source}`,key=`${scope}/${variant.id}`,value=structuredClone({model,variant,selection,runtimeId});if(JSON.stringify(this.variants.get(key))!==JSON.stringify(value)){this.variants.set(key,value);this.revisions.set(scope,(this.revisions.get(scope)??0)+1);}if(sessionId)this.bindings.set(`${scope}/${sessionId}`,{variantKey:key,...structuredClone(value)});await this.start();return {baseURL:`${this.base}/${scope}${sessionId?`/session/${sessionId}`:''}/v1`,key:this.key,model:variant.id};}
   async ensureWorker(source,runtimeId){bridgePromptConfig(runtimeId);const worker=await this.workers.ensure(source,runtimeId);await this.workers.sync(source,runtimeId,worker);return worker;}
+  fetchGeneration(url,init){
+    // The default fetch header timer is five minutes. Nonstreaming completions
+    // send no headers until the bridge has finished its model request.
+    this.generationAgent??=new Agent({headersTimeout:BRIDGE_HEADERS_TIMEOUT_MS});
+    return fetch(url,{...init,dispatcher:this.generationAgent,redirect:'error'});
+  }
   async searchEndpoint(){if(this.service)throw new Error('对外模型服务不提供搜索接口');await this.start();return {baseURL:this.base+'/search/anthropic/v1',key:this.key};}
   async searchRoute(req,res,send){
     if(req.method!=='POST'){send(405,{error:{code:'method_not_allowed',message:'搜索接口只接受 POST'}});return;}
@@ -71,7 +79,7 @@ export class Gateway {
         message.usage={input_tokens:0,output_tokens:0,server_tool_use:{web_search_requests:1}};
         writeAnthropicMessage(res,failureValue(message,[this.key]),body.stream===true);return;
       }
-      await anthropicMessagesRoute(body,res,(chat,signal)=>fetch(`${this.base}/claude/${source}/session/${sessionId}/v1/chat/completions`,{method:'POST',headers:{'content-type':'application/json',authorization:`Bearer ${this.key}`,'x-bridge-auxiliary':auxiliary?'1':'0','x-bridge-tool-count':String(toolsCount),...(req.headers['x-bridge-effort']?{'x-bridge-effort':String(req.headers['x-bridge-effort'])}:{})},body:JSON.stringify(chat),signal}),controller.signal,{images:binding.model.images===true,secrets:[this.key],onFailure:(error,status)=>this.onLocalFailure?.(req,failureValue(error,[this.key]),status)});
+      await anthropicMessagesRoute(body,res,(chat,signal)=>this.fetchGeneration(`${this.base}/claude/${source}/session/${sessionId}/v1/chat/completions`,{method:'POST',headers:{'content-type':'application/json',authorization:`Bearer ${this.key}`,'x-bridge-auxiliary':auxiliary?'1':'0','x-bridge-tool-count':String(toolsCount),...(req.headers['x-bridge-review']==='1'?{'x-bridge-review':'1'}:{}),...(typeof req.headers['x-claude-code-request-class']==='string'?{'x-claude-code-request-class':req.headers['x-claude-code-request-class']}:{}),...(req.headers['x-bridge-effort']?{'x-bridge-effort':String(req.headers['x-bridge-effort'])}:{})},body:JSON.stringify(chat),signal}),controller.signal,{images:binding.model.images===true,secrets:[this.key],onFailure:(error,status)=>this.onLocalFailure?.(req,failureValue(error,[this.key]),status)});
     }catch(error){if(!res.destroyed)fail(error.status??502,error);}
     finally{res.removeListener('close',abort);controller.abort();this.controllers.delete(controller);}
   }
@@ -125,7 +133,7 @@ export class Gateway {
     try{
     // Codex sends its built-in developer prompt in the first request; keep that text
     // per Codex version so a later launch can declare apply_patch without changing it.
-    if(route==='responses'){if(!this.service&&runtimeId==='codex'&&sessionId)void recordCodexBaseInstructionsForSession(this.store.root,sessionId,body).catch(()=>{});await responsesRoute(body,res,(chat,signal)=>fetch(`${routeBase}/chat/completions`,{method:'POST',headers:{'content-type':'application/json',authorization:`Bearer ${this.key}`,'x-bridge-auxiliary':auxiliary?'1':'0','x-bridge-tool-count':String(toolsCount),...(req.headers['x-bridge-effort']?{'x-bridge-effort':String(req.headers['x-bridge-effort'])}:{}),...this.service?{'x-bridge-internal':this.internalKey,'x-bridge-parent':req.bridgeRequestId}:{}},body:JSON.stringify(chat),signal}),controller.signal,{images:selected.model.images===true,onFailure:(error,status)=>this.onLocalFailure?.(req,failureValue(error,[this.key]),status)});return;}
+    if(route==='responses'){if(!this.service&&runtimeId==='codex'&&sessionId)void recordCodexBaseInstructionsForSession(this.store.root,sessionId,body).catch(()=>{});await responsesRoute(body,res,(chat,signal)=>this.fetchGeneration(`${routeBase}/chat/completions`,{method:'POST',headers:{'content-type':'application/json',authorization:`Bearer ${this.key}`,'x-bridge-auxiliary':auxiliary?'1':'0','x-bridge-tool-count':String(toolsCount),...(req.headers['x-bridge-effort']?{'x-bridge-effort':String(req.headers['x-bridge-effort'])}:{}),...this.service?{'x-bridge-internal':this.internalKey,'x-bridge-parent':req.bridgeRequestId}:{}},body:JSON.stringify(chat),signal}),controller.signal,{images:selected.model.images===true,onFailure:(error,status)=>this.onLocalFailure?.(req,failureValue(error,[this.key]),status)});return;}
     // An application scope owns several independent conversations (main, subagents, compaction).
     // A client key identifies a conversation only within that scope; absent keys use scoped prefix routing.
     if(sessionId){body.bridge_scope=createHash('sha256').update(`${runtimeId}/${source}/${sessionId}`).digest('hex');if(body.prompt_cache_key)body.prompt_cache_key=createHash('sha256').update(body.bridge_scope+':'+body.prompt_cache_key).digest('hex');}else delete body.bridge_scope;
@@ -135,13 +143,14 @@ export class Gateway {
     // auxiliary requests, only a level the model supports, taking the first one listed (never a heavier one).
     const lighter=auxiliary?lighterEffort(req.headers['x-bridge-effort'],selected.model.reasoning):null;
     if(lighter)body.reasoning_effort=lighter;
+    const reportKind=requestReportKind(runtimeId,auxiliary,this.service?{}:req.headers);
     const includeUsage=body.stream_options?.include_usage===true;
     if(body.stream)body.stream_options={...body.stream_options,include_usage:true};
     const worker=await this.ensureWorker(source,runtimeId);this.workers.retain(worker);leasedWorker=worker;controller.signal.throwIfAborted();
     try{validateSelection(this.providers.get(selected.model.key),selected.selection);}catch(error){send(409,{error:{message:error.message}});return;}
     if(runtimeId==='dsh')this.lastDshSource=source;
-    const upstream=await fetch(worker.url+'/v1/chat/completions',{method:'POST',headers:{'content-type':'application/json',authorization:`Bearer ${worker.key}`},body:JSON.stringify(body),signal:controller.signal,redirect:'error'});res.writeHead(upstream.status,{'content-type':upstream.headers.get('content-type')??'application/json','cache-control':'no-store'});
-    await relayCompletion(upstream,res,{signal:controller.signal,includeUsage,auxiliary,toolsCount,model:body.model,contextWindow:selected.selection.contextBudget??selected.variant.contextWindow,started,sanitizeError:error=>failureValue(error,[this.key,worker.key]),onUsage:event=>this.onUsage?.(sessionId,event,turnId),onNotice:event=>this.onUsage?.(sessionId,event,turnId),onSuccess:()=>this.onSuccess?.(sessionId,turnId),onFailure:async raw=>{
+    const upstream=await this.fetchGeneration(worker.url+'/v1/chat/completions',{method:'POST',headers:{'content-type':'application/json',authorization:`Bearer ${worker.key}`,'x-bridge-request-kind':reportKind},body:JSON.stringify(body),signal:controller.signal});res.writeHead(upstream.status,{'content-type':upstream.headers.get('content-type')??'application/json','cache-control':'no-store'});
+    await relayCompletion(upstream,res,{signal:controller.signal,includeUsage,auxiliary,toolsCount,reportKind,model:body.model,contextWindow:selected.selection.contextBudget??selected.variant.contextWindow,started,sanitizeError:error=>failureValue(error,[this.key,worker.key]),onUsage:event=>this.onUsage?.(sessionId,event,turnId),onNotice:event=>this.onUsage?.(sessionId,event,turnId),onSuccess:()=>this.onSuccess?.(sessionId,turnId),onFailure:async raw=>{
       const error=failureDetails(raw,upstream.status,[this.key,worker.key]);
       await this.onFailure?.(sessionId,error,turnId);
       await this.onUsage?.(sessionId,{type:'upstream-error',source:'gateway',provider:source,model:selected.model.name??selected.variant.name??body.model,code:error.code,message:error.message,...error.upstream_status?{status:error.upstream_status}:{},...error.reset_at?{resetAt:error.reset_at}:{},...error.request_id?{requestId:error.request_id}:{},retrying:error.automatic_retry!==false},turnId);
@@ -152,5 +161,5 @@ export class Gateway {
     }});
     }finally{this.workers.release(leasedWorker);controller.abort();this.controllers.delete(controller);res.removeListener('close',abort);}
   }
-  async close(){this.closed=true;for(const controller of this.controllers)controller.abort();await this.workers.close();await this.starting?.catch(()=>{});if(this.server){this.server.closeAllConnections();await new Promise(resolve=>this.server.close(resolve));this.server=null;}}
+  async close(){this.closed=true;for(const controller of this.controllers)controller.abort();await this.generationAgent?.destroy();await this.workers.close();await this.starting?.catch(()=>{});if(this.server){this.server.closeAllConnections();await new Promise(resolve=>this.server.close(resolve));this.server=null;}}
 }

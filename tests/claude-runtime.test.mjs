@@ -12,6 +12,15 @@ import {launch} from '../app/core/process.mjs';
 const endpoint={baseURL:'http://127.0.0.1:8646/claude/qoder/session/synthetic/v1',key:'synthetic-gateway-key',model:'synthetic-model'};
 const options=()=>({runtime:{executable:'claude.exe'},project:{path:resolve('.')},session:{id:randomUUID(),selection:{contextBudget:900000}},model:{maxOutputTokens:64000},variant:{id:'synthetic-model'},endpoint,selection:{contextBudget:900000},permissionMode:'ask',configDir:'D:\\synthetic\\claude-config'});
 const waitFor=async(fn,timeout=7000)=>{const end=Date.now()+timeout;for(;;){const value=fn();if(value)return value;if(Date.now()>end)throw new Error('Timed out waiting for synthetic Claude event');await new Promise(r=>setTimeout(r,10));}};
+test('Claude disables unused suggestions and away summaries in both environment layers',()=>{
+  const {args,env}=claudeLaunchSettings(options());
+  const settings=JSON.parse(args[args.indexOf('--settings')+1]);
+  for(const key of ['CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION','CLAUDE_CODE_ENABLE_AWAY_SUMMARY']){
+    assert.equal(env[key],'0');
+    assert.equal(settings.env[key],'0');
+  }
+  assert.equal(args[args.indexOf('--permission-prompt-tool')+1],'stdio');
+});
 const controlAdapter=(permissionMode='ask',running=true)=>{const events=[],writes=[];const adapter=new ClaudeAdapter({permissionMode,emit:async e=>events.push(e)});adapter.running=running;adapter.child={stdin:{destroyed:false,write:line=>writes.push(JSON.parse(line))}};return {adapter,events,writes};};
 // Windows env names are case-insensitive; assert on the effective value.
 const envOf=(map,key)=>map[Object.keys(map).find(name=>name.toUpperCase()===key.toUpperCase())??key];

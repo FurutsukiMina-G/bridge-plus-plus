@@ -197,15 +197,13 @@ test('L3: prose that mentions DSML is a normal answer; a marker-prefixed answer 
   }finally{pool.closeAll();}
 });
 
-test('L7: native-only traffic refreshes the pool demand timestamp',async()=>{
+test('native traffic never activates the JSON spare lane',async()=>{
   const runtimes:FakeRuntime[]=[];const pool=new QoderPool(nativeConfig(),fakeStarter(runtimes));
-  const internals=pool as unknown as {lastDemand:number};
   try{
-    const stale=Date.now()-600000;internals.lastDemand=stale;
     const pending=pool.infer({...toolRequest(),prompt_cache_key:'native-demand'});
     await waitFor(()=>runtimes[0]?.prompts.length===1);runtimes[0]!.final('ok');await pending;
-    assert.ok(internals.lastDemand>stale,'native traffic counts as demand so blank JSON runtimes refill');
-    assert.ok(Date.now()-internals.lastDemand<5000);
+    assert.equal(pool.stats().prewarmed,false);
+    assert.equal(runtimes.length,1);
   }finally{pool.closeAll();}
 });
 

@@ -16,6 +16,8 @@ import {assertToolContract} from './tool-contract.js';
 import {nativeSkipReason} from './native-lane.js';
 import {publicUpstreamFailure} from './diagnostics.js';
 import {bridgeFailure,type FailurePhase,type FailureInput} from './failures.js';
+import {blankWarmSettings,BlankWarmSlots} from './blank-warm.js';
+export {qoderRequestTimeout} from './timeouts.js';
 
 export const PUBLIC_MODEL = DEFAULT_PUBLIC_MODEL;
 export const PUBLIC_PRO_MODEL = PRO_PUBLIC_MODEL;
@@ -61,22 +63,23 @@ export async function createBridgeServer(config: Config, options: {
   if (config.model && config.model !== BRIDGE_MODELS[0].runtimeId)
     throw new Error('serve selects models through request.model; omit --model when serving multiple models');
   const pools = new Map<string, QoderPool>();
+  const warm=blankWarmSettings(config,process.env);
+  const blankSlots=new BlankWarmSlots(Math.max(warm.blankWarmLimit,warm.nativeWarmLimit));
   const requestConfig = (model: string): Config => {
     const spec = bridgeModel(model);
     if (!spec) throw new Error(`Unknown model: ${model}`);
     // Each public variant pins its Qoder context window; the host entry declares the same window.
-    return { ...config, model: spec.runtimeId, context: spec.contextWindow, expectedModelName: spec.expectedModelName };
+    return { ...config, ...warm, model: spec.runtimeId, context: spec.contextWindow, expectedModelName: spec.expectedModelName };
   };
   const poolFor = (model: string) => {
     if (options.infer) return null;
     let selected = pools.get(model);
-    if (!selected) { selected = new QoderPool(requestConfig(model), options.startRuntime); pools.set(model, selected); }
+    if (!selected) { selected = new QoderPool(requestConfig(model), options.startRuntime, blankSlots); pools.set(model, selected); }
     return selected;
   };
   // Independent pools prevent a model switch from carrying Qoder history or replay/cache state across models.
   const pool = options.prewarm === false ? null : poolFor(options.prewarmModel ?? PUBLIC_MODEL);
-  // Keep serving when the runtime is not reachable yet; the pool retries warm-up and opens sessions on demand.
-  if (pool) void pool.prewarm().catch(() => {});
+  // The primary pool supplies health metrics. SDK startup waits for a real request.
   const slots = new RequestSlots(3);
   const server = createServer(async (req, res) => {
     const startedAt = Date.now();
@@ -150,7 +153,7 @@ export async function createBridgeServer(config: Config, options: {
         pools: Object.fromEntries([...pools].map(([model, value]) => [model, value.stats()])),
         capabilities: { finalTextStreaming: true, thinkingStreaming: true, validatedTools: true,
           toolMode:config.toolMode??'json',nativeTools:{resultCharLimit:config.nativeResultCharLimit??40000,
-            mcpOutputTokens:config.nativeMcpOutputTokens??1000000,warmLimit:config.nativeWarmLimit??1},
+            mcpOutputTokens:config.nativeMcpOutputTokens??1000000,warmLimit:warm.nativeWarmLimit},
           // `dsh_request` stays listed for reports written by earlier versions; new rows use `client_request`.
           errorDiagnostics: { version: 1, origins: ['account','bridge','model_output','upstream','client_request','dsh_request','connection','unknown'],
             visibleMessage: true, sdkErrorCode: true, requestId: true },
@@ -239,7 +242,9 @@ export async function createBridgeServer(config: Config, options: {
           first_client_thinking_ms: firstClientThinkingMs, stream_chunks: streamChunks,upstream_failure:upstreamFailure, failure };
         const turnPhase = failurePhase;
         failurePhase = 'reporting';
+        const requestKind=req.headers['x-bridge-request-kind'];
         if (options.telemetry !== false) await appendReport(reports.bridge, { ...turn, bridge_request_id: bridgeRequestId,
+          ...typeof requestKind==='string'&&/^(?:main|auxiliary_unknown|bridge_review|bridge_rules|claude_(?:main|subagent|workflow|compaction|auxiliary(?:_unknown)?|side_reply))$/.test(requestKind)?{request_kind:requestKind}:{},
           upstream_failure:upstreamFailure, failure,
           bridge_port: bridgePort,
           harness_message_count: request.messages.length, harness_tool_count: request.tools?.length ?? 0 });

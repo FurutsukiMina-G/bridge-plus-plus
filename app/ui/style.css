@@ -88,6 +88,8 @@ kbd{font:500 10.5px var(--font);color:var(--faint);border:1px solid var(--line);
 .dot.completed{background:var(--green);opacity:.75}
 .dot.running,.dot.starting{background:var(--accent);animation:pulse 1.3s ease-in-out infinite}
 .dot.waiting{background:var(--amber);animation:pulse 1.6s ease-in-out infinite}
+/* Behind other windows the status animations pause: every animation frame costs the GPU process (app.js markFocus). */
+.window-inactive .dot,.window-inactive .pulse,.window-inactive .spinner,.window-inactive .job-bar i,.window-inactive .user-note .icon{animation-play-state:paused}
 .dot.failed{background:var(--red)}
 .dot.paused{background:var(--amber);opacity:.8}
 .dot.interrupted{background:var(--muted);opacity:.7}
@@ -488,6 +490,11 @@ kbd{font:500 10.5px var(--font);color:var(--faint);border:1px solid var(--line);
 .env-menu{width:360px}
 .folder-menu{width:340px}
 .session-menu{width:250px}
+.edit-menu{min-width:0;width:212px;padding:5px;border-radius:12px}
+.edit-menu .menu-item{min-height:32px;padding:6px 10px;border-radius:8px}
+.edit-menu .mi-name{font-weight:400}
+.mi-key{margin-left:auto;padding-left:16px;font-size:11.5px;color:var(--faint);white-space:nowrap}
+.menu-item:disabled{opacity:.42;cursor:default}
 .menu-label{padding:9px 10px 5px;font-size:11px;font-weight:600;color:var(--faint);letter-spacing:.4px}
 .menu-item{width:100%;display:flex;align-items:center;gap:10px;padding:8px 10px;border-radius:9px;text-align:left;color:var(--text-2);min-height:36px}
 .menu-item:hover:not(:disabled){background:var(--hover);color:var(--text)}
@@ -943,7 +950,7 @@ dialog h2{margin:0 0 12px;font:600 16px var(--font-display)}
 .queue-head .btn{margin-left:auto}
 .queue-head .btn .icon{width:13px;height:13px}
 .queue-item{display:flex;align-items:center;gap:4px;padding:2px 0 2px 21px;color:var(--text-2)}
-.queue-text{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.queue-text{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;user-select:text;cursor:text}
 .queue-att{display:inline-flex;align-items:center;gap:2px;color:var(--faint);font-size:11.5px;margin-right:2px}
 .queue-att .icon{width:12px;height:12px}
 

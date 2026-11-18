@@ -66,7 +66,8 @@ function replyText(body){
 const unavailable=detail=>({decision:'ask',risk:'medium',reason:`自动审查暂时不可用：${detail}`,cached:false});
 const undecided=()=>({decision:'ask',risk:'medium',reason:'自动审查没有给出有效结论',cached:false});
 
-export function createClaudeReviewer({endpoint,model,fetch:fetchImpl=globalThis.fetch,now=()=>Date.now(),timeoutMs=45000}={}){
+// Nonstreaming review leaves time for cold startup and falls back to manual confirmation on expiry.
+export function createClaudeReviewer({endpoint,model,fetch:fetchImpl=globalThis.fetch,now=()=>Date.now(),timeoutMs=180000}={}){
   if(typeof fetchImpl!=='function')throw new Error('自动审查需要可用的 fetch');
   const cache=new Map();
   const keyOf=(tool,input)=>{try{return `${tool}\n${JSON.stringify(input??{})}`;}catch{return null;}};
@@ -94,7 +95,7 @@ export function createClaudeReviewer({endpoint,model,fetch:fetchImpl=globalThis.
       if(signal){if(signal.aborted)abort();else signal.addEventListener('abort',abort,{once:true});}
       let response,answer;
       try{
-        response=await fetchImpl(claudeMessagesURL(endpoint?.baseURL),{method:'POST',headers:{'content-type':'application/json',authorization:`Bearer ${endpoint?.key??''}`,'anthropic-version':'2023-06-01','x-bridge-auxiliary':'1','x-bridge-effort':'none,low,minimal,medium'},body:JSON.stringify(body),signal:controller.signal});
+        response=await fetchImpl(claudeMessagesURL(endpoint?.baseURL),{method:'POST',headers:{'content-type':'application/json',authorization:`Bearer ${endpoint?.key??''}`,'anthropic-version':'2023-06-01','x-bridge-auxiliary':'1','x-bridge-review':'1','x-bridge-effort':'none,low,minimal,medium'},body:JSON.stringify(body),signal:controller.signal});
         if(!response||typeof response!=='object')throw new Error('审查请求没有返回响应');
         if(!response.ok)return unavailable(`HTTP ${response.status}`);
         try{answer=await response.json();}catch{return undecided();}

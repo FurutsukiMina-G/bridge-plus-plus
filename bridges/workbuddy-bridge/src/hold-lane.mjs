@@ -208,12 +208,13 @@ function matchResults(step, delta) {
   return { results, trailing };
 }
 class HoldLane {
-  constructor(config, openRuntime, closeRuntime, makeRoom = async()=>{}) {
-    this.config = {...config,timeout:config.timeoutMs??1200000,nativeWarmLimit:config.prewarmMs===0?0:(config.nativeWarmLimit??1),blankWarmTtlMs:config.prewarmMs??120000};
+  constructor(config, openRuntime, closeRuntime, makeRoom, blankSlots) {
+    this.config = {...config,timeout:config.timeoutMs??1200000,nativeWarmLimit:config.prewarmMs===0?0:(config.nativeWarmLimit??1),blankWarmTtlMs:config.prewarmMs??600000};
     this.timer=setInterval(()=>this.sweepIdle(),60000);this.timer.unref();
     this.openRuntime = openRuntime;
     this.closeRuntime = closeRuntime;
     this.makeRoom = makeRoom;
+    this.blankSlots = blankSlots;
   }
   config;
   openRuntime;
@@ -225,6 +226,7 @@ class HoldLane {
   warm = [];
   hint;
   hintMaxTokens;
+  lastBlankDemand = -Infinity;
   closed = false;
   counters = {
     rebuilds: 0,
@@ -317,9 +319,14 @@ class HoldLane {
       for (const [lane, at] of this.expiredLanes) if (at < cut) this.expiredLanes.delete(lane);
     }
   }
-  dropWarm(entry) {
+  removeWarm(entry) {
+    if(!this.warm.includes(entry))return;
     clearTimeout(entry.timer);
     this.warm = this.warm.filter((row) => row !== entry);
+    entry.release();
+  }
+  dropWarm(entry) {
+    this.removeWarm(entry);
     entry.binding.startupController?.abort();
     const pending=entry.pending.then((runtime)=>this.disposeRuntime(runtime),()=>{});this.cleanupTasks.add(pending);void pending.finally(()=>this.cleanupTasks.delete(pending)).catch(()=>{});
   }
@@ -337,31 +344,26 @@ class HoldLane {
   // WorkBuddy keeps a session-level tool snapshot. Warm with the latest hinted
   // table and serve only a matching table and startup configuration.
   replenish() {
-    if (this.closed || !this.hint || this.warm.length >= this.limit("nativeWarmLimit")) return;
-    const hint = this.hint, maxTokens = this.hintMaxTokens, binding = new HostBinding();
-    binding.provide(hint);binding.context=this.hintContext;
-    const pending = this.openRuntime(binding, hint, hint.tools.map((t) => t.exposed), maxTokens);
-    const entry = {
-      binding,
-      signature: hint.signature,runtimeKey:this.hintKey,
-      maxTokens,
-      table: hint,
-      pending,
-      ready: false,
-      timer: setTimeout(() => {
-        this.warmExpired = true;
-        this.dropWarm(entry);
-      }, this.config.blankWarmTtlMs ?? 12e4)
-    };
-    entry.timer.unref();
-    this.warm.push(entry);
-    void pending.then(() => {
-      entry.ready = true;
-    }, (error) => {
-      clearTimeout(entry.timer);
-      this.warmFailure = redactSecrets(safeError(error),binding.context?.credential).slice(0, 160);
-      this.warm = this.warm.filter((row) => row !== entry);
-    });
+    if(this.closed||!this.hint||Date.now()-this.lastBlankDemand>=(this.config.blankWarmDemandMs??600000))return;
+    const hint=this.hint,maxTokens=this.hintMaxTokens;
+    while(this.warm.length<this.limit('nativeWarmLimit')){
+      const release=this.blankSlots.reserve(()=>{
+        if(!entry.ready)return false;
+        this.dropWarm(entry);return true;
+      });if(!release)return;
+      const binding=new HostBinding();binding.provide(hint);binding.context=this.hintContext;
+      const pending=this.openRuntime(binding,hint,hint.tools.map(t=>t.exposed),maxTokens);
+      const entry={binding,signature:hint.signature,runtimeKey:this.hintKey,maxTokens,pending,ready:false,release};
+      this.warm.push(entry);
+      void pending.then(()=>{
+        if(!this.warm.includes(entry))return;
+        entry.ready=true;
+        entry.timer=setTimeout(()=>{this.warmExpired=true;this.dropWarm(entry);this.replenish();},this.config.blankWarmTtlMs);
+        entry.timer.unref();
+      },error=>{
+        this.removeWarm(entry);this.warmFailure=redactSecrets(safeError(error),binding.context?.credential).slice(0,160);
+      });
+    }
   }
   async create(request, table, context, signal) {
     const maxTokens = request.max_tokens;
@@ -371,18 +373,21 @@ class HoldLane {
     while(this.sessions.size>=(this.config.maxSessions??24)){
       if(!this.closeIdleForCapacity()){const counts=this.capacity();throw new BridgeError(429,'sessions_busy',`All context slots are active (busy=${counts.busy}, awaiting=${counts.awaiting}, idle=${counts.idle})`,counts);}
     }
-    this.hintContext=context;this.hintKey=request._holdKey;
+    signal.throwIfAborted();
+    this.lastBlankDemand=Date.now();
+    const {messages,...startupBody}=context.body;
+    this.hintContext={...context,body:startupBody};this.hintKey=request._holdKey;
     this.hint = table;
     this.hintMaxTokens = maxTokens;
     let runtime, binding, warmStart = false, warmHitNotReady = false, warmMissReason = null;
-    const entry = this.warm.find((row) => row.signature === table.signature && row.maxTokens === maxTokens && row.runtimeKey===request._holdKey);
+    const matches=row=>row.signature===table.signature&&row.maxTokens===maxTokens&&row.runtimeKey===request._holdKey;
+    const entry=this.warm.find(matches);
     const hadWarm=this.warm.length>0,optionMismatch=this.warm.some(row=>row.signature===table.signature&&row.runtimeKey!==request._holdKey);
     const limitMismatch = !entry && this.warm.some((row) => row.signature === table.signature&&row.maxTokens!==maxTokens);
-    for (const other of [...this.warm]) if (other !== entry) this.dropWarm(other);
+    for (const other of [...this.warm]) if(!matches(other))this.dropWarm(other);
     if (entry) {
       const ready = entry.ready;
-      clearTimeout(entry.timer);
-      this.warm = this.warm.filter((row) => row !== entry);
+      this.removeWarm(entry);
       binding = entry.binding;
       try {
         runtime = await abortable(entry.pending,signal);

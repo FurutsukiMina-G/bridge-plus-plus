@@ -7,6 +7,7 @@ export function config(env=process.env) {
   const candidates=[env.LOCALAPPDATA&&join(env.LOCALAPPDATA,'CodeBuddyExtension/Data/Public/auth/workbuddy-desktop.info'),join(homedir(),'AppData/Local/CodeBuddyExtension/Data/Public/auth/workbuddy-desktop.info'),env.APPDATA&&join(env.APPDATA,'CodeBuddyExtension/Data/Public/auth/workbuddy-desktop.info')].filter(Boolean);
   const number=(key, fallback,min,max)=>{const n=Number(env[key]??fallback);if(!Number.isSafeInteger(n)||n<min||n>max)throw new Error(`Invalid ${key}`);return n;};
   const toolMode=env.WORKBUDDY_TOOL_MODE??'native';if(!['native','replay','json'].includes(toolMode))throw new Error('Invalid WORKBUDDY_TOOL_MODE');
+  const prewarmMs=number('WORKBUDDY_PREWARM_MS',600000,0,2147483647);
   const prunedHistoryReuseRatio=Number(env.WORKBUDDY_PRUNED_HISTORY_REUSE_RATIO??0.6);if(!Number.isFinite(prunedHistoryReuseRatio)||prunedHistoryReuseRatio<0||prunedHistoryReuseRatio>1)throw new Error('Invalid WORKBUDDY_PRUNED_HISTORY_REUSE_RATIO');
   return {version:'0.3.2',toolMode,prunedHistoryReuseRatio,root:ROOT,runtime:resolve(env.WORKBUDDY_RUNTIME_DIR??join(ROOT,'.runtime')),reports:resolve(env.WORKBUDDY_REPORTS_DIR??join(ROOT,'reports')),cliPath:env.WORKBUDDY_CLI,
     authFile:env.WORKBUDDY_AUTH_FILE??candidates.find(existsSync)??candidates[0],
@@ -20,5 +21,7 @@ export function config(env=process.env) {
     // the hold runtime gets MAX_MCP_OUTPUT_TOKENS=nativeMcpOutputTokens and passes 4 chars/token unchanged.
     nativeResultCharLimit:number('WORKBUDDY_NATIVE_RESULT_CHAR_LIMIT',4000000,1,4000000),nativeMcpOutputTokens:number('WORKBUDDY_NATIVE_MCP_OUTPUT_TOKENS',1000000,25000,1000000),nativeMaxTurns:number('WORKBUDDY_NATIVE_MAX_TURNS',100000,2,1000000),nativeInvalidRounds:number('WORKBUDDY_NATIVE_INVALID_ROUNDS',3,1,10),nativeWarmLimit:number('WORKBUDDY_NATIVE_WARM_LIMIT',1,0,1),
     replayMs:number('WORKBUDDY_REPLAY_MS',120000,0,600000),decisionRetries:number('WORKBUDDY_DECISION_RETRIES',2,0,2),
-    prewarmMs:number('WORKBUDDY_PREWARM_MS',120000,0,600000),maxWarm:number('WORKBUDDY_MAX_WARM',4,0,16),maxBlankWarm:number('WORKBUDDY_MAX_BLANK_WARM',1,0,1)};
+    prewarmMs,resumePrewarmMs:env.WORKBUDDY_PREWARM_MS===undefined?120000:prewarmMs,
+    blankWarmDemandMs:number('WORKBUDDY_WARM_DEMAND_MS',600000,0,2147483647),
+    maxWarm:number('WORKBUDDY_MAX_WARM',4,0,16),maxBlankWarm:number('WORKBUDDY_MAX_BLANK_WARM',1,0,4)};
 }

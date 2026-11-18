@@ -2,8 +2,9 @@ import {test} from 'node:test';
 import assert from 'node:assert/strict';
 import {mkdir,mkdtemp} from 'node:fs/promises';
 import {resolve} from 'node:path';
+import {createServer} from 'node:http';
 import {Gateway} from '../app/services/gateway.mjs';
-import {requestKind} from '../app/services/gateway-usage.mjs';
+import {requestKind,requestReportKind} from '../app/services/gateway-usage.mjs';
 import {normalizeWorkbuddy,variantFor} from '../app/core/catalog.mjs';
 
 const raw={id:'fixture',name:'Fixture',contextWindow:200000,reasoning:{supportedEfforts:['low']}};
@@ -56,6 +57,39 @@ test('the Anthropic messages route marks side requests and keeps the client tool
   assert.deepEqual({auxiliary:stated.auxiliary,tools_count:stated.tools_count},{auxiliary:true,tools_count:2});
   const denied=await f.post('messages',{...chat(),model:f.variant,max_tokens:64},{['x-bridge-auxiliary']:'0'});
   assert.deepEqual({auxiliary:denied.auxiliary,tools_count:denied.tools_count},{auxiliary:false,tools_count:0});
+  const review=await f.post('messages',{...chat(),model:f.variant,max_tokens:64},{'x-bridge-auxiliary':'1','x-bridge-review':'1'});
+  assert.equal(review.request_kind,'bridge_review');
+  const compaction=await f.post('messages',{...chat(),model:f.variant,max_tokens:64},{'x-claude-code-request-class':'compaction'});
+  assert.equal(compaction.request_kind,'claude_compaction');
+});
+
+test('request reports contain only enumerated categories and never echo header text',()=>{
+  assert.equal(requestReportKind('claude',true,{'x-bridge-auxiliary':'1','x-bridge-review':'1'}),'bridge_review');
+  assert.equal(requestReportKind('dsh',true,{'x-bridge-auxiliary':'1','x-bridge-rules':'1'}),'bridge_rules');
+  assert.equal(requestReportKind('claude',true,{'x-claude-code-request-class':'auxiliary'}),'claude_auxiliary');
+  assert.equal(requestReportKind('claude',true,{'x-claude-code-request-class':'private free text','x-bridge-request-kind':'bridge_review'}),'claude_auxiliary_unknown');
+  assert.equal(requestReportKind('claude',false,{'x-bridge-review':'1'}),'main');
+  assert.equal(requestReportKind('codex',true,{'x-claude-code-request-class':'compaction'}),'auxiliary_unknown');
+});
+
+test('the gateway sends only the report category across both Claude hops',async t=>{
+  const f=await fixture(t,'claude','session-kind'),seen=[];
+  const server=createServer(async(req,res)=>{
+    seen.push(req.headers['x-bridge-request-kind']);
+    for await(const chunk of req)void chunk;
+    res.writeHead(200,{'content-type':'text/event-stream'});
+    res.end('data: {"choices":[{"delta":{"content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1}}\n\ndata: [DONE]\n\n');
+  });
+  await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));
+  t.after(()=>new Promise(resolve=>{server.closeAllConnections();server.close(resolve);}));
+  const worker={url:`http://127.0.0.1:${server.address().port}`,key:'fixture',active:0};
+  f.gateway.ensureWorker=async()=>worker;
+  const request={...chat(),model:f.variant,max_tokens:64};
+  const review=await f.post('messages',request,{'x-bridge-auxiliary':'1','x-bridge-review':'1'});
+  const raw=await f.post('messages',request,{'x-claude-code-request-class':'private-free-text'});
+  assert.equal(review.request_kind,'bridge_review');
+  assert.equal(raw.request_kind,'claude_auxiliary_unknown');
+  assert.deepEqual(seen,['bridge_review','claude_auxiliary_unknown']);
 });
 
 test('the Codex responses route states its own intent instead of trusting the converted tool list',async t=>{

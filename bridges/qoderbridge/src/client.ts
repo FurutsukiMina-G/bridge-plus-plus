@@ -37,6 +37,7 @@ export interface Config extends Selection {
   isolationRuntimeIdentity?:{version:string;fingerprint:string};
   blankWarmLimit?:number;
   blankWarmTtlMs?:number;
+  blankWarmDemandMs?:number;
   /** Calling host's display name for failure text; absent means a generic client. */
   hostName?:string;
   toolMode?:'native'|'json';
@@ -45,7 +46,7 @@ export interface Config extends Selection {
   nativeMaxTurns?:number;
   nativeWarmLimit?:number;
   nativeInvalidRounds?:number;
-  /** Upstream idle limit for one native step; QODER_IDLE_TIMEOUT_MS, default 180000 ms. */
+  /** Upstream idle limit for a model step; QODER_IDLE_TIMEOUT_MS, default 180000 ms. */
   idleTimeoutMs?:number;
   /** Separate TTL for a session that waits on host tool results; default 600000 ms. */
   awaitingIdleMs?:number;

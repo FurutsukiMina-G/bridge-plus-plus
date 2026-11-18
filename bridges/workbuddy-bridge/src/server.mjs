@@ -96,7 +96,9 @@ export function createBridge({cfg,provider,key,instanceId,log}){
         res.write(`data: ${JSON.stringify(p.body)}\n\n`);res.end();}}
     }finally{
       clearTimeout(deadline);clearInterval(heartbeat);clearInterval(idle);res.removeListener('close',disconnect);req.removeListener('aborted',disconnect);controller.abort();controllers.delete(controller);release?.();
+      const requestKind=req.headers['x-bridge-request-kind'];
       const row={at:new Date().toISOString(),requestId,model:selected?.id??null,upstream:upstream?.model??null,outcome,errorCode,wallMs:Date.now()-started,
+        ...typeof requestKind==='string'&&/^(?:main|auxiliary_unknown|bridge_review|bridge_rules|claude_(?:main|subagent|workflow|compaction|auxiliary(?:_unknown)?|side_reply))$/.test(requestKind)?{request_kind:requestKind}:{},
         lastActivityMs:activity.started?Date.now()-activity.at:null,
         firstEventMs,firstTextMs,firstThinkingMs,queueMs,usage:completion?.usage??null,context:transportMetrics,mode:transportMetrics?.mode??null,harness_tool_count:transportMetrics?.harness_tool_count??0,available_tool_definition_chars:transportMetrics?.available_tool_definition_chars??0,sent_tool_definition_chars:transportMetrics?.sent_tool_definition_chars??0,
         contextPressure:transportMetrics?.lastPromptTokens?{native:transportMetrics.lastPromptTokens/(provider.model?.contextWindow??1000000),selectedBudget:transportMetrics.lastPromptTokens/selected.contextWindow}:null};

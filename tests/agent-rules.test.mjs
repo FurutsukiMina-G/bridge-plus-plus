@@ -56,13 +56,25 @@ test('detector prompt and JSON validation enforce conservative long-term extract
 test('detector uses the exact primary model with auxiliary headers, existing rules and deduplication',async t=>{
   const calls=[],{rules,store}=await fixture(t,{providers,gateway,fetchImpl:async(url,options)=>{calls.push({url,...options});return response('{"rules":[{"text":"回复用中文"},{"text":"每次先检查测试"}]}');}});
   await rules.append('回复用中文');rules.observe(store.session('s1'),'记住，以后每次先检查测试');await drained(rules);
-  assert.equal(calls.length,1);assert.ok(calls[0].url.endsWith('/workbuddy/chat/completions'),'a session without a source model asks WorkBuddy first');assert.equal(calls[0].headers['x-bridge-auxiliary'],'1');assert.equal(calls[0].headers['x-bridge-effort'],'none,low,minimal,medium');
+  assert.equal(calls.length,1);assert.ok(calls[0].url.endsWith('/workbuddy/chat/completions'),'a session without a source model asks WorkBuddy first');assert.equal(calls[0].headers['x-bridge-auxiliary'],'1');assert.equal(calls[0].headers['x-bridge-rules'],'1');assert.equal(calls[0].headers['x-bridge-effort'],'none,low,minimal,medium');
   const body=JSON.parse(calls[0].body);assert.equal(body.max_tokens,400);assert.equal(body.stream,false);assert.equal(body.model.includes(Buffer.from('deepseek-v4.1-flash').toString('base64url')),true);assert.deepEqual(JSON.parse(body.messages[1].content).existingRules,['回复用中文']);assert.equal((await rules.read()).items.length,2);
   assert.equal((await store.events('s1')).filter(e=>e.source==='long-term-rule').length,1);
 });
 test('detector skips opted-out, attachment-only, slash, short and globally disabled messages without a request',async t=>{
   let count=0;const {rules,store}=await fixture(t,{providers,gateway,fetchImpl:async()=>{count++;return response('{"rules":[]}');}}),s=store.session('s1');
   for(const text of ['', '  ', '/remember hello', 'a b c'])rules.observe(s,text);s.recordRules=false;rules.observe(s,'以后回复用中文');delete s.recordRules;await rules.auto(false);rules.observe(s,'记住以后用中文');await drained(rules);assert.equal(count,0);assert.equal(rules.stats.skipped,6);
+});
+test('rule detection keeps the response budget past two minutes and stops at three',async t=>{
+  const began=deferred(),reply=deferred();
+  const {rules,store}=await fixture(t,{providers,gateway,fetchImpl:async()=>{began.resolve();return reply.promise;}});
+  t.mock.timers.enable({apis:['setTimeout']});
+  const first=rules.detect(store.session('s1'),'记住以后用中文');await began.promise;
+  t.mock.timers.tick(121000);reply.resolve(response('{"rules":[{"text":"回复用中文"}]}'));
+  await first;assert.equal((await rules.read()).items.length,1);
+  const secondBegan=deferred();rules.fetchImpl=()=>{secondBegan.resolve();return new Promise(()=>{});};
+  const second=rules.detect(store.session('s1'),'记住每次先检查');await secondBegan.promise;
+  t.mock.timers.tick(180000);await assert.rejects(second,{name:'AbortError'});
+  assert.equal((await rules.read()).items.length,1);
 });
 test('detector falls back to the other source\'s DeepSeek Flash, and counts unavailability, malformed JSON and timeouts',async t=>{
   const calls=[],{rules,store}=await fixture(t,{providers,gateway,fetchImpl:async url=>{calls.push(url);if(url.includes('/workbuddy/'))throw new Error('unavailable');return response('{"rules":[{"text":"回复用中文"}]}');}});

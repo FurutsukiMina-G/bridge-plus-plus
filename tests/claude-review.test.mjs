@@ -67,6 +67,7 @@ test('review requests travel to the gateway the way Claude Code does',async()=>{
   assert.equal(calls[0].init.headers.authorization,'Bearer synthetic-gateway-key');
   assert.equal(calls[0].init.headers['anthropic-version'],'2023-06-01');
   assert.equal(calls[0].init.headers['x-bridge-auxiliary'],'1');
+  assert.equal(calls[0].init.headers['x-bridge-review'],'1');
   assert.equal(calls[0].body.model,'synthetic-model');
   assert.equal(calls[0].body.max_tokens,400);
   assert.equal(calls[0].body.system,CLAUDE_REVIEW_SYSTEM);
@@ -154,6 +155,21 @@ test('reviewer reports timeouts and transport errors as ask',async()=>{
   const down=createClaudeReviewer({endpoint,model:'synthetic-model',fetch:async()=>({ok:false,status:500,json:async()=>({})})});
   const unavailable=await down.review({tool_name:'Bash',input:{command:'x'}},{});
   assert.deepEqual(unavailable,{decision:'ask',risk:'medium',reason:'自动审查暂时不可用：HTTP 500',cached:false});
+});
+
+test('default automatic review can finish after the old 45 second cutoff and still falls back at its limit',async t=>{
+  t.mock.timers.enable({apis:['setTimeout']});
+  let finish;
+  const reviewer=createClaudeReviewer({endpoint,model:'synthetic-model',fetch:async(_url,{signal})=>new Promise((resolve,reject)=>{
+    finish=resolve;signal.addEventListener('abort',()=>reject(signal.reason),{once:true});
+  })});
+  const first=reviewer.review({tool_name:'Read',input:{file_path:'fixture'}});
+  t.mock.timers.tick(46000);
+  finish(reply('{"decision":"allow","risk":"low","reason":"读取文件"}'));
+  assert.equal((await first).decision,'allow');
+  const second=reviewer.review({tool_name:'Read',input:{file_path:'other-fixture'}});
+  t.mock.timers.tick(180000);
+  assert.equal((await second).decision,'ask');
 });
 
 test('claudeMessagesURL keeps exactly one /v1 prefix',async()=>{

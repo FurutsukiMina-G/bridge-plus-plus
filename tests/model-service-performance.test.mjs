@@ -30,3 +30,21 @@ test('control/connect/restart/key reverify ownership and never send credentials 
  await assert.rejects(f.manager.control('qoder','/_bridge/refresh'),/无法核实/);await assert.rejects(f.manager.connect('qoder','codex'),/核实/);await assert.rejects(f.manager.restart('qoder'),/归属/);await assert.rejects(f.manager.key('qoder','regenerate'),/归属/);assert.ok(f.calls.owner>=before.owner+4);assert.equal(f.calls.health,before.health);assert.equal(f.calls.control,0);assert.equal(f.manager.store('qoder').key,key);
 });
 test('an observed dead pid revokes cached ownership without a process query or health request',async t=>{const f=await fixture(t);await f.manager.refreshOwnership();await f.manager.snapshot();const before={...f.calls};f.setAlive(false);await f.manager.snapshot();assert.equal(f.calls.owner,before.owner);assert.equal(f.calls.health,before.health);assert.equal(f.manager.ownership.size,0);});
+
+test('steady polling reads each service view once and slows only while both are stopped',async t=>{
+ await mkdir('.runtime/tests',{recursive:true});
+ const userData=await mkdtemp(resolve('.runtime/tests/service-poll-'));
+ const manager=await new ModelServices({userData,pollMs:60000,storeOptions:{protect:async()=>{}}}).init();
+ t.after(()=>manager.close());
+ let views=0;
+ const view=manager.view.bind(manager);
+ manager.view=async id=>{views++;return view(id);};
+ for(let i=0;i<3;i++)await manager.changed();
+ assert.equal(views,6);
+ assert.equal(manager.stableStopped,3);
+ await manager.store('qoder').write('status.json',{status:'error',error:{code:'FIXTURE'}});
+ await manager.changed();
+ assert.equal(views,8);
+ assert.equal(manager.stableStopped,0);
+ assert.equal((await manager.snapshot())[0].error.code,'FIXTURE');
+});

@@ -4,12 +4,12 @@ import { readFile } from 'node:fs/promises';
 import { discover, runProbe, type Config } from './client.js';
 import { appendReport, safeError } from './telemetry.js';
 import { actionPrompt, parseAction, type Action } from './action.js';
-import { createBridgeServer } from './server.js';
+import { createBridgeServer, qoderRequestTimeout } from './server.js';
 
 async function main() {
   const { values, positionals } = parseArgs({ allowPositionals: true, options: {
     model: { type: 'string' }, reasoning: { type: 'string' }, context: { type: 'string' },
-    auth: { type: 'string', default: 'auto' }, timeout: { type: 'string', default: '120000' },
+    auth: { type: 'string', default: 'auto' }, timeout: { type: 'string' },
     'cli-path': { type: 'string' }, proxy: { type: 'string' }, 'system-file': { type: 'string' },
     'session-settings': { type: 'string' },
     strategy: { type: 'string', default: 'permission' }, path: { type: 'string', default: 'src/main.ts' },
@@ -29,6 +29,7 @@ async function main() {
   npm run serve -- --port 8646
   npm run gate -- [--path src/main.ts] [--strategy permission|hook|defer]
 Options: --auth auto|cli|pat --timeout MS --cli-path PATH --proxy URL
+         serve timeout defaults to 1200000 ms; QODER_TIMEOUT_MS or --timeout may override, up to 1800000 ms
          --reasoning LEVEL --context TOKENS --system-file FILE --log FILE
          --session-settings FILE (explicit session-only settings JSON)
          --decision-retries 0|1|2 (serve; bounded model correction before tools are dispatched)
@@ -48,7 +49,7 @@ Native tool-result replay runs after interception passes; history auditing remai
   if (!['permission', 'hook', 'defer'].includes(values.strategy!)) throw new Error('Invalid --strategy');
   if (!['none', 'estimate', 'billing'].includes(values['cache-usage']!)) throw new Error('Invalid --cache-usage');
   const reasoningGuardTokens = Number(values['reasoning-guard-tokens']);
-  const timeout = Number(values.timeout);
+  const timeout = command==='serve'?qoderRequestTimeout(values.timeout):Number(values.timeout??120000);
   if (!Number.isSafeInteger(timeout) || timeout < 1000) throw new Error('--timeout must be an integer >=1000 ms');
   const context = values.context === undefined ? undefined : Number(values.context);
   if (context !== undefined && (!Number.isSafeInteger(context) || context < 1)) throw new Error('Invalid --context');

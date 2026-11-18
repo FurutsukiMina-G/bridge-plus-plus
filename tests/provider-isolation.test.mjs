@@ -16,6 +16,27 @@ test('standalone bridge settings cannot redirect Bridge++ workers or their priva
   assert.equal(settings.runtime,privateRoot);assert.equal(settings.reports,resolve(privateRoot,'reports'));assert.equal(settings.cliPath,undefined);assert.ok(!String(settings.authFile).includes('external-bridge'));assert.equal(settings.port,8647);assert.equal(settings.toolMode,'native');
 });
 
+test('owned bridge environment accepts bounded timeout knobs without relaxing other isolation',()=>{
+  const env={WORKBUDDY_TIMEOUT_MS:'1800000',WORKBUDDY_IDLE_TIMEOUT_MS:'120000',WORKBUDDY_CLI:'external',QODER_TIMEOUT_MS:'1600000'};
+  const patch=providerEnvironmentPatch(env);
+  assert.deepEqual(patch,{WORKBUDDY_CLI:undefined});
+  const settings=config(workbuddyEnvironment(resolve('.runtime/timing-fixture'),{...env,...patch}));
+  assert.equal(settings.timeoutMs,1800000);
+  assert.equal(settings.idleTimeoutMs,120000);
+  assert.throws(()=>config(workbuddyEnvironment('.',{WORKBUDDY_TIMEOUT_MS:'1800001'})),/WORKBUDDY_TIMEOUT_MS/);
+});
+
+test('owned workers receive prewarm policy overrides while keeping private provider paths',()=>{
+  const env={WORKBUDDY_PREWARM_MS:'300000',WORKBUDDY_WARM_DEMAND_MS:'450000',WORKBUDDY_MAX_BLANK_WARM:'2',
+    WORKBUDDY_NATIVE_WARM_LIMIT:'0',WORKBUDDY_MAX_WARM:'5',WORKBUDDY_RUNTIME_DIR:'external',QODER_WARM_DEMAND_MS:'10000'};
+  const patch=providerEnvironmentPatch(env);
+  assert.deepEqual(patch,{WORKBUDDY_RUNTIME_DIR:undefined});
+  const root=resolve('.runtime/prewarm-fixture'),settings=config(workbuddyEnvironment(root,{...env,...patch}));
+  assert.equal(settings.runtime,root);
+  assert.equal(settings.prewarmMs,300000);assert.equal(settings.blankWarmDemandMs,450000);
+  assert.equal(settings.maxBlankWarm,2);assert.equal(settings.nativeWarmLimit,0);assert.equal(settings.maxWarm,5);
+});
+
 test('owned worker process does not inherit standalone bridge overrides',async t=>{
   const keys=['WORKBUDDY_CLI','WORKBUDDY_PORT','QODERBRIDGE_CACHE_USAGE'],saved=Object.fromEntries(keys.map(key=>[key,process.env[key]]));
   await mkdir('.runtime/tests',{recursive:true});const root=await mkdtemp(resolve('.runtime/tests/provider-env-'));

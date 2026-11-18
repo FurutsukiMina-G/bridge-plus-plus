@@ -3505,6 +3505,9 @@ var paths = {
   archive: "M4 5h16v4H4V5Zm1.5 4v9.5a1 1 0 0 0 1 1h11a1 1 0 0 0 1-1V9M10 12.5h4",
   edit: "M4.5 19.5h4l10-10-4-4-10 10v4ZM13 7l4 4",
   copy: "M9 9h10.5v10.5H9V9ZM5 15H4.5V4.5H15V5",
+  cut: "M6 3.5a2.5 2.5 0 1 0 0 5 2.5 2.5 0 0 0 0-5ZM6 15.5a2.5 2.5 0 1 0 0 5 2.5 2.5 0 0 0 0-5ZM8.1 7.9 12 12M19.5 4.5 8.1 16.1M14.2 14.2l5.3 5.3",
+  paste: "M9 3.5h6a1 1 0 0 1 1 1v1.5H8V4.5a1 1 0 0 1 1-1ZM8 5H6.5A1.5 1.5 0 0 0 5 6.5v12A1.5 1.5 0 0 0 6.5 20h11a1.5 1.5 0 0 0 1.5-1.5v-12A1.5 1.5 0 0 0 17.5 5H16",
+  selectAll: "M4 7.5v-2a1.5 1.5 0 0 1 1.5-1.5h2M16.5 4h2A1.5 1.5 0 0 1 20 5.5v2M20 16.5v2a1.5 1.5 0 0 1-1.5 1.5h-2M7.5 20h-2A1.5 1.5 0 0 1 4 18.5v-2M8.5 9.5h7M8.5 14.5h7",
   more: "M6 12h.01M12 12h.01M18 12h.01",
   clock: "M12 20.5a8.5 8.5 0 1 0 0-17 8.5 8.5 0 0 0 0 17ZM12 7.5V12l3 2",
   alert: "M12 9.5v4M12 17h.01M10.3 4.2 3 17a2 2 0 0 0 1.7 3h14.6a2 2 0 0 0 1.7-3L13.7 4.2a2 2 0 0 0-3.4 0Z",
@@ -20241,8 +20244,39 @@ function scheduleChat() {
     chatTimer = null;
     renderChat();
     renderFooter();
-  }, 55);
+  }, document.hasFocus() ? 55 : 250);
 }
+window.addEventListener("focus", () => {
+  if (!chatTimer) return;
+  clearTimeout(chatTimer);
+  chatTimer = null;
+  renderChat();
+  renderFooter();
+});
+var activityDirty = /* @__PURE__ */ new Set();
+var activityTimer = null;
+function queueActivity(id) {
+  if (document.hasFocus()) {
+    paintActivity(id);
+    return;
+  }
+  activityDirty.add(id);
+  if (!activityTimer) activityTimer = setTimeout(flushActivity, 250);
+}
+function flushActivity() {
+  clearTimeout(activityTimer);
+  activityTimer = null;
+  const ids = [...activityDirty];
+  activityDirty.clear();
+  for (const id of ids) paintActivity(id);
+}
+var markFocus = () => document.body.classList.toggle("window-inactive", !document.hasFocus());
+window.addEventListener("focus", () => {
+  markFocus();
+  flushActivity();
+});
+window.addEventListener("blur", markFocus);
+markFocus();
 function openMenu(anchor, kind) {
   closeMenu();
   menu = { kind, anchorId: anchor.id };
@@ -20287,7 +20321,7 @@ function paintMenu() {
   if (!menu) return;
   const el = $2("#popover");
   el.className = `popover ${menu.kind}-menu`;
-  el.innerHTML = menu.kind === "model" ? modelMenuHtml() : menu.kind === "env" ? envMenuHtml() : menu.kind === "folder" ? folderMenuHtml() : menu.kind === "permission" ? permissionMenuHtml() : menu.kind === "file" ? fileMenuHtml() : menu.kind === "link" ? linkMenuHtml() : sessionMenuHtml();
+  el.innerHTML = menu.kind === "model" ? modelMenuHtml() : menu.kind === "env" ? envMenuHtml() : menu.kind === "folder" ? folderMenuHtml() : menu.kind === "permission" ? permissionMenuHtml() : menu.kind === "file" ? fileMenuHtml() : menu.kind === "link" ? linkMenuHtml() : menu.kind === "edit" ? editMenuHtml() : sessionMenuHtml();
   bind("#menu-search", "input", (e) => {
     state.menuSearch = e.target.value;
     const list = $2("#menu-list");
@@ -20326,6 +20360,48 @@ function fileMenuHtml() {
   const note = here ? "" : `<div class="menu-note">${icon("info")}<span>${f2.inside ? "\u8FD9\u4E2A\u6587\u4EF6\u5DF2\u7ECF\u4E0D\u5B58\u5728" : "\u4E0D\u5728\u5F53\u524D\u5DE5\u4F5C\u6587\u4EF6\u5939\u91CC\uFF0C\u53EA\u80FD\u590D\u5236\u8DEF\u5F84"}</span></div>`;
   return `<div class="menu-label" title="${esc7(f2.path)}">${esc7(name)}</div>${item("preview", "eye", "\u9884\u89C8", here && !!f2.preview)}${item("reveal", "folder", "\u5728\u8D44\u6E90\u7BA1\u7406\u5668\u4E2D\u663E\u793A", here)}${item("open", "external", "\u7528\u9ED8\u8BA4\u5E94\u7528\u6253\u5F00", here && f2.kind === "file" && f2.openable !== false)}${item("copy", "copy", "\u590D\u5236\u8DEF\u5F84")}${note}${here && f2.kind === "file" && f2.openable === false ? `<div class="menu-note">${icon("info")}<span>\u8FD9\u7C7B\u6587\u4EF6\u53EF\u80FD\u4F1A\u8FD0\u884C\u7A0B\u5E8F\uFF0C\u4E0D\u80FD\u76F4\u63A5\u6253\u5F00\uFF0C\u53EF\u4EE5\u5728\u8D44\u6E90\u7BA1\u7406\u5668\u91CC\u67E5\u770B</span></div>` : ""}`;
 }
+var SELECTABLE = ".queue-text,pre,.code-view,.terminal-output,.thinking-body,.approval-summary,.upstream-message,.upstream-details,.user-bubble,.markdown,.mono,.transcript,.settings-body";
+var textField = (node) => {
+  const el = node?.closest?.("textarea,input");
+  return el && (el.tagName === "TEXTAREA" || ["text", "search", "url", "email", "number", "password", ""].includes(el.type)) ? el : null;
+};
+var selectedText = () => String(getSelection() ?? "");
+function openEditMenu(e) {
+  const field = textField(e.target), block = field ? null : e.target.closest?.(SELECTABLE);
+  const selected = field ? field.selectionEnd > field.selectionStart && field.type !== "password" : !!selectedText();
+  if (!field && !block) return false;
+  e.preventDefault();
+  closeMenu();
+  menu = { kind: "edit", at: { x: e.clientX, y: e.clientY }, field, block, selected, editable: !!field && !field.readOnly && !field.disabled };
+  paintMenu();
+  return true;
+}
+function editMenuHtml() {
+  const { selected, editable } = menu;
+  const item = (cmd, label, keys, enabled) => `<button class="menu-item" data-edit-cmd="${cmd}"${enabled ? "" : " disabled"}>${icon(cmd, "mi-icon")}<span class="mi-main"><span class="mi-name">${label}</span></span><span class="mi-key">${keys}</span></button>`;
+  return (editable ? item("cut", "\u526A\u5207", "Ctrl+X", selected) : "") + item("copy", "\u590D\u5236", "Ctrl+C", selected) + (editable ? item("paste", "\u7C98\u8D34", "Ctrl+V", true) : "") + item("selectAll", "\u5168\u9009", "Ctrl+A", true);
+}
+async function runEdit(cmd, m) {
+  if (cmd === "selectAll" && !m?.field) {
+    const block = m?.block ?? $2("#chat");
+    if (!block) return;
+    const range = document.createRange();
+    range.selectNodeContents(block);
+    const sel = getSelection();
+    sel.removeAllRanges();
+    sel.addRange(range);
+    return;
+  }
+  if (m?.field && document.activeElement !== m.field) m.field.focus();
+  try {
+    await call("edit:command", { command: cmd });
+  } catch {
+    document.execCommand(cmd);
+  }
+}
+document.addEventListener("mousedown", (e) => {
+  if (e.target.closest?.("#popover.edit-menu")) e.preventDefault();
+}, true);
 function linkMenuHtml() {
   const { host } = new URL(menu.url);
   return `<div class="menu-label" title="${esc7(menu.url)}">${esc7(host)}</div><button class="menu-item" data-link-menu="open">${icon("external", "mi-icon")}<span class="mi-main"><span class="mi-name">\u5728\u6D4F\u89C8\u5668\u4E2D\u6253\u5F00</span></span></button><button class="menu-item" data-link-menu="copy">${icon("copy", "mi-icon")}<span class="mi-main"><span class="mi-name">\u590D\u5236\u94FE\u63A5</span></span></button>`;
@@ -21487,7 +21563,10 @@ document.addEventListener("contextmenu", (e) => {
     return;
   }
   const target = fileTarget(e.target);
-  if (!target || !state.projectId) return;
+  if (!target || !state.projectId) {
+    openEditMenu(e);
+    return;
+  }
   e.preventDefault();
   const at2 = { x: e.clientX, y: e.clientY };
   void action(async () => {
@@ -21946,6 +22025,12 @@ document.addEventListener("click", (e) => {
     e.preventDefault();
     const line = Number(el.dataset.linkLine) || null, path2 = el.dataset.linkPath;
     void action(async () => previewFile(await locateFile(path2), line));
+    return;
+  }
+  if (el = hit("[data-edit-cmd]")) {
+    const m = menu, cmd = el.dataset.editCmd;
+    closeMenu();
+    void runEdit(cmd, m);
     return;
   }
   if (el = hit("[data-link-menu]")) {
@@ -22443,7 +22528,7 @@ window.workbench.onEvent((event) => {
   }
   if (event.sessionId) {
     activity.feed(event);
-    paintActivity(event.sessionId);
+    queueActivity(event.sessionId);
   }
   if (event.type === "attachments-discarded") markDiscarded(event.attachmentIds ?? []);
   if (event.sessionId !== state.sessionId) return;

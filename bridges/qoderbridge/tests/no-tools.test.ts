@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {mkdtemp,rm} from 'node:fs/promises';
+import {mkdtemp,readFile,rm} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import type {AddressInfo} from 'node:net';
@@ -15,11 +15,13 @@ for(const stream of [false,true])test(`no-tool audit returns its JSON with no co
   const infer=(async()=>{calls++;return {response:audit,error:null,stage:'inference',result:'success'};}) as unknown as typeof runProbe;
   const server=await createBridgeServer({auth:'cli',timeout:5000,strategy:'permission',system:'Synthetic system'},{port:0,key:'fixture',infer,reportDir:dir});
   try{
-    const r=await fetch(`http://127.0.0.1:${(server.address() as AddressInfo).port}/v1/chat/completions`,{method:'POST',headers:{authorization:'Bearer fixture','content-type':'application/json'},body:JSON.stringify({...request,stream})});
+    const r=await fetch(`http://127.0.0.1:${(server.address() as AddressInfo).port}/v1/chat/completions`,{method:'POST',headers:{authorization:'Bearer fixture','content-type':'application/json','x-bridge-request-kind':stream?'private-free-text':'bridge_review'},body:JSON.stringify({...request,stream})});
     assert.equal(r.status,200);
     if(stream){const rows=(await r.text()).split('\n\n').filter(s=>s.startsWith('data: {')).map(s=>JSON.parse(s.slice(6)));assert.equal(rows.map(r=>r.choices?.[0]?.delta?.content??'').join(''),audit);}
     else assert.equal((await r.json()).choices[0].message.content,audit);
     assert.equal(calls,1);
+    const report=JSON.parse((await readFile(join(dir,'bridge.ndjson'),'utf8')).trim());
+    assert.equal(report.request_kind,stream?undefined:'bridge_review');
   }finally{server.closeAllConnections();await new Promise<void>(r=>server.close(()=>r()));await rm(dir,{recursive:true,force:true});}
 });
 test('no-tool plain answers, legacy finals, disabled tools and schema rejection',()=>{

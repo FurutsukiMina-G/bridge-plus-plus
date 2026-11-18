@@ -1004,10 +1004,25 @@ function stopSession(id){
     catch(error){stopping.delete(id);paintActivity(id);if(id===state.sessionId)scheduleChat();throw error;}
   });
 }
+/** Streaming repaints come at most every 55 ms while the window has the focus, and 4 times a second while it sits
+ * behind other windows, where nobody reads the text word by word; focusing the window paints at once. */
 function scheduleChat(){
   if(chatTimer)return;
-  chatTimer=setTimeout(()=>{chatTimer=null;renderChat();renderFooter();},55);
+  chatTimer=setTimeout(()=>{chatTimer=null;renderChat();renderFooter();},document.hasFocus()?55:250);
 }
+window.addEventListener('focus',()=>{if(!chatTimer)return;clearTimeout(chatTimer);chatTimer=null;renderChat();renderFooter();});
+/** Background sessions' status lines follow the same rule; a burst of events behind other windows becomes one paint. */
+const activityDirty=new Set();let activityTimer=null;
+function queueActivity(id){
+  if(document.hasFocus()){paintActivity(id);return;}
+  activityDirty.add(id);
+  if(!activityTimer)activityTimer=setTimeout(flushActivity,250);
+}
+function flushActivity(){clearTimeout(activityTimer);activityTimer=null;const ids=[...activityDirty];activityDirty.clear();for(const id of ids)paintActivity(id);}
+// Behind other windows the status animations pause (style.css): each animation frame costs the GPU process even when
+// nobody looks, and the pulsing dots of a few running sessions kept it at about 6% of a core.
+const markFocus=()=>document.body.classList.toggle('window-inactive',!document.hasFocus());
+window.addEventListener('focus',()=>{markFocus();flushActivity();});window.addEventListener('blur',markFocus);markFocus();
 
 /* ---------- popover menus ---------- */
 function openMenu(anchor,kind){
@@ -1048,7 +1063,7 @@ function paintMenu(){
   if(!menu)return;
   const el=$('#popover');
   el.className=`popover ${menu.kind}-menu`;
-  el.innerHTML=menu.kind==='model'?modelMenuHtml():menu.kind==='env'?envMenuHtml():menu.kind==='folder'?folderMenuHtml():menu.kind==='permission'?permissionMenuHtml():menu.kind==='file'?fileMenuHtml():menu.kind==='link'?linkMenuHtml():sessionMenuHtml();
+  el.innerHTML=menu.kind==='model'?modelMenuHtml():menu.kind==='env'?envMenuHtml():menu.kind==='folder'?folderMenuHtml():menu.kind==='permission'?permissionMenuHtml():menu.kind==='file'?fileMenuHtml():menu.kind==='link'?linkMenuHtml():menu.kind==='edit'?editMenuHtml():sessionMenuHtml();
   bind('#menu-search','input',e=>{state.menuSearch=e.target.value;const list=$('#menu-list');if(list)list.innerHTML=modelListHtml();});
   bindNativeInputs();
   if(menu.kind==='model')syncNativeChoice();
@@ -1077,6 +1092,42 @@ function fileMenuHtml(){
   const note=here?'':`<div class="menu-note">${icon('info')}<span>${f.inside?'这个文件已经不存在':'不在当前工作文件夹里，只能复制路径'}</span></div>`;
   return`<div class="menu-label" title="${esc(f.path)}">${esc(name)}</div>${item('preview','eye','预览',here&&!!f.preview)}${item('reveal','folder','在资源管理器中显示',here)}${item('open','external','用默认应用打开',here&&f.kind==='file'&&f.openable!==false)}${item('copy','copy','复制路径')}${note}${here&&f.kind==='file'&&f.openable===false?`<div class="menu-note">${icon('info')}<span>这类文件可能会运行程序，不能直接打开，可以在资源管理器里查看</span></div>`:''}`;
 }
+/* ---------- right-click editing: Electron shows no menu of its own ---------- */
+// Text that the stylesheet leaves selectable; "select all" outside a text box takes the nearest of these.
+const SELECTABLE='.queue-text,pre,.code-view,.terminal-output,.thinking-body,.approval-summary,.upstream-message,.upstream-details,.user-bubble,.markdown,.mono,.transcript,.settings-body';
+const textField=node=>{
+  const el=node?.closest?.('textarea,input');
+  return el&&(el.tagName==='TEXTAREA'||['text','search','url','email','number','password',''].includes(el.type))?el:null;
+};
+const selectedText=()=>String(getSelection()??'');
+/** Opens the edit menu where a text box or selectable text was right-clicked; false leaves the click alone. */
+function openEditMenu(e){
+  const field=textField(e.target),block=field?null:e.target.closest?.(SELECTABLE);
+  const selected=field?field.selectionEnd>field.selectionStart&&field.type!=='password':!!selectedText();
+  if(!field&&!block)return false;
+  e.preventDefault();closeMenu();
+  menu={kind:'edit',at:{x:e.clientX,y:e.clientY},field,block,selected,editable:!!field&&!field.readOnly&&!field.disabled};
+  paintMenu();return true;
+}
+function editMenuHtml(){
+  const {selected,editable}=menu;
+  const item=(cmd,label,keys,enabled)=>`<button class="menu-item" data-edit-cmd="${cmd}"${enabled?'':' disabled'}>${icon(cmd,'mi-icon')}<span class="mi-main"><span class="mi-name">${label}</span></span><span class="mi-key">${keys}</span></button>`;
+  return(editable?item('cut','剪切','Ctrl+X',selected):'')+item('copy','复制','Ctrl+C',selected)+(editable?item('paste','粘贴','Ctrl+V',true):'')+item('selectAll','全选','Ctrl+A',true);
+}
+/** Runs the command on the text box that was right-clicked, through the window's own editing commands (the clipboard
+ * permission is denied to the page), so undo, the input event and screenshot pasting behave as with the keyboard. */
+async function runEdit(cmd,m){
+  if(cmd==='selectAll'&&!m?.field){
+    const block=m?.block??$('#chat');if(!block)return;
+    const range=document.createRange();range.selectNodeContents(block);
+    const sel=getSelection();sel.removeAllRanges();sel.addRange(range);return;
+  }
+  if(m?.field&&document.activeElement!==m.field)m.field.focus();
+  try{await call('edit:command',{command:cmd});}
+  catch{document.execCommand(cmd);}
+}
+// Menu items must not take the focus: the commands act on the focused text box and its selection.
+document.addEventListener('mousedown',e=>{if(e.target.closest?.('#popover.edit-menu'))e.preventDefault();},true);
 function linkMenuHtml(){
   const {host}=new URL(menu.url);
   return`<div class="menu-label" title="${esc(menu.url)}">${esc(host)}</div><button class="menu-item" data-link-menu="open">${icon('external','mi-icon')}<span class="mi-main"><span class="mi-name">在浏览器中打开</span></span></button><button class="menu-item" data-link-menu="copy">${icon('copy','mi-icon')}<span class="mi-main"><span class="mi-name">复制链接</span></span></button>`;
@@ -1932,7 +1983,7 @@ document.addEventListener('contextmenu',e=>{
   const link=e.target.closest?.('.markdown a:not(.file-link)'),url=link&&webLink(link.getAttribute('href'));
   if(url){e.preventDefault();closeMenu();menu={kind:'link',at:{x:e.clientX,y:e.clientY},url};paintMenu();return;}
   const target=fileTarget(e.target);
-  if(!target||!state.projectId)return;
+  if(!target||!state.projectId){openEditMenu(e);return;}
   e.preventDefault();
   const at={x:e.clientX,y:e.clientY};
   void action(async()=>{
@@ -2104,6 +2155,7 @@ document.addEventListener('click',e=>{
   if(t.id==='lightbox'){$('#lightbox').close();return;}
   if((el=hit('[data-file-menu]'))){const f=menu?.file,id=el.dataset.fileMenu;closeMenu();if(f)void action(()=>fileMenuAction(id,f));return;}
   if((el=hit('.file-link'))){e.preventDefault();const line=Number(el.dataset.linkLine)||null,path=el.dataset.linkPath;void action(async()=>previewFile(await locateFile(path),line));return;}
+  if((el=hit('[data-edit-cmd]'))){const m=menu,cmd=el.dataset.editCmd;closeMenu();void runEdit(cmd,m);return;}
   if((el=hit('[data-link-menu]'))){const url=menu?.url,id=el.dataset.linkMenu;closeMenu();if(url)void action(async()=>{if(id==='open')await call('link:open',{url});else{await call('clipboard:write',{text:url});toast('已复制链接');}});return;}
   if((el=hit('.markdown a'))){e.preventDefault();const url=webLink(el.getAttribute('href'));if(url)void action(()=>call('link:open',{url}));return;}
   const id=hit('button[id]')?.id;
@@ -2316,7 +2368,7 @@ window.workbench.onEvent(event=>{
   if(event.sessionId){
     // Every session's events reach the renderer, so background sessions get a precise status too.
     activity.feed(event);
-    paintActivity(event.sessionId);
+    queueActivity(event.sessionId);
   }
   if(event.type==='attachments-discarded')markDiscarded(event.attachmentIds??[]);
   if(event.sessionId!==state.sessionId)return;

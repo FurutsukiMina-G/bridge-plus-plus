@@ -6,6 +6,8 @@ import type {ChatRequest} from './compat.js';
 import type {Config} from './client.js';
 import type {InputQueue} from './queue.js';
 import {abortable} from './async.js';
+import {qoderUpstreamIdleTimeout,upstreamSilence} from './timeouts.js';
+import type {blankWarmSettings,BlankWarmSlots} from './blank-warm.js';
 import {hasConversationPrefix} from './routing.js';
 import {safeError} from './telemetry.js';
 import {ZERO_USAGE} from './usage.js';
@@ -38,7 +40,7 @@ type Session={id:string;runtime:NativeRuntime;binding:HostBinding;inbox:Inbox;ta
   windowStats:{parallel_trimmed:number;ambiguous_binding:number;tool_images:number;tool_images_dropped:number};
   /** Output token limit this runtime was started with; a later request may ask for another one. */
   maxTokens:number|undefined};
-type WarmEntry={binding:HostBinding;signature:string;maxTokens:number|undefined;table:HostToolTable;pending:Promise<NativeRuntime>;ready:boolean;timer:ReturnType<typeof setTimeout>};
+type WarmEntry={binding:HostBinding;signature:string;maxTokens:number|undefined;table:HostToolTable;pending:Promise<NativeRuntime>;ready:boolean;release:()=>void;timer?:ReturnType<typeof setTimeout>};
 type Hooks={signal?:AbortSignal;onText?:(text:string)=>void;onThinking?:(text:string)=>void;onStatus?:(text:string)=>void;reasoningEffort?:string};
 
 class Inbox{
@@ -162,11 +164,13 @@ export class NativeLane{
   private expiredLanes=new Map<string,number>();
   /** Why the last warm start failed; a dropped entry would otherwise look like "no entry". */
   private warmFailure:string|null=null;
+  private lastBlankDemand=-Infinity;
   constructor(private readonly config:Config,private readonly openRuntime:(binding:HostBinding,table:HostToolTable|undefined,names:string[],maxTokens?:number)=>Promise<NativeRuntime>,
-    private readonly closeRuntime:(runtime:NativeRuntime)=>void,private readonly makeRoom:(scope?:string)=>void){}
-  private limit(name:'nativeResultCharLimit'|'nativeMcpOutputTokens'|'nativeMaxTurns'|'nativeWarmLimit'|'nativeInvalidRounds'){
+    private readonly closeRuntime:(runtime:NativeRuntime)=>void,private readonly makeRoom:(scope?:string)=>void,
+    private readonly warmSettings:ReturnType<typeof blankWarmSettings>,private readonly blankSlots:BlankWarmSlots){}
+  private limit(name:'nativeResultCharLimit'|'nativeMcpOutputTokens'|'nativeMaxTurns'|'nativeInvalidRounds'){
     // 40000 leaves room for JSON escaping below the runtime's fixed 50,000-character cut.
-    const defaults={nativeResultCharLimit:40000,nativeMcpOutputTokens:1000000,nativeMaxTurns:100000,nativeWarmLimit:1,nativeInvalidRounds:3};
+    const defaults={nativeResultCharLimit:40000,nativeMcpOutputTokens:1000000,nativeMaxTurns:100000,nativeInvalidRounds:3};
     return this.config[name]??defaults[name];
   }
   stats(){return{sessions:this.sessions.size,awaiting:[...this.sessions.values()].filter(s=>s.state==='awaiting').length,
@@ -206,35 +210,49 @@ export class NativeLane{
     }
     if(this.expiredLanes.size>64){const cut=Date.now()-3600000;for(const[lane,at]of this.expiredLanes)if(at<cut)this.expiredLanes.delete(lane);}
   }
-  private dropWarm(entry:WarmEntry){clearTimeout(entry.timer);this.warm=this.warm.filter(row=>row!==entry);void entry.pending.then(runtime=>this.closeRuntime(runtime),()=>{});}
+  private removeWarm(entry:WarmEntry){
+    if(!this.warm.includes(entry))return;
+    clearTimeout(entry.timer);this.warm=this.warm.filter(row=>row!==entry);entry.release();
+  }
+  private dropWarm(entry:WarmEntry){this.removeWarm(entry);void entry.pending.then(runtime=>this.closeRuntime(runtime),()=>{});}
   closeAll(){this.closed=true;for(const session of[...this.sessions.values()])this.close(session);for(const entry of[...this.warm])this.dropWarm(entry);}
   // The SDK's initialize request times out after 120 s, so tools/list cannot be held open for a request.
   // exposedName policies need the names at startup anyway: a warm runtime starts with the latest table and serves only an identical one.
   private replenish(){
-    if(this.closed||!this.hint||this.warm.length>=this.limit('nativeWarmLimit'))return;
-    const hint=this.hint,maxTokens=this.hintMaxTokens,binding=new HostBinding();binding.provide(hint);
-    const pending=this.openRuntime(binding,hint,hint.tools.map(t=>t.exposed),maxTokens);
-    const entry:WarmEntry={binding,signature:hint.signature,maxTokens,table:hint,pending,ready:false,
-      timer:setTimeout(()=>{this.warmExpired=true;this.dropWarm(entry);},this.config.blankWarmTtlMs??120000)};
-    entry.timer.unref();this.warm.push(entry);
-    void pending.then(()=>{entry.ready=true;},error=>{clearTimeout(entry.timer);this.warmFailure=safeError(error).slice(0,160);
-      this.warm=this.warm.filter(row=>row!==entry);});
+    const {blankWarmDemandMs,blankWarmTtlMs,nativeWarmLimit}=this.warmSettings;
+    const hint=this.hint,maxTokens=this.hintMaxTokens;
+    if(this.closed||!hint||Date.now()-this.lastBlankDemand>=blankWarmDemandMs)return;
+    while(this.warm.length<nativeWarmLimit){
+      const release=this.blankSlots.reserve(()=>{
+        if(!entry.ready)return false;
+        this.dropWarm(entry);return true;
+      });if(!release)return;
+      const binding=new HostBinding();binding.provide(hint);
+      const pending=this.openRuntime(binding,hint,hint.tools.map(t=>t.exposed),maxTokens);
+      const entry:WarmEntry={binding,signature:hint.signature,maxTokens,table:hint,pending,ready:false,release};
+      this.warm.push(entry);
+      void pending.then(()=>{
+        if(!this.warm.includes(entry))return;
+        entry.ready=true;entry.timer=setTimeout(()=>{this.warmExpired=true;this.dropWarm(entry);this.replenish();},blankWarmTtlMs);entry.timer.unref();
+      },error=>{this.removeWarm(entry);this.warmFailure=safeError(error).slice(0,160);});
+    }
   }
   private async create(request:ChatRequest,table:HostToolTable){
     const maxTokens=request.max_tokens;
-    this.makeRoom(request.bridge_scope);this.hint=table;this.hintMaxTokens=maxTokens;
+    this.makeRoom(request.bridge_scope);this.lastBlankDemand=Date.now();this.hint=table;this.hintMaxTokens=maxTokens;
     let runtime:NativeRuntime,binding:HostBinding,warmStart=false,warmHitNotReady=false,warmMissReason:string|null=null;
     // The runtime fixes its output limit at startup, so a warm runtime serves only the same limit.
-    const entry=this.warm.find(row=>row.signature===table.signature&&row.maxTokens===maxTokens);
+    const matches=(row:WarmEntry)=>row.signature===table.signature&&row.maxTokens===maxTokens;
+    const entry=this.warm.find(matches),hadWarm=this.warm.length>0;
     const limitMismatch=!entry&&this.warm.some(row=>row.signature===table.signature);
-    for(const other of[...this.warm])if(other!==entry)this.dropWarm(other);
+    for(const other of[...this.warm])if(!matches(other))this.dropWarm(other);
     if(entry){
       // Readiness must be read when the entry is claimed: an await first would always observe `ready`.
-      const ready=entry.ready;clearTimeout(entry.timer);this.warm=this.warm.filter(row=>row!==entry);binding=entry.binding;
+      const ready=entry.ready;this.removeWarm(entry);binding=entry.binding;
       try{runtime=await entry.pending;warmStart=ready;warmHitNotReady=!ready;if(ready)this.warmFailure=null;else this.counters.warm_hit_not_ready++;}
       catch{binding=new HostBinding();binding.provide(table);runtime=await this.openRuntime(binding,table,table.tools.map(t=>t.exposed),maxTokens);warmMissReason='warm_start_failed';}
     }else{
-      warmMissReason=limitMismatch?'output_limit_mismatch':this.warm.length>0?'tool_table_mismatch':this.warmExpired?'expired':this.warmFailure?'warm_start_failed':'no_warm_entry';
+      warmMissReason=limitMismatch?'output_limit_mismatch':hadWarm?'tool_table_mismatch':this.warmExpired?'expired':this.warmFailure?'warm_start_failed':'no_warm_entry';
       binding=new HostBinding();binding.provide(table);runtime=await this.openRuntime(binding,table,table.tools.map(t=>t.exposed),maxTokens);
     }
     this.warmExpired=false;
@@ -335,11 +353,8 @@ export class NativeLane{
     let invalidRounds=0,protocolCorrected=false,handoffStop=false,resultMessage:SDKMessage|undefined;
     const policyStart=session.runtime.policyCalls.length;session.state='running';
     // Silence is measured from the request or the last upstream event; SSE comments from the server are not events.
-    const idleMs=idleTimeout(this.config),stall=new AbortController(),stream=AbortSignal.any([signal,stall.signal]);
-    let idleTimer:ReturnType<typeof setTimeout>|undefined;
-    const arm=()=>{if(idleTimer)clearTimeout(idleTimer);idleTimer=setTimeout(()=>{idleTimer=undefined;
-      stall.abort(new WindowError(`Qoder produced no upstream event for ${Math.round(idleMs/1000)} s; the upstream stalled.`,'upstream_stalled'));},idleMs);};
-    arm();
+    const idleMs=qoderUpstreamIdleTimeout(this.config.idleTimeoutMs);
+    const idle=upstreamSilence(signal,idleMs,new WindowError(`Qoder produced no upstream event for ${Math.round(idleMs/1000)} s; the upstream stalled.`,'upstream_stalled'));
     const responseFor=(id:string)=>{let response=responses.get(id);if(!response){response={id,text:'',streamed:false,stop:null,sawToolUse:false,handed:false,announced:[],complete:new Map(),
         gate:new NativeProtocolGate(text=>hooks.onText?.(text),!session.requiresCall&&!session.pinned)};responses.set(id,response);order.push(response);}return response;};
     const noteStop=(response:Response,reason:string|null|undefined)=>{
@@ -365,7 +380,7 @@ export class NativeLane{
     };
     try{
       for(;;){
-        const message=await session.inbox.next(stream);arm();usage.observe(message,contextWindow(session.runtime));session.sdkSessionId=message.session_id??session.sdkSessionId;
+        const message=await session.inbox.next(idle.signal);idle.touch();usage.observe(message,contextWindow(session.runtime));session.sdkSessionId=message.session_id??session.sdkSessionId;
         if(message.type==='system'&&message.subtype==='api_retry')hooks.onStatus?.(`[QoderBridge] Qoder upstream retry ${message.attempt}/${message.max_retries}${typeof message.error_status==='number'?` (HTTP ${message.error_status})`:''}; next attempt in ${Math.max(0,Math.round(message.retry_delay_ms/1000))}s.`);
         if(message.type==='stream_event'){
           const event=message.event as unknown as{type:string;message?:{id?:string};content_block?:{type?:string;id?:string;name?:string};delta?:{type?:string;text?:string;thinking?:string;stop_reason?:string}};
@@ -430,7 +445,7 @@ export class NativeLane{
         }
       }
     }catch(error){throw Object.assign(error instanceof Error?error:new Error(String(error)),{usage,resultMessage,policyStart,window,warmStart,invalidRounds,handoffStop,oversized,trailing});}
-    finally{if(idleTimer)clearTimeout(idleTimer);}
+    finally{idle.close();}
   }
   private report(session:Session,request:ChatRequest,usage:NativeUsage,result:SDKMessage|undefined,meta:{window:string;warmStart:boolean;calls:number;hostCalls:number;invalidRounds:number;handoffStop:boolean;oversized:number;trailing:number;policyStart:number},error?:{message:string;stage:string}){
     const total=result?.type==='result'&&typeof result.total_credits==='number'?result.total_credits:session.lastCredits;
@@ -534,11 +549,6 @@ export class NativeLane{
   }
 }
 function inputValue(value:unknown){return value&&typeof value==='object'&&!Array.isArray(value)?value:{};}
-/** `QODER_IDLE_TIMEOUT_MS` bounds one native step's upstream silence; invalid values fall back to 180 s. */
-function idleTimeout(config:Config){
-  const raw=config.idleTimeoutMs??Number(process.env.QODER_IDLE_TIMEOUT_MS);
-  return Number.isSafeInteger(raw)&&raw>=1000&&raw<=600000?raw:180000;
-}
 const laneOf=(request:{bridge_scope?:string;prompt_cache_key?:string})=>
   request.prompt_cache_key?`${request.bridge_scope??''}|${request.prompt_cache_key}`:undefined;
 /** Names only (no descriptions or schemas) of the host tools that differ, for the rebuild report. */

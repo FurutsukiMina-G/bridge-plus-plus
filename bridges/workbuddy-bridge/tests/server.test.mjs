@@ -24,6 +24,15 @@ test('authenticated metrics exclude role-only frames from first model event time
   assert.equal(metrics.requests,1);assert.equal(metrics.tokens.total,12);assert.equal(metrics.tokens.cacheRead,null);
   assert.equal(f.records[0].firstEventMs,f.records[0].firstTextMs);
 });
+test('WorkBuddy request reports accept only the enumerated gateway kind',async t=>{
+  const f=await fixture(t,async()=>new Response(frame({content:'synthetic'})+frame({},'stop')+'data: [DONE]\n\n'));
+  for(const value of ['claude_compaction','private-free-text']){
+    const r=await f.request({},{headers:{'x-bridge-request-kind':value}});
+    assert.equal(r.status,200);await r.json();
+  }
+  assert.equal(f.records[0].request_kind,'claude_compaction');
+  assert.equal(f.records[1].request_kind,undefined);
+});
 test('deadline failure retains known correction usage exactly once without a success frame',async t=>{
   const usage={prompt_tokens:123284,completion_tokens:43667,total_tokens:166951,bridge_usage_complete:false};
   const f=await fixture(t,async(body,signal)=>{

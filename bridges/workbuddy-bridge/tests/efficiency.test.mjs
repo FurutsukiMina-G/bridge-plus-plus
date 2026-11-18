@@ -65,6 +65,23 @@ test('rewritten history, isolated client keys, effort, public window and account
   transport.auth={get:async()=>({...credential,uid:'another-account'})};await collect(transport,{...body,messages:next});
   assert.ok(received.every(r=>r.options.resume===undefined));
 });
+test('distinct toolless requests on one application scope start with fresh WorkBuddy context',async t=>{
+  const received=[];
+  const transport=await fixture(t,async function*(input){
+    received.push(input);
+    yield* events('{"action":"final","content":"ok"}',`fixture-${received.length}`);
+  });
+  const request={...body,bridge_scope:'same-application',prompt_cache_key:undefined};
+  for(const marker of ['alpha-private-marker','beta-private-marker']){
+    const reply=await collect(transport,{...request,messages:[body.messages[0],{role:'user',content:marker}]});
+    assert.equal(reply.result.choices[0].message.content,'ok');
+  }
+  assert.equal(received.length,2);
+  assert.ok(received.every(input=>input.options.resume===undefined));
+  assert.match(received[0].prompt,/alpha-private-marker/);
+  assert.match(received[1].prompt,/beta-private-marker/);
+  assert.doesNotMatch(received[1].prompt,/alpha-private-marker/);
+});
 test('schema changes are resent intact; tool-result IDs can route a continuation without a client key',async t=>{
   const received=[];let calls=0;const transport=await fixture(t,async function*(input){received.push(input);yield* events(JSON.stringify(++calls===1?{action:'tool_calls',calls:[{name:'write',arguments:{text:'x'}}]}:{action:'final',content:'ok'}));});
   const request={...body,prompt_cache_key:undefined,tools};const first=await collect(transport,request),message=first.result.choices[0].message;

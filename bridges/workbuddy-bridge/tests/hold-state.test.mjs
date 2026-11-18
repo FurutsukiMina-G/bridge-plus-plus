@@ -139,7 +139,7 @@ test('warm table and model-option mismatches report separate reasons',async t=>{
  await waitFor(()=>f.sessions.some(x=>x.listed?.length===2&&x.prompts.length));f.sessions.find(x=>x.listed?.length===2&&x.prompts.length).final('three');assert.equal((await p2).report.native.warm_miss_reason,'tool_table_mismatch');
 });
 test('expired and failed warm entries are reported before a safe cold start',async t=>{
- const f=await fixture(t,{prewarmMs:30}),r=toolRequest(),{pending,s}=await begin(f,r);s.final('one');await pending;await waitFor(()=>f.lane.stats().warm_ready===0&&f.sessions.length===2);
+ const f=await fixture(t,{prewarmMs:30,blankWarmDemandMs:30}),r=toolRequest(),{pending,s}=await begin(f,r);s.final('one');await pending;await waitFor(()=>f.lane.stats().warm_ready===0&&f.sessions.length===2);
  const p=f.infer({...r,prompt_cache_key:'expired-warm'});await waitFor(()=>f.sessions[2]?.prompts.length);f.sessions[2].final('two');assert.equal((await p).report.native.warm_miss_reason,'expired');
  const g=await fixture(t,{prewarmMs:5000},(s,i)=>{if(i===1)s.connectGate=Promise.reject(new Error('synthetic warm startup failure'));});
  const start=await begin(g,r);g.lane.config.nativeWarmLimit=0;start.s.final('one');await start.pending;await waitFor(()=>g.lane.warmFailure!==null);

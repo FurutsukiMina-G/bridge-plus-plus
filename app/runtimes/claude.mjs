@@ -39,11 +39,13 @@ async function hasNativeRecord(configDir,id){
 export const CLAUDE_DROPPED_ENV=['API_TIMEOUT_MS','API_FORCE_IDLE_TIMEOUT','AWS_BEARER_TOKEN_BEDROCK','BASH_DEFAULT_TIMEOUT_MS','BASH_MAX_TIMEOUT_MS','BASH_MAX_OUTPUT_LENGTH','CLOUD_ML_REGION','IS_DEMO','IS_SANDBOX','MAX_THINKING_TOKENS','MAX_MCP_OUTPUT_TOKENS','MAX_STRUCTURED_OUTPUT_RETRIES','SLASH_COMMAND_TOOL_CHAR_BUDGET','USE_API_CONTEXT_MANAGEMENT','USE_BUILTIN_RIPGREP','USE_LOCAL_OAUTH','USE_STAGING_OAUTH','USER_TYPE','FORCE_AUTOUPDATE_PLUGINS','FORCE_CODE_TERMINAL','FORCE_PROMPT_CACHING_5M','ENABLE_BETA_TRACING_DETAILED','ENABLE_CLAUDEAI_MCP_SERVERS','ENABLE_ENHANCED_TELEMETRY_BETA','ENABLE_MCP_LARGE_OUTPUT_FILES','ENABLE_PROMPT_CACHING_1H','ENABLE_PROMPT_CACHING_1H_BEDROCK','ENABLE_TOOL_SEARCH','DISABLE_AUTOUPDATER','DISABLE_AUTO_COMPACT','DISABLE_BRIEF_MODE_STOP_HOOK','DISABLE_BUG_COMMAND','DISABLE_COMPACT','DISABLE_COST_WARNINGS','DISABLE_DOCTOR_COMMAND','DISABLE_ERROR_REPORTING','DISABLE_EXTRA_USAGE_COMMAND','DISABLE_FEEDBACK_COMMAND','DISABLE_GROWTHBOOK','DISABLE_INSTALLATION_CHECKS','DISABLE_INSTALL_GITHUB_APP_COMMAND','DISABLE_INTERLEAVED_THINKING','DISABLE_LOGIN_COMMAND','DISABLE_LOGOUT_COMMAND','DISABLE_MICROCOMPACT','DISABLE_TELEMETRY','DISABLE_UPDATES','DISABLE_UPGRADE_COMMAND'];
 const CLAUDE_DROPPED_NAMES=new Set(CLAUDE_DROPPED_ENV),CLAUDE_DROPPED_PREFIXES=['VERTEX_REGION_','DISABLE_PROMPT_CACHING'];
 const claudeDropped=key=>{const upper=key.toUpperCase();return CLAUDE_DROPPED_NAMES.has(upper)||CLAUDE_DROPPED_PREFIXES.some(prefix=>upper.startsWith(prefix))||/^(ANTHROPIC_|CLAUDE|MCP_|OTEL_)/i.test(key);};
+const CLAUDE_OPTIONAL_OUTPUT_ENV={CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION:'0',CLAUDE_CODE_ENABLE_AWAY_SUMMARY:'0'};
 
 export function claudeLaunchSettings(options){
   const {session,variant,endpoint,permissionMode,configDir,resume}=options,selection=options.selection??session.selection??{},model=options.model??{};
   const env={...process.env};for(const key of Object.keys(env))if(claudeDropped(key))delete env[key];
   Object.assign(env,{CLAUDE_CONFIG_DIR:configDir,ANTHROPIC_BASE_URL:String(endpoint.baseURL).replace(/\/v1\/?$/,''),ANTHROPIC_AUTH_TOKEN:endpoint.key,CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC:'1',DISABLE_TELEMETRY:'1',DISABLE_ERROR_REPORTING:'1',DISABLE_AUTOUPDATER:'1',DISABLE_LOGIN_COMMAND:'1',CLAUDE_CODE_DISABLE_LAUNCHER_SIGN_IN:'1',CLAUDE_CODE_ATTRIBUTION_HEADER:'0',CLAUDE_CODE_DISABLE_BACKGROUND_TASKS:'1',CLAUDE_CODE_DISABLE_CRON:'1'});
+  Object.assign(env,CLAUDE_OPTIONAL_OUTPUT_ENV);
   // Loopback must never go through a user proxy: the gateway is always local.
   const mergeNoProxy=value=>{const items=String(value??'').split(',').map(item=>item.trim()).filter(Boolean);for(const item of ['127.0.0.1','localhost','::1'])if(!items.includes(item))items.push(item);return items.join(',');};
   env.NO_PROXY=mergeNoProxy(env.NO_PROXY??env.no_proxy);env.no_proxy=env.NO_PROXY;
@@ -60,7 +62,7 @@ export function claudeLaunchSettings(options){
   if(permissionMode!=null){const mode=claudePermissionNative(permissionMode,options.runtime);args.push('--permission-mode',mode);if(mode==='bypassPermissions')args.push('--allow-dangerously-skip-permissions');}
   // A tool executor keeps no memory of its own between sessions: the model would otherwise spend requests
   // (and permission prompts outside the project) writing memory files into Bridge++'s private config.
-  args.push('--settings',JSON.stringify({skipWebFetchPreflight:true,autoMemoryEnabled:false,model:variant.id,env:controlled}));
+  args.push('--settings',JSON.stringify({skipWebFetchPreflight:true,autoMemoryEnabled:false,model:variant.id,env:{...controlled,...CLAUDE_OPTIONAL_OUTPUT_ENV}}));
   return {args,env};
 }
 

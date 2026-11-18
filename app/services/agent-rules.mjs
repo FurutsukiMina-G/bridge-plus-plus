@@ -63,7 +63,7 @@ export function parseDetectedRules(text){
 }
 export class AgentRules {
 // The detector runs after the turn and never blocks it; a cold upstream runtime (Qoder ~11-40 s) must not time it out.
-  constructor(store,{providers,gateway,fetchImpl=fetch,timeoutMs=120000}={}){Object.assign(this,{store,providers,gateway,fetchImpl,timeoutMs});this.path=join(store.root,'AGENTS.md');this.jobs=new Map();this.controllers=new Set();this.auxiliary=new Map();this.closed=false;this.stats={skipped:0,failed:0};}
+  constructor(store,{providers,gateway,fetchImpl=fetch,timeoutMs=180000}={}){Object.assign(this,{store,providers,gateway,fetchImpl,timeoutMs});this.path=join(store.root,'AGENTS.md');this.jobs=new Map();this.controllers=new Set();this.auxiliary=new Map();this.closed=false;this.stats={skipped:0,failed:0};}
   knownModel(key){if(typeof key!=='string'||!/^(qoder|workbuddy):.+$/.test(key))return null;try{const model=this.providers?.get(key);return model?.key===key&&model.source===key.slice(0,key.indexOf(':'))&&model.id===key.slice(key.indexOf(':')+1)?model:null;}catch{return null;}}
   model(key){const model=this.knownModel(key);return model?.enabled?model:null;}
   detectorModel(){return this.store.state.preferences.rulesDetectorModel??RULE_DETECTOR_DEFAULT;}
@@ -113,7 +113,7 @@ export class AgentRules {
           const followSession=this.detectorModel()==='session'&&key===session.selection?.modelKey;
           const selection=validateSelection(model,{modelKey:key,identity:followSession?session.selection.identity:model.identity,...followSession?{contextTokens:session.selection.contextTokens}:{}}),variant=variantFor(model,selection),endpoint=await abortable(this.gateway.register(model,variant,selection,'codex',auxId),controller.signal);
           controller.signal.throwIfAborted();
-          const response=await abortable(this.fetchImpl(endpoint.baseURL+'/chat/completions',{method:'POST',headers:{'content-type':'application/json',authorization:'Bearer '+endpoint.key,'x-bridge-auxiliary':'1','x-bridge-effort':'none,low,minimal,medium'},body:JSON.stringify({model:variant.id,stream:false,max_tokens:400,messages:[{role:'system',content:RULE_DETECTOR_PROMPT},{role:'user',content:JSON.stringify({existingRules:existing,message:text})}]}),signal:controller.signal}),controller.signal);
+          const response=await abortable(this.fetchImpl(endpoint.baseURL+'/chat/completions',{method:'POST',headers:{'content-type':'application/json',authorization:'Bearer '+endpoint.key,'x-bridge-auxiliary':'1','x-bridge-rules':'1','x-bridge-effort':'none,low,minimal,medium'},body:JSON.stringify({model:variant.id,stream:false,max_tokens:400,messages:[{role:'system',content:RULE_DETECTOR_PROMPT},{role:'user',content:JSON.stringify({existingRules:existing,message:text})}]}),signal:controller.signal}),controller.signal);
           if(!response.ok)throw new Error('规则分类器不可用');const body=await abortable(response.json(),controller.signal);content=body.choices?.[0]?.message?.content;if(typeof content!=='string')throw new Error('规则分类器未返回文本');break;
         }catch(error){if(controller.signal.aborted)throw error;}
       }

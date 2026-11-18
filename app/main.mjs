@@ -181,6 +181,8 @@ const methods={
   async 'terminal:state'({projectId}){store.project(id(projectId));return terminals.state(projectId);},
   async 'terminal:stop'({projectId}){store.project(id(projectId));await terminals.stop(projectId);},
   async 'clipboard:write'({text}){if(typeof text!=='string'||text.length>2*1024*1024)throw new Error('Invalid text');clipboard.writeText(text);},
+  // The right-click menu's cut/copy/paste/select all: the window's own editing commands on the focused element.
+  async 'edit:command'({command}){if(!['cut','copy','paste','selectAll'].includes(command))throw new Error('Invalid edit command');window.webContents[command]();},
   async 'editor:dirty'({dirty}){if(typeof dirty!=='boolean')throw new Error('Invalid editor state');dirtyEditors=dirty;},
   async 'window:minimize'(){window.minimize();},
   async 'window:maximize'(){window.isMaximized()?window.unmaximize():window.maximize();},
@@ -198,6 +200,7 @@ async function main(){if(!app.requestSingleInstanceLock()){app.exit(0);return;}a
   window.webContents.setWindowOpenHandler(()=>({action:'deny'}));window.webContents.on('will-navigate',e=>e.preventDefault());window.webContents.on('will-attach-webview',e=>e.preventDefault());window.webContents.session.setPermissionRequestHandler((webContents,permission,callback,details)=>callback(allowMainWindowFullscreen({permission,requestingUrl:details.requestingUrl,isMainWindow:webContents===window.webContents,entryUrl:pathToFileURL(entry).href})));
   ipcMain.handle('workbench:call',async(event,method,args)=>{try{verifyCaller(event);if(!Object.hasOwn(methods,method))throw new Error('Unknown operation');if(environmentMethods.has(method))await boot.ready('environments');else if(method.startsWith('bridgeService:'))await boot.ready('services');if(method==='attachment:stage'){if(!args||!(args.data instanceof Uint8Array)||args.data.byteLength>100*1024*1024)throw new Error('无效或超限的附件请求');argsObject({projectId:args.projectId,name:args.name});return {ok:true,value:await methods[method](args)};}return {ok:true,value:await methods[method](argsObject(args))};}catch(e){return {ok:false,error:e.message,...e?.code?{code:e.code}:{}};}});
   terminals.on('event',event=>send('workbench:event',event));window.on('close',event=>{if(!closing&&!canDiscardEditors())event.preventDefault();});
+  window.on('focus',()=>{void modelServices.changed().catch(()=>{});});
   const quietQA=process.env.AWB_QA==='1'&&process.env.AWB_QA_INACTIVE==='1'&&!app.isPackaged;
   if(quietQA)window.setFocusable(false);
   const show=()=>{if(quietQA){const area=screen.getPrimaryDisplay().workArea;window.setBounds({x:area.x+Math.max(0,area.width-1100),y:area.y+Math.max(0,area.height-740),width:1100,height:740});window.showInactive();}else window.show();};

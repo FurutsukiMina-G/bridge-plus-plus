@@ -71,25 +71,36 @@ export class Store extends EventEmitter {
     for(const catalog of Object.values(this.state.catalog))if(catalog?.status==='loading'){catalog.status='error';catalog.error='上次目录查询已中断，请刷新。';}
     await this.save();return this;
   }
-  enqueue(task){if(this.closed)return Promise.reject(new Error('Workspace store closed'));const next=this.queue.then(task);this.queue=next.catch(()=>{});return next;}
+  enqueue(task){this.saveBatch=null;if(this.closed)return Promise.reject(new Error('Workspace store closed'));const next=this.queue.then(task);this.queue=next.catch(()=>{});return next;}
   snapshot(){return structuredClone(this.state);}
-  save(){
-    const content=JSON.stringify(this.state,null,2);
-    return this.enqueue(async()=>{
-      const next=workspaceState(content);
+  async save(){
+    if(this.closed)throw new Error('Workspace store closed');
+    const content=JSON.stringify(this.state),next=workspaceState(content);
+    const populated=next.sessions.length>0;
+    // Merge adjacent pending saves with the same populated/empty status. A journal operation is an
+    // ordering boundary, and each caller still waits for both copies on disk.
+    if(this.saveBatch?.populated===populated){this.saveBatch.content=content;return this.saveBatch.done;}
+    const batch={content,populated};
+    batch.done=this.enqueue(async()=>{
+      if(this.saveBatch===batch)this.saveBatch=null;
       if(this.persisted!==null){
-        if(!next.sessions.length&&workspaceState(this.persisted).sessions.length)throw new Error('Refusing to replace a populated session index with an empty workspace');
+        if(!populated&&workspaceState(this.persisted).sessions.length)throw new Error('Refusing to replace a populated session index with an empty workspace');
       }
+      if(this.copiesCurrent&&batch.content===this.persisted)return;
+      this.copiesCurrent=false;
       // Both files hold the latest validated metadata, including a just-created
       // native session ID. Never roll back that ID to a prior null value.
-      await this.writeSnapshot(this.backupFile,content);
-      await this.writeSnapshot(this.file,content);this.persisted=content;
+      await this.writeSnapshot(this.backupFile,batch.content);
+      await this.writeSnapshot(this.file,batch.content);this.persisted=batch.content;
+      this.copiesCurrent=true;
     });
+    this.saveBatch=batch;
+    return batch.done;
   }
   async writeSnapshot(file,content){
     const temp=file+'.'+randomUUID()+'.tmp';
     try{
-      await writeFile(temp,content,{flag:'wx',mode:0o600});
+      await writeFile(temp,content,{flag:'wx',mode:0o600,flush:true});
       for(let attempt=0;;attempt++)try{await rename(temp,file);break;}catch(error){
         if(!['EPERM','EBUSY','EACCES'].includes(error.code)||attempt>=3)throw error;
         await new Promise(resolve=>setTimeout(resolve,25*2**attempt));

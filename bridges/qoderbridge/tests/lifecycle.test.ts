@@ -5,6 +5,9 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { RequestSlots } from '../src/async.js';
 import { QoderPool } from '../src/pool.js';
+import { createBridgeServer } from '../src/server.js';
+import { blankWarmSettings, BlankWarmSlots } from '../src/blank-warm.js';
+import { nativeConfig, fakeStarter, FakeRuntime, toolRequest, waitFor } from './native-fake.js';
 import { ChatRequest } from '../src/compat.js';
 import { IsolationCache } from '../src/isolation-cache.js';
 import { DISABLED_RUNTIME_MEMORY, runtimeMemory, startupTransport, type StartupAttempt } from '../src/startup-phases.js';
@@ -12,8 +15,8 @@ import type { Config } from '../src/client.js';
 
 const request = ChatRequest.parse({ model: 'qoder-deepseek-flash', prompt_cache_key: 'test-session',
   messages: [{ role: 'user', content: 'Answer OK' }] });
-function fakePool(timeout = 5000, stalled = false, fail = false, sdkCode?: number) {
-  const config: Config = { auth: 'cli', timeout, strategy: 'permission', system: 'test' };
+function fakePool(timeout = 5000, stalled = false, fail = false, sdkCode?: number, idleTimeoutMs?:number) {
+  const config: Config = { auth: 'cli', timeout, strategy: 'permission', system: 'test', idleTimeoutMs };
   let phase = 0; let prompts = 0; let closed = 0;
   const record = { id: 'fake', messages: [], touched: Date.now(), locked: Promise.resolve(),
     lastCredits: null, model: 'dfmodel', busy: 0, toolSignature: null, retryHint: null, retryMessageHash: null,
@@ -74,6 +77,21 @@ test('deadline closes the owned SDK session and returns an auditable failed repo
     assert.equal(counts().closed, 1);
     assert.equal(record.busy, 0);
   } finally { clearTimeout(keepAlive); }
+});
+test('a silent JSON request releases its runtime at the idle limit, before the hard deadline',async t=>{
+  const {pool,record,counts}=fakePool(1200000,true,false,undefined,180000);
+  try {
+    t.mock.timers.enable({apis:['setTimeout']});
+    const result=pool.infer(request);
+    for(let i=0;!counts().prompts&&i<200;i++)await new Promise<void>(resolve=>setImmediate(resolve));
+    assert.equal(counts().prompts,1);
+    t.mock.timers.tick(180000);
+    const turn=await result;
+    assert.equal(turn.report.stage,'upstream_stalled');
+    assert.equal(turn.recovery!.correctionCalls,0);
+    assert.equal(counts().closed,1);
+    assert.equal(record.busy,0);
+  } finally {pool.closeAll();}
 });
 test('human approval waits retain context past twenty minutes but still release expired idle sessions', async () => {
   const { pool, record, counts } = fakePool();
@@ -142,8 +160,8 @@ function streamingRecord(id: string, ratios: number[]) {
     } } };
   return record;
 }
-function streamingPool(cacheUsage: Config['cacheUsage'], ratios: number[]) {
-  const pool = new QoderPool({ auth: 'cli', timeout: 5000, strategy: 'permission', system: 'test', cacheUsage });
+function streamingPool(cacheUsage: Config['cacheUsage'], ratios: number[], overrides:Partial<Config>={}, blankSlots?:BlankWarmSlots) {
+  const pool = new QoderPool({ auth: 'cli', timeout: 5000, strategy: 'permission', system: 'test', cacheUsage,...overrides },undefined,blankSlots);
   const opened: Array<ReturnType<typeof streamingRecord>> = [];
   (pool as unknown as { open: () => Promise<unknown> }).open = async () => {
     const record = streamingRecord(`fake-${opened.length}`, ratios); opened.push(record); return record;
@@ -374,26 +392,29 @@ test('isolation cache handles miss, hit, new plugin discovery, corruption, and i
     await rm(cacheDir, { recursive: true, force: true });
   }
 });
-test('one-shot requests claim prewarmed blank runtimes, replenish in background, and release native runtime on completion', async () => {
+test('one-shot requests claim prewarmed blank runtimes, replenish in background, and release native runtime on completion', async t => {
+  t.mock.timers.enable({apis:['Date','setTimeout']});
   const { pool, opened } = streamingPool('none', [0.001, 0.001, 0.001, 0.001]);
   const oneShotReq = ChatRequest.parse({ model: 'qoder-deepseek-flash', bridge_scope: 'dsh-review',
     messages: [{ role: 'system', content: 'Review tool call' }, { role: 'user', content: 'Check safety' }] });
   try {
-    await pool.prewarm();
+    const coldTurn=await pool.infer(oneShotReq);
+    assert.equal(coldTurn.report.warm_start,false);
     assert.equal(pool.stats().prewarmed, true);
     assert.equal(pool.stats().blank_runtimes.ready, 1);
-    const firstRecord = opened[0]!;
-    const firstTurn = await pool.infer(oneShotReq);
+    const firstRecord = opened[1]!;
+    const newRequest={...oneShotReq,messages:[oneShotReq.messages[0]!,{role:'user' as const,content:'A distinct first warm request'}]};
+    const firstTurn = await pool.infer(newRequest);
     assert.equal(firstTurn.report.warm_start, true);
     assert.equal(firstTurn.record, firstRecord);
     assert.equal((firstRecord as { nativeReleased?: boolean }).nativeReleased, true);
     assert.equal(firstRecord.controller.signal.aborted, true);
     // Released one-shot runtimes do not occupy conversation pool slots, while blank runtimes are replenished.
     assert.equal(pool.stats().sessions, 0);
-    assert.equal(pool.stats().blank_runtimes.target, 2);
-    assert.ok(opened.length >= 2, 'blank runtime replenished in background after prewarmed runtime was claimed');
+    assert.equal(pool.stats().blank_runtimes.target, 1);
+    assert.equal(opened.length,3,'one replacement was started');
     // Identical one-shot retry within 120s replays locally without consuming another runtime.
-    const replayTurn = await pool.infer(oneShotReq);
+    const replayTurn = await pool.infer(newRequest);
     assert.equal(replayTurn.report.local_response_replay, true);
     assert.equal(replayTurn.report.model_requests, 0);
     assert.equal(pool.stats().sessions, 0);
@@ -406,7 +427,77 @@ test('one-shot requests claim prewarmed blank runtimes, replenish in background,
     assert.notEqual(secondTurn.record, firstRecord);
     assert.equal(secondTurn.record.nativeReleased, true);
     assert.equal(pool.stats().sessions, 0);
+    assert.equal(opened.length,4);
   } finally { pool.closeAll(); }
+});
+
+test('Qoder retains one blank for ten minutes and continued turns do not renew demand',async t=>{
+  t.mock.timers.enable({apis:['Date','setTimeout']});
+  const {pool,opened}=streamingPool('none',Array(9).fill(0.001));
+  t.after(()=>pool.closeAll());
+  let history=request.messages;
+  assert.equal(opened.length,0);
+  for(let minute=0;minute<=14;minute+=2){
+    if(minute)t.mock.timers.tick(120000);
+    const turn=await pool.infer({...request,messages:history});
+    assert.equal(turn.report.reused_session,minute!==0);
+    assert.equal(opened.length,2);
+    assert.equal(pool.stats().blank_runtimes.ready,minute<10?1:0);
+    history=[...history,{role:'assistant',content:'OK'},{role:'user',content:`Next ${minute}`}];
+  }
+  assert.equal(opened[1]!.closed,true);
+  assert.equal(opened[0]!.closed,false);
+});
+
+test('Qoder replaces an expired spare only while a real demand window is open',async t=>{
+  t.mock.timers.enable({apis:['Date','setTimeout']});
+  const {pool,opened}=streamingPool('none',[0.001],{blankWarmTtlMs:100,blankWarmDemandMs:200});
+  t.after(()=>pool.closeAll());
+  await pool.infer(request);
+  t.mock.timers.tick(100);await Promise.resolve();
+  assert.equal(opened[1]!.closed,true);assert.equal(opened.length,3);
+  t.mock.timers.tick(100);
+  assert.equal(opened[2]!.closed,true);assert.equal(opened.length,3);
+});
+
+test('Qoder model pools share a bounded blank allowance and expose configurable timings',async t=>{
+  const settings=blankWarmSettings({auth:'cli',timeout:5000,strategy:'permission',system:'test'},{QODER_BLANK_WARM_LIMIT:'2',QODER_WARM_DEMAND_MS:'200',QODER_BLANK_WARM_TTL_MS:'100'});
+  assert.deepEqual(settings,{blankWarmLimit:2,nativeWarmLimit:1,blankWarmDemandMs:200,blankWarmTtlMs:100});
+  const slots=new BlankWarmSlots(1),a=streamingPool('none',[0.001],{},slots),b=streamingPool('none',[0.001],{},slots);
+  t.after(()=>{a.pool.closeAll();b.pool.closeAll();});
+  await Promise.all([a.pool.infer(request),b.pool.infer(request)]);
+  assert.equal(a.pool.stats().blank_runtimes.ready+b.pool.stats().blank_runtimes.ready,1);
+  assert.equal(a.opened.length+b.opened.length,3);
+  const expanded=streamingPool('none',[0.001],{blankWarmLimit:2});t.after(()=>expanded.pool.closeAll());
+  await expanded.pool.infer(request);
+  assert.equal(expanded.pool.stats().blank_runtimes.ready,2);
+});
+
+test('Qoder server startup only prepares health state until real demand arrives',async t=>{
+  const runtimes:FakeRuntime[]=[];
+  const {model:_model,...config}=nativeConfig({blankWarmLimit:1,nativeWarmLimit:1});
+  const server=await createBridgeServer(config,{port:0,key:'no-eager-start',startRuntime:fakeStarter(runtimes)});
+  t.after(()=>new Promise<void>(resolve=>server.close(()=>resolve())));
+  const address=server.address();assert.ok(address&&typeof address==='object');
+  const health=await (await fetch(`http://127.0.0.1:${address.port}/health`)).json() as {pool:{prewarmed:boolean}};
+  assert.equal(health.pool.prewarmed,false);assert.equal(runtimes.length,0);
+});
+
+test('Qoder JSON demand can use the native spare allowance without closing the live conversation',async t=>{
+  const slots=new BlankWarmSlots(1),runtimes:FakeRuntime[]=[];
+  const native=new QoderPool(nativeConfig({nativeWarmLimit:1}),fakeStarter(runtimes),slots);
+  const json=streamingPool('none',[0.001],{},slots);
+  t.after(()=>{native.closeAll();json.pool.closeAll();});
+  const main=toolRequest(),pending=native.infer(main);
+  await waitFor(()=>runtimes[0]?.prompts.length===1&&native.stats().native.warm_ready===1);
+  runtimes[0]!.final('OK');await pending;
+  await json.pool.infer(request);
+  assert.equal(native.stats().native.warm_ready,0);assert.equal(json.pool.stats().blank_runtimes.ready,1);
+  assert.equal(runtimes[0]!.closed,0);assert.equal(runtimes[1]!.closed,1);
+  const follow=native.infer({...main,messages:[...main.messages,{role:'assistant',content:'OK'},{role:'user',content:'Continue'}]});
+  await waitFor(()=>runtimes[0]?.prompts.length===2);
+  runtimes[0]!.final('Continued');assert.equal((await follow).report.native.window,'continue');
+  assert.equal(runtimes.length,2);
 });
 test('aborting infer while opening a new session closes the newly opened runtime', async () => {
   const config: Config = { auth: 'cli', timeout: 5000, strategy: 'permission', system: 'test', blankWarmLimit: 0 };
