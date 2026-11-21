@@ -77,17 +77,17 @@ kbd{font:500 10.5px var(--font);color:var(--faint);border:1px solid var(--line);
 .ghost-btn{height:30px;padding:0 10px;border-radius:8px;display:inline-flex;align-items:center;gap:6px;color:var(--muted);font-size:12.5px;-webkit-app-region:no-drag}
 .ghost-btn:hover{background:var(--hover);color:var(--text)}
 .ghost-btn .icon{width:15px;height:15px}
-.spinner{width:13px;height:13px;border-radius:50%;border:2px solid var(--line-2);border-top-color:var(--accent);animation:spin .8s linear infinite;flex-shrink:0;display:inline-block}
+.spinner{width:13px;height:13px;border-radius:50%;border:2px solid var(--line-2);border-top-color:var(--accent);animation:spin .8s steps(12,end) infinite;flex-shrink:0;display:inline-block}
 @keyframes spin{to{transform:rotate(360deg)}}
-@keyframes pulse{0%,100%{opacity:1;transform:scale(1)}50%{opacity:.45;transform:scale(.82)}}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:.4}}
 @keyframes rise{from{opacity:0;transform:translateY(4px)}to{opacity:1;transform:none}}
 
 /* ---------- status dots ---------- */
 .dot{width:7px;height:7px;border-radius:50%;flex-shrink:0;background:var(--faint)}
 .dot.idle{background:transparent;box-shadow:inset 0 0 0 1.5px var(--faint)}
 .dot.completed{background:var(--green);opacity:.75}
-.dot.running,.dot.starting{background:var(--accent);animation:pulse 1.3s ease-in-out infinite}
-.dot.waiting{background:var(--amber);animation:pulse 1.6s ease-in-out infinite}
+.dot.running,.dot.starting{background:var(--accent);animation:pulse 1.4s steps(8,end) infinite}
+.dot.waiting{background:var(--amber);animation:pulse 1.6s steps(8,end) infinite}
 /* Behind other windows the status animations pause: every animation frame costs the GPU process (app.js markFocus). */
 .window-inactive .dot,.window-inactive .pulse,.window-inactive .spinner,.window-inactive .job-bar i,.window-inactive .user-note .icon{animation-play-state:paused}
 .dot.failed{background:var(--red)}
@@ -475,7 +475,7 @@ kbd{font:500 10.5px var(--font);color:var(--faint);border:1px solid var(--line);
 .working-label{flex-shrink:0}
 .working-detail{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;padding:1px 8px;border-radius:7px;background:var(--hover);color:var(--muted);font-family:var(--mono);font-size:11.5px}
 .working-elapsed{flex-shrink:0;color:var(--faint);font-size:12px;font-variant-numeric:tabular-nums}
-.pulse{width:9px;height:9px;flex-shrink:0;border-radius:50%;background:var(--accent);animation:pulse 1.2s ease-in-out infinite;box-shadow:0 0 0 4px var(--accent-soft)}
+.pulse{width:9px;height:9px;flex-shrink:0;border-radius:50%;background:var(--accent);animation:pulse 1.4s steps(8,end) infinite;box-shadow:0 0 0 4px var(--accent-soft)}
 .working:is([data-state=approval],[data-state=question]) .pulse{background:var(--amber);box-shadow:0 0 0 4px color-mix(in srgb,var(--amber) 18%,transparent)}
 .working:is([data-state=retry],[data-state=upstream]) .pulse{background:var(--amber)}
 .working[data-state=stopping] .pulse{background:var(--muted);box-shadow:none}
@@ -771,7 +771,7 @@ kbd{font:500 10.5px var(--font);color:var(--faint);border:1px solid var(--line);
 .job .icon{width:14px;height:14px}
 .job-bar{height:5px;border-radius:3px;background:var(--hover);overflow:hidden}
 .job-bar i{display:block;height:100%;border-radius:3px;background:var(--accent);transition:width .3s ease}
-.job-bar.unknown i{width:35%;animation:job-slide 1.4s ease-in-out infinite}
+.job-bar.unknown i{width:35%;animation:job-slide 1.4s steps(12,end) infinite}
 @keyframes job-slide{from{transform:translateX(-100%)}to{transform:translateX(290%)}}
 
 /* model-source interfaces for other agents */
@@ -958,7 +958,7 @@ dialog h2{margin:0 0 12px;font:600 16px var(--font-display)}
 .user-message.steer .user-bubble{box-shadow:inset 0 0 0 1px color-mix(in srgb,var(--accent) 38%,transparent)}
 .user-note{display:flex;align-items:center;gap:5px;margin-top:5px;padding-right:6px;font-size:11.5px;color:var(--faint);max-width:84%}
 .user-note .icon{width:12px;height:12px;flex-shrink:0}
-.user-note.pending .icon{color:var(--accent);animation:pulse 1.6s ease-in-out infinite}
+.user-note.pending .icon{color:var(--accent);animation:pulse 1.6s steps(8,end) infinite}
 .user-note.delivered .icon{color:var(--green)}
 .user-note.failed{color:var(--amber)}
 .queue-held{font-size:11px;color:var(--amber);border:1px solid color-mix(in srgb,var(--amber) 40%,transparent);border-radius:5px;padding:0 6px;line-height:18px;white-space:nowrap}
@@ -993,3 +993,39 @@ dialog h2{margin:0 0 12px;font:600 16px var(--font-display)}
 .event-note.rule-note{align-items:center}
 .event-note.rule-note .link-btn{font-size:12px;padding:0 2px}
 .event-note.rule-note.undone>span{text-decoration:line-through;text-decoration-color:var(--line-2)}
+
+/* 设置 › 启动与资源 */
+.startup-presets-head{display:flex;align-items:center;gap:10px;margin-top:4px}
+.startup-presets-head h2{margin:0 0 10px}
+.startup-custom-tag{font-size:11px;line-height:18px;padding:0 7px;border-radius:999px;border:1px solid var(--accent-line);background:var(--accent-soft);color:var(--accent);margin-bottom:10px}
+.startup-presets{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px;margin-bottom:24px}
+.startup-preset{border:1px solid var(--line);border-radius:14px;padding:13px 14px;background:var(--surface);display:flex;flex-direction:column;gap:6px;text-align:left;transition:border-color .14s,box-shadow .14s,background-color .14s}
+.startup-preset:hover{border-color:var(--line-2);background:var(--surface-2)}
+.startup-preset.active{border-color:var(--accent);box-shadow:0 0 0 3px var(--accent-soft);background:var(--surface)}
+.sp-head{display:flex;align-items:center;gap:6px;font-size:13.5px;color:var(--text)}
+.sp-head b{font-weight:600}
+.sp-badge{font-size:10.5px;line-height:17px;padding:0 6px;border-radius:999px;background:var(--accent-soft);color:var(--accent);border:1px solid var(--accent-line)}
+.sp-check{margin-left:auto;color:var(--accent);display:inline-flex}
+.sp-check .icon{width:14px;height:14px}
+.sp-desc{font-size:12px;line-height:1.55;color:var(--muted)}
+.startup-group{margin:0 0 22px}
+.startup-group-head{margin-bottom:8px}
+.startup-group-head h2{margin:0 0 4px}
+.startup-group-head p{margin:0;font-size:12.5px;line-height:1.6;color:var(--muted)}
+.startup-list{border:1px solid var(--line);border-radius:14px;background:var(--surface);overflow:hidden}
+.startup-row{display:flex;align-items:center;gap:16px;padding:12px 14px;border-top:1px solid var(--line-soft);cursor:pointer;transition:background-color .12s}
+.startup-row:first-child{border-top:0}
+.startup-row:hover{background:var(--hover)}
+.startup-row-text{flex:1;min-width:0;display:flex;flex-direction:column;gap:3px}
+.startup-row-text b{font-size:13px;font-weight:500;color:var(--text)}
+.startup-row-text small{font-size:12px;line-height:1.55;color:var(--muted)}
+.startup-switch{position:relative;flex-shrink:0;width:36px;height:20px;display:inline-block}
+.startup-switch input{position:absolute;inset:0;opacity:0;width:100%;height:100%;margin:0;cursor:pointer}
+.startup-slider{position:absolute;inset:0;border-radius:999px;background:var(--line-2);transition:background-color .16s}
+.startup-slider::before{content:'';position:absolute;left:2px;top:2px;width:16px;height:16px;border-radius:50%;background:#fff;box-shadow:0 1px 3px rgba(0,0,0,.28);transition:transform .16s}
+.startup-switch input:checked+.startup-slider{background:var(--accent)}
+.startup-switch input:checked+.startup-slider::before{transform:translateX(16px)}
+.startup-switch input:focus-visible+.startup-slider{outline:2px solid var(--accent-line);outline-offset:2px}
+.startup-note{display:flex;align-items:flex-start;gap:8px;margin-top:8px;padding:9px 12px;border-radius:10px;background:var(--hover);color:var(--muted);font-size:12px;line-height:1.6}
+.startup-note .icon{width:14px;height:14px;margin-top:2px;flex-shrink:0}
+@media(max-width:860px){.startup-presets{grid-template-columns:1fr}}

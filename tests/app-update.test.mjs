@@ -225,3 +225,17 @@ test('catalog diffs report additions and removals but never the first fill',()=>
   assert.equal(catalogDiff([{name:'A'}],[{name:'A'}]),null);
   assert.deepEqual(catalogDiff([{name:'A'},{name:'B'},{name:'C'}],[{name:'A'},{id:'C'},{name:'D'}]),{added:['D'],removed:['B']});
 });
+
+test('-rN release metadata and downloaded package survive store reopen',async()=>{
+  const store=await makeStore(),dir=join(store.root,'updates'),bytes=Uint8Array.of(9,8,7),asset=assetFor('0.1.25-r1',bytes);
+  const updates=new AppUpdates({store,userData:store.root,currentVersion:'0.1.25',fetch:async url=>url.includes('/releases/latest')?json(release('0.1.25-r1',asset)):installer(bytes),spawn:()=>{throw new Error('unexpected');},now:()=>NOW,isPackaged:false,sessionsRunning:()=>false,checkTimeoutMs:2000});
+  await updates.check({manual:true});
+  await updates.download();
+  const root=store.root;
+  await store.close();
+  const reopened=await new Store(root).open();
+  try{
+    assert.equal(reopened.state.updates.latest.version,'0.1.25-r1');
+    assert.equal(reopened.state.updates.downloaded.version,'0.1.25-r1');
+  }finally{await reopened.close();}
+});

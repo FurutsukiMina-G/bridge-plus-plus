@@ -15,6 +15,7 @@ import {fileLinks,toolFilePath,webLink} from './file-links.js';
 import {usable,unusableReason,permissionWarning,environmentCardHtml,servicesPageHtml,serviceCardsHtml,serviceModelsHtml,onboardingHtml,sourceCardHtml} from './setup.js';
 import {structuredQuestions,questionFormHtml,buildAnswers} from './questions.js';
 import {budgetCheck,compactTokens,formatTokens,parseTokens} from './tokens.js';
+import {startupPageHtml,startupSectionsHtml,startupPatchFromPath} from './startup.js';
 
 const $=selector=>document.querySelector(selector);
 const esc=value=>String(value??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'})[c]);
@@ -39,7 +40,7 @@ const pending=new PendingAttachments(),capCache=new Map(),capLoading=new Set(),m
 // Per interface card on Settings › 对外接口: a revealed key, whether the model list is open and its rows.
 const serviceViews=new Map(),serviceView=id=>{if(!serviceViews.has(id))serviceViews.set(id,{});return serviceViews.get(id);};
 let guideOpen=false,guideShown=false;
-let toastTimer,chatTimer,refreshTimer,tickTimer,sessionEpoch=0,fileEpoch=0,rightEpoch=0,reportedDirty=false,submitting=false,menu=null,lastBusy=false,dragging=null,mediaGen=0,dropDepth=0;
+let toastTimer,chatTimer,refreshTimer,tickTimer,sessionEpoch=0,fileEpoch=0,rightEpoch=0,reportedDirty=false,submitting=false,menu=null,lastBusy=false,dragging=null,mediaGen=0,dropDepth=0,lastFoldersHtml='',lastUpdateSlotHtml='',chatPendingHidden=false;
 // Images in assistant markdown become markers; local files are resolved through the backend.
 marked.use({renderer:{image(token){return markerHtml(token.href,token.text);}}});
 // **加粗（括号）**紧跟中文 renders as bold, as Chinese readers expect.
@@ -75,6 +76,7 @@ function morph(from,to){
   const settled=from.classList.contains('settled');
   for(const {name} of [...from.attributes])if(!to.hasAttribute(name)&&name!=='open')from.removeAttribute(name);
   for(const {name,value} of [...to.attributes])if(from.getAttribute(name)!==value)from.setAttribute(name,value);
+  if(from.tagName==='INPUT'&&(from.type==='checkbox'||from.type==='radio'))from.checked=to.checked;
   if(settled)from.classList.add('settled');
   const old=[...from.childNodes],next=[...to.childNodes];
   next.forEach((node,i)=>{if(i<old.length)morph(old[i],node);else from.appendChild(node);});
@@ -101,8 +103,6 @@ function patchBlocks(container,blocks,quiet){
     if(at!==el){if(el.isConnected)el.classList.add('settled');container.insertBefore(el,at??null);}
   });
 }
-/** Re-renders recreate spinners and status pulses; pin every looping animation to one clock so they never visibly restart. */
-new MutationObserver(()=>{for(const a of document.getAnimations())if(a.startTime!==0&&a.effect?.getTiming().iterations===Infinity)a.startTime=0;}).observe(document.body,{childList:true,subtree:true});
 
 const models=()=>Object.values(state.snapshot?.catalog??{}).flatMap(c=>c.models??[]);
 const project=()=>state.snapshot?.projects.find(p=>p.id===state.projectId);
@@ -279,19 +279,20 @@ function renderFolders(){
   if(!snap||!el)return;
   $('#app-version').textContent=`v${snap.app.version}`;
   renderUpdateSlot();
-  if(!snap.projects.length){
-    el.innerHTML=`<div class="folders-empty">${icon('folder')}<p>打开一个本机文件夹，会话会按文件夹整理在这里。</p><button class="btn sm" id="empty-add-project">${icon('folderPlus')}打开文件夹</button></div>`;
-    return;
-  }
-  el.innerHTML=snap.projects.map(p=>{
-    const rows=snap.sessions.filter(s=>!s.archived&&s.projectId===p.id&&(!query||s.title.toLowerCase().includes(query))).sort((a,b)=>Date.parse(b.updatedAt)-Date.parse(a.updatedAt));
-    if(query&&!rows.length)return'';
-    const collapsed=!query&&ui.collapsed.includes(p.id),live=rows.filter(busy).length,limit=showAll.has(p.id)||query?rows.length:12;
-    return`<div class="folder${collapsed?' collapsed':''}${p.id===state.projectId?' current':''}">
-      <div class="folder-head" data-folder="${p.id}" title="${esc(p.path)}">${icon('chevronDown','chev')}${icon('folder','folder-icon')}<span class="folder-name">${esc(p.name)}</span>${live?`<span class="live-count" title="${live} 个会话正在运行">${live}</span>`:''}
-        <span class="folder-actions"><button class="icon-btn xs" data-new-in="${p.id}" title="在此文件夹新建会话">${icon('plus')}</button><button class="icon-btn xs" data-reveal="${p.id}" title="在资源管理器中打开">${icon('external')}</button></span></div>
-      <div class="folder-sessions">${rows.length?rows.slice(0,limit).map(sessionRow).join('')+(rows.length>limit?`<button class="show-more" data-show-all="${p.id}">显示全部 ${rows.length} 个会话</button>`:''):'<div class="folder-empty">还没有会话</div>'}</div></div>`;
-  }).join('')||'<div class="folders-empty"><p>没有匹配的会话</p></div>';
+  const html=!snap.projects.length
+    ?`<div class="folders-empty">${icon('folder')}<p>打开一个本机文件夹，会话会按文件夹整理在这里。</p><button class="btn sm" id="empty-add-project">${icon('folderPlus')}打开文件夹</button></div>`
+    :snap.projects.map(p=>{
+      const rows=snap.sessions.filter(s=>!s.archived&&s.projectId===p.id&&(!query||s.title.toLowerCase().includes(query))).sort((a,b)=>Date.parse(b.updatedAt)-Date.parse(a.updatedAt));
+      if(query&&!rows.length)return'';
+      const collapsed=!query&&ui.collapsed.includes(p.id),live=rows.filter(busy).length,limit=showAll.has(p.id)||query?rows.length:12;
+      return`<div class="folder${collapsed?' collapsed':''}${p.id===state.projectId?' current':''}">
+        <div class="folder-head" data-folder="${p.id}" title="${esc(p.path)}">${icon('chevronDown','chev')}${icon('folder','folder-icon')}<span class="folder-name">${esc(p.name)}</span>${live?`<span class="live-count" title="${live} 个会话正在运行">${live}</span>`:''}
+          <span class="folder-actions"><button class="icon-btn xs" data-new-in="${p.id}" title="在此文件夹新建会话">${icon('plus')}</button><button class="icon-btn xs" data-reveal="${p.id}" title="在资源管理器中打开">${icon('external')}</button></span></div>
+        <div class="folder-sessions">${rows.length?rows.slice(0,limit).map(sessionRow).join('')+(rows.length>limit?`<button class="show-more" data-show-all="${p.id}">显示全部 ${rows.length} 个会话</button>`:''):'<div class="folder-empty">还没有会话</div>'}</div></div>`;
+    }).join('')||'<div class="folders-empty"><p>没有匹配的会话</p></div>';
+  if(html===lastFoldersHtml)return;
+  lastFoldersHtml=html;
+  patchHtml(el,html);
 }
 
 /* ---------- top bar ---------- */
@@ -741,16 +742,21 @@ function renderFooter(){
     <span class="footer-center"><span class="metric" title="${esc(rateTitle)}">${icon('zap')}${rateText}</span><span class="metric-sep"></span><span class="metric" title="${esc(cacheTitle)}">${icon('database')}缓存命中 ${cacheText}</span></span>
     <span class="footer-right" title="${esc(ctxTitle)}" id="context-ring"><span class="ctx-text">${ctx.ratio!==null?pct(ctx.ratio):ctx.window?compact(ctx.window):'—'}</span>${ringSvg(ctx.ratio)}</span>`);
 }
+function updateElapsedNodes(){
+  if(document.hidden)return;
+  if(busy(session())){
+    const text=elapsed(turnStartedAt());
+    const fe=$('.footer-elapsed');if(fe&&fe.textContent!==`· ${text}`)fe.textContent=`· ${text}`;
+    const w=$('#working-elapsed');if(w&&w.textContent!==text)w.textContent=text;
+  }
+  for(const el of document.querySelectorAll('[data-elapsed-from]')){
+    const text=elapsed(el.dataset.elapsedFrom);
+    if(el.textContent!==text)el.textContent=text;
+  }
+}
 function tick(){
   const live=state.snapshot?.sessions.some(busy);
-  if(live&&!tickTimer)tickTimer=setInterval(()=>{
-    if(busy(session())){
-      renderFooter();
-      const w=$('#working-elapsed');
-      if(w)w.textContent=elapsed(turnStartedAt());
-    }
-    for(const el of document.querySelectorAll('[data-elapsed-from]'))el.textContent=elapsed(el.dataset.elapsedFrom);
-  },1000);
+  if(live&&!tickTimer)tickTimer=setInterval(updateElapsedNodes,1000);
   else if(!live&&tickTimer){clearInterval(tickTimer);tickTimer=null;}
 }
 
@@ -1004,25 +1010,34 @@ function stopSession(id){
     catch(error){stopping.delete(id);paintActivity(id);if(id===state.sessionId)scheduleChat();throw error;}
   });
 }
-/** Streaming repaints come at most every 55 ms while the window has the focus, and 4 times a second while it sits
- * behind other windows, where nobody reads the text word by word; focusing the window paints at once. */
-function scheduleChat(){
-  if(chatTimer)return;
-  chatTimer=setTimeout(()=>{chatTimer=null;renderChat();renderFooter();},document.hasFocus()?55:250);
+/** Streaming repaints come at most every 80 ms while the window has the focus, 500 ms while unfocused,
+ * and pause while minimized/hidden; returning focus or visibility paints at once. */
+function flushChat(){
+  chatPendingHidden=false;
+  if(chatTimer){clearTimeout(chatTimer);chatTimer=null;}
+  renderChat();renderFooter();
 }
-window.addEventListener('focus',()=>{if(!chatTimer)return;clearTimeout(chatTimer);chatTimer=null;renderChat();renderFooter();});
+function scheduleChat(){
+  if(document.hidden){chatPendingHidden=true;return;}
+  if(chatTimer)return;
+  chatTimer=setTimeout(()=>{chatTimer=null;if(document.hidden){chatPendingHidden=true;return;}renderChat();renderFooter();},document.hasFocus()?80:500);
+}
+window.addEventListener('focus',()=>{if(chatTimer||chatPendingHidden)flushChat();});
 /** Background sessions' status lines follow the same rule; a burst of events behind other windows becomes one paint. */
 const activityDirty=new Set();let activityTimer=null;
 function queueActivity(id){
+  if(document.hidden){activityDirty.add(id);return;}
   if(document.hasFocus()){paintActivity(id);return;}
   activityDirty.add(id);
-  if(!activityTimer)activityTimer=setTimeout(flushActivity,250);
+  if(!activityTimer)activityTimer=setTimeout(flushActivity,500);
 }
 function flushActivity(){clearTimeout(activityTimer);activityTimer=null;const ids=[...activityDirty];activityDirty.clear();for(const id of ids)paintActivity(id);}
-// Behind other windows the status animations pause (style.css): each animation frame costs the GPU process even when
-// nobody looks, and the pulsing dots of a few running sessions kept it at about 6% of a core.
-const markFocus=()=>document.body.classList.toggle('window-inactive',!document.hasFocus());
-window.addEventListener('focus',()=>{markFocus();flushActivity();});window.addEventListener('blur',markFocus);markFocus();
+// Behind other windows or minimized, pause status animations so Chromium's GPU process stays idle.
+const markFocus=()=>document.body.classList.toggle('window-inactive',!document.hasFocus()||document.hidden);
+window.addEventListener('focus',()=>{markFocus();flushActivity();updateElapsedNodes();});
+window.addEventListener('blur',markFocus);
+document.addEventListener('visibilitychange',()=>{markFocus();if(!document.hidden){if(chatPendingHidden||chatTimer)flushChat();flushActivity();updateElapsedNodes();}});
+markFocus();
 
 /* ---------- popover menus ---------- */
 function openMenu(anchor,kind){
@@ -1559,8 +1574,9 @@ function settingsBody(tab){
     const detectorModels=sourceModels.map(m=>({key:m.key,name:seen.get(sourceName(m))>1?`${sourceName(m)} · ${m.id}`:sourceName(m),group:sourceNames[m.source]??m.source}));
     return rulesPageHtml(state.rules,{editing:state.rulesEditing,draft:state.rulesDraft,loading:state.rulesSaving,error:state.rulesError,models:detectorModels});
   }
+  if(tab==='startup')return startupPageHtml(snap.preferences?.startup);
   if(tab==='shortcuts')return`<div class="settings-head"><h1>快捷键</h1></div><dl class="kv">${[['Ctrl + N','新建会话'],['Enter','发送任务'],['Shift + Enter','换行'],['Ctrl + B','收起 / 展开左侧栏'],['Ctrl + Alt + B','收起 / 展开右侧面板'],['Ctrl + J','打开任务与终端'],['Ctrl + S','保存正在编辑的文件'],['Ctrl + ,','打开设置'],['Esc','关闭菜单或设置']].map(([k,v])=>`<dt><kbd>${k}</kbd></dt><dd>${v}</dd>`).join('')}</dl>`;
-  if(tab==='about')return`<div class="settings-head about"><div class="about-mark">${logo(48)}</div><h1>Bridge++</h1><p>把你的模型源接到熟悉的原生 Agent 里，在一个工作区管理会话、变更与文件。</p></div><dl class="kv"><dt>版本</dt><dd>${esc(snap.app.version)}</dd><dt>工作区数据</dt><dd class="mono">${esc(snap.app.dataDir)}</dd><dt>工作文件夹</dt><dd>${snap.projects.length} 个</dd><dt>已保存会话</dt><dd>${snap.sessions.length} 个</dd></dl>${updateSectionHtml(snap.updates)}<div class="note">${icon('info')}<span>Qoder CN 和 WorkBuddy 的 bridge 内置在 Bridge++ 里；要让其他 Agent 使用这两个模型源，请到设置 → 对外接口。</span></div>`;
+  if(tab==='about')return`<div class="settings-head about"><div class="about-mark">${logo(48)}</div><h1>Bridge++</h1><p>把你的模型源接到熟悉的原生 Agent 里，在一个工作区管理会话、变更与文件。</p></div><dl class="kv"><dt>版本</dt><dd>${esc(snap.app.version)}</dd><dt>工作区数据</dt><dd class="mono">${esc(snap.app.dataDir)}</dd><dt>工作文件夹</dt><dd>${snap.projects.length} 个</dd><dt>已保存会话</dt><dd>${snap.sessions.length} 个</dd></dl><div id="about-updates">${updateSectionHtml(snap.updates)}</div><div class="note">${icon('info')}<span>Qoder CN 和 WorkBuddy 的 bridge 内置在 Bridge++ 里；要让其他 Agent 使用这两个模型源，请到设置 → 对外接口。</span></div>`;
   return`<div class="settings-head"><h1>通用</h1><p>界面外观与工作区信息。</p></div>
     <h2>外观</h2><div class="theme-grid">${[['system','monitor','跟随系统'],['light','sun','浅色'],['dark','moon','深色']].map(([id,ico,label])=>`<button class="theme-card${theme===id?' active':''}" data-theme-choice="${id}"><span class="theme-preview ${id}"><i></i><i></i><i></i></span><span class="theme-label">${icon(ico)}${label}</span></button>`).join('')}</div>
     <h2>工作区</h2><dl class="kv"><dt>数据目录</dt><dd class="mono">${esc(snap.app.dataDir)}</dd><dt>工作文件夹</dt><dd>${snap.projects.length} 个</dd><dt>会话</dt><dd>${snap.sessions.filter(s=>!s.archived).length} 个（另有 ${snap.sessions.filter(s=>s.archived).length} 个已归档）</dd><dt>版本</dt><dd>${esc(snap.app.version)}</dd></dl>`;
@@ -1568,7 +1584,7 @@ function settingsBody(tab){
 function renderSettings(){
   const tab=state.settings,el=$('#settings');
   if(!tab||!state.snapshot)return;
-  const nav=[['general','settings','通用'],['sources','layers','模型源'],['runtimes','cpu','运行环境'],['services','plug','对外接口'],['defaults','list','默认搭配'],['rules','bulb','长期要求'],['shortcuts','keyboard','快捷键'],['about','info','关于']];
+  const nav=[['general','settings','通用'],['startup','zap','启动与资源'],['sources','layers','模型源'],['runtimes','cpu','运行环境'],['services','plug','对外接口'],['defaults','list','默认搭配'],['rules','bulb','长期要求'],['shortcuts','keyboard','快捷键'],['about','info','关于']];
   el.innerHTML=`<aside class="settings-nav"><div class="settings-top"><button class="icon-btn" id="close-settings" title="返回 (Esc)">${icon('arrowLeft')}</button><span>设置</span></div>${nav.map(([id,ico,label])=>`<button class="settings-tab${tab===id?' active':''}" data-settings-tab="${id}">${icon(ico)}<span>${label}</span></button>`).join('')}</aside><div class="settings-main"><div class="settings-drag"></div><div class="settings-scroll"><div class="settings-body" id="settings-body">${settingsBody(tab)}</div></div></div>`;
   bind('#catalog-search','input',e=>{state.catalogSearch=e.target.value;$('#model-rows').innerHTML=catalogRows();});
   bind('#catalog-source','change',e=>{state.catalogSource=e.target.value;$('#model-rows').innerHTML=catalogRows();});
@@ -1614,6 +1630,14 @@ function refreshSettingsLive(){
     const grid=$(state.settings==='runtimes'?'#runtime-grid':'#service-grid');
     if(grid)patchHtml(grid,state.settings==='runtimes'?runtimeCards():serviceCardsHtml(state.snapshot.modelServices??[],serviceViews));
     else renderSettings();
+  }else if(state.settings==='about'){
+    const box=$('#about-updates');
+    if(box)patchHtml(box,updateSectionHtml(state.snapshot?.updates));
+    else renderSettings();
+  }else if(state.settings==='startup'){
+    const box=$('#startup-settings');
+    if(box)patchHtml(box,startupSectionsHtml(state.snapshot?.preferences?.startup));
+    else renderSettings();
   }else if(state.settings&&!document.activeElement?.closest('#settings'))renderSettings();
 }
 
@@ -1640,7 +1664,17 @@ function updateSlotHtml(u){
   const sub=failed?`<small class="uc-error" title="${esc(d.error??'')}">下载失败${d.error?`：${esc(d.error)}`:''}</small>`:`<small>${asset?esc(sizeText(asset.size)):'到发布页下载'}</small>`;
   return`<div class="update-card"><span class="uc-icon">${icon('arrowUp')}</span><span class="uc-text"><b>有新版本 V${esc(v)}</b>${sub}</span><button class="btn sm" data-update="${asset?'download':'page'}">${asset?(failed?'重试':'下载'):'查看'}</button></div>`;
 }
-function renderUpdateSlot(){const el=$('#update-slot');if(!el)return;const html=updateSlotHtml(state.snapshot?.updates);if(el.innerHTML!==html)el.innerHTML=html;}
+function renderUpdateSlot(){
+  const el=$('#update-slot');
+  if(!el)return;
+  const html=updateSlotHtml(state.snapshot?.updates);
+  if(html===lastUpdateSlotHtml)return;
+  const hadCard=!!el.firstElementChild;
+  lastUpdateSlotHtml=html;
+  patchHtml(el,html);
+  // Keep the card mounted and settled across progress/state transitions so downloading never replays the entrance animation.
+  if(hadCard&&el.firstElementChild)el.firstElementChild.classList.add('settled');
+}
 /** 设置 › 关于 › 更新: the last check, the download and the auto-download preference. */
 function updateSectionHtml(u){
   if(!u)return'';
@@ -1842,7 +1876,11 @@ async function openSession(id){
     throw error;
   }
   if(token!==sessionEpoch||state.sessionId!==id)return;
-  const ids=new Set(events.map(e=>e.id)),all=[...events,...state.historyLoading.events.filter(e=>!ids.has(e.id))];
+  // Live events that arrived while the history loaded: the backend numbers each event it sends and reports the
+  // last number the history already contains, so streamed text merged into one journal record is neither shown
+  // twice nor dropped. Events without a number (other senders) fall back to their IDs.
+  const history=Array.isArray(events)?events:events?.events??[],seen=Array.isArray(events)?null:events?.liveSeq;
+  const ids=new Set(history.map(e=>e.id)),all=[...history,...state.historyLoading.events.filter(e=>typeof e.liveSeq==='number'&&typeof seen==='number'?e.liveSeq>seen:!ids.has(e.id))];
   state.historyLoading=null;
   for(const e of all)metrics.feed(e);
   activity.replay(id,all);
@@ -2096,6 +2134,16 @@ document.addEventListener('click',e=>{
   if((el=hit('[data-copy-text]'))){const text=el.dataset.copyText;if(text)void action(async()=>{await call('clipboard:write',{text});toast('已复制');});return;}
   if((el=hit('[data-settings-tab]'))){state.settings=el.dataset.settingsTab;renderSettings();return;}
   if((el=hit('[data-theme-choice]'))){void action(async()=>{await call('preference:theme',{theme:el.dataset.themeChoice});await snapshot();renderSettings();});return;}
+  if((el=hit('[data-startup-preset]'))){
+    const preset=el.dataset.startupPreset;
+    void action(async()=>{
+      const next=await call('preference:startup',{preset});
+      if(state.snapshot?.preferences)state.snapshot.preferences.startup=next;
+      refreshSettingsLive();
+      toast(preset==='cold'?'已切换为按需冷启动模式':preset==='balanced'?'已切换为平衡模式':'已切换为全部预启动模式');
+    });
+    return;
+  }
   if((el=hit('[data-refresh-source]'))){
     const source=el.dataset.refreshSource;
     void action(async()=>{
@@ -2275,6 +2323,20 @@ document.addEventListener('change',e=>{
   if(t.matches?.('[data-rules-auto]')){const enabled=t.checked;void action(async()=>{state.rules=await call('rules:auto',{enabled});renderSettings();toast(enabled?'已开启自动记录长期要求':'已关闭自动记录长期要求');});return;}
   if(t.matches?.('[data-rules-detector]')){const model=t.value;t.blur();void action(async()=>{state.rules=await call('rules:detector',{model});renderSettings();toast(model==='deepseek'?'识别改用 DeepSeek Flash':model==='session'?'识别改为跟随会话当前模型':'已更换识别用的模型');});return;}
   if(t.matches?.('[data-update-auto]')){const enabled=t.checked;void action(async()=>{await call('update:auto-download',{enabled});toast(enabled?'已开启自动下载更新包':'已关闭自动下载更新包');await snapshot();refreshSettingsLive();renderUpdateSlot();});return;}
+  if(t.matches?.('[data-startup-toggle]')){
+    const path=t.dataset.startupToggle,enabled=t.checked;
+    void action(async()=>{
+      try{
+        const next=await call('preference:startup',startupPatchFromPath(path,enabled));
+        if(state.snapshot?.preferences)state.snapshot.preferences.startup=next;
+        refreshSettingsLive();
+      }catch(error){
+        t.checked=!enabled;
+        throw error;
+      }
+    });
+    return;
+  }
   if(t.matches?.('[data-svc-autostart]')){const id=t.dataset.svcAutostart,enabled=t.checked;void action(async()=>{try{await call('bridgeService:autostart',{id,enabled});toast(enabled?'已开启开机启动':'已关闭开机启动');}finally{await serviceCall(null,null);}});}
 });
 

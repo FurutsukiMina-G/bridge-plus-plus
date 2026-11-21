@@ -72,24 +72,33 @@ test('request reports contain only enumerated categories and never echo header t
   assert.equal(requestReportKind('codex',true,{'x-claude-code-request-class':'compaction'}),'auxiliary_unknown');
 });
 
-test('the gateway sends only the report category across both Claude hops',async t=>{
+test('the gateway preserves the Claude report category and isolates review lane keys across both hops',async t=>{
   const f=await fixture(t,'claude','session-kind'),seen=[];
   const server=createServer(async(req,res)=>{
-    seen.push(req.headers['x-bridge-request-kind']);
-    for await(const chunk of req)void chunk;
+    const chunks=[];for await(const chunk of req)chunks.push(chunk);
+    const {prompt_cache_key:key,bridge_scope:scope}=JSON.parse(Buffer.concat(chunks));
+    seen.push({kind:req.headers['x-bridge-request-kind'],key,scope});
     res.writeHead(200,{'content-type':'text/event-stream'});
     res.end('data: {"choices":[{"delta":{"content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1}}\n\ndata: [DONE]\n\n');
   });
   await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));
   t.after(()=>new Promise(resolve=>{server.closeAllConnections();server.close(resolve);}));
-  const worker={url:`http://127.0.0.1:${server.address().port}`,key:'fixture',active:0};
-  f.gateway.ensureWorker=async()=>worker;
+  const worker={url:`http://127.0.0.1:${server.address().port}`,key:'fixture',active:0,activity:0};
+  f.gateway.ensureWorker=async(_source,_runtime,{retain})=>{assert.equal(retain,true);f.gateway.workers.retain(worker);return worker;};
   const request={...chat(),model:f.variant,max_tokens:64};
   const review=await f.post('messages',request,{'x-bridge-auxiliary':'1','x-bridge-review':'1'});
   const raw=await f.post('messages',request,{'x-claude-code-request-class':'private-free-text'});
+  for(const lane of ['same-lane','same-lane','rotated-lane'])await f.post('messages',request,{'x-bridge-review':'1','x-bridge-review-lane':lane});
   assert.equal(review.request_kind,'bridge_review');
   assert.equal(raw.request_kind,'claude_auxiliary_unknown');
-  assert.deepEqual(seen,['bridge_review','claude_auxiliary_unknown']);
+  assert.deepEqual(seen.map(row=>row.kind),['bridge_review','claude_auxiliary_unknown','bridge_review','bridge_review','bridge_review']);
+  assert.match(seen[0].key,/^review-once:[a-f0-9]{64}$/);
+  assert.equal(seen[1].key,undefined);
+  assert.match(seen[2].key,/^review:[a-f0-9]{64}$/);
+  assert.equal(seen[2].key,seen[3].key);
+  assert.notEqual(seen[2].key,seen[4].key);
+  assert.equal(new Set(seen.map(row=>row.scope)).size,1);
+  assert.equal(worker.active,0);
 });
 
 test('the Codex responses route states its own intent instead of trusting the converted tool list',async t=>{

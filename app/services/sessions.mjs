@@ -18,11 +18,12 @@ import {failureText,failureValue,runtimeReason} from './failure-details.mjs';
 import {interjectCapability,queuedBatch} from './session-input.mjs';
 import {AgentRules,rulesPrefix} from './agent-rules.mjs';
 import {commandKey,commandView,slashInput,findCommand,commandConflict} from './slash-commands.mjs';
+import {runtimeIdlePolicy} from './startup-preferences.mjs';
 
 const defaults={dsh:DshAdapter,kimi:KimiAcpAdapter,codex:CodexAdapter,claude:ClaudeAdapter,antigravity:AntigravityAdapter};
 export class Sessions {
-  constructor(store,providers,gateway,runtimes,{constructors=defaults,identifyProcess=processIdentity,media,capabilities,runtimeReady,now=Date.now,adapterIdleMs=600000,adapterMaxIdle=4,adapterSweepMs=60000,commandTimeoutMs=15000}={}){
-    this.media=media;this.capabilities=capabilities;this.runtimeReady=runtimeReady;this.now=now;this.adapterIdleMs=adapterIdleMs;this.adapterMaxIdle=adapterMaxIdle;
+  constructor(store,providers,gateway,runtimes,{constructors=defaults,identifyProcess=processIdentity,media,capabilities,runtimeReady,now=Date.now,adapterIdleMs=600000,adapterMaxIdle=4,adapterSweepMs=60000,commandTimeoutMs=15000,startupPolicy=null,dshNativeOpen=()=>false}={}){
+    this.media=media;this.capabilities=capabilities;this.runtimeReady=runtimeReady;this.now=now;this.adapterIdleMs=adapterIdleMs;this.adapterMaxIdle=adapterMaxIdle;this.startupPolicy=startupPolicy;this.dshNativeOpen=dshNativeOpen;this.dshWindowClaims=0;this.dshLastUsed=0;this.recycleSoonTimer=null;this.recycleSoonAt=Infinity;
     this.agentRules=new AgentRules(store,{providers,gateway});
     this.inputLocks=new Map();this.sendingQueue=new Set();this.draining=new Set();
     this.commandTimeoutMs=Math.min(15000,Math.max(1,commandTimeoutMs));this.commandFlights=new Map();this.adapterFlights=new Map();
@@ -30,8 +31,94 @@ export class Sessions {
     for(const session of store.state?.sessions??[])if(Number.isSafeInteger(session.nativeClientPid)&&session.nativeClientPid>0){try{process.kill(session.nativeClientPid,0);this.external.set(session.id,{restoredPid:session.nativeClientPid});}catch(error){if(error.code!=='ESRCH')this.external.set(session.id,{restoredPid:session.nativeClientPid});}}
     if(gateway){gateway.requestContext=id=>this.runs.get(id)?.id;gateway.onUsage=async(id,event,turnId)=>{if(await this.agentRules.acceptUsage(id,event))return;const run=this.runs.get(id);if(!run||run.id!==turnId)return;return this.receive(this.store.session(id),run.adapter,event);};gateway.onSuccess=(id,turnId)=>gateway.onUsage(id,{type:'native-event',source:'gateway',name:'gateway/request-completed'},turnId);}
   }
-  touchAdapter(id){if(this.adapters.has(id))this.adapterUsed.set(id,this.now());}
-  async recycleAdapters(){if(this.closed)return;const candidates=[];for(const [id,adapter]of this.adapters){const session=this.store.session(id),run=this.runs.get(id);if(session.runtimeId==='dsh'||session.runtimeId==='codex'&&session.selection.modelKey==='native'||run||this.external.has(id)||run?.approvals.size||adapter.requests?.size)continue;candidates.push({id,adapter,used:this.adapterUsed.get(id)??0});}candidates.sort((a,b)=>a.used-b.used);const remove=new Set(candidates.filter(row=>this.now()-row.used>this.adapterIdleMs).map(row=>row.id));for(const row of candidates){if(candidates.length-remove.size<=this.adapterMaxIdle)break;remove.add(row.id);}for(const row of candidates)if(remove.has(row.id)&&this.adapters.get(row.id)===row.adapter){this.adapters.delete(row.id);this.adapterUsed.delete(row.id);await row.adapter.close().catch(()=>{});}}
+  touchAdapter(id){
+    if(this.adapters.has(id)){
+      const t=this.now();
+      this.adapterUsed.set(id,t);
+      try{if(this.store.session(id)?.runtimeId==='dsh')this.dshLastUsed=t;}catch{}
+    }
+  }
+  touchDsh(){this.dshLastUsed=this.now();}
+  claimDshWindow(){
+    this.dshWindowClaims++;this.touchDsh();
+    let released=false;
+    return ()=>{if(!released){released=true;this.dshWindowClaims--;this.touchDsh();this.applyStartupPolicy();}};
+  }
+  scheduleQuickRecycle(delayMs){
+    if(this.closed)return;
+    const wait=Math.max(50,Number(delayMs)||0),target=this.now()+wait;
+    if(this.recycleSoonTimer&&this.recycleSoonAt<=target)return;
+    clearTimeout(this.recycleSoonTimer);
+    this.recycleSoonAt=target;
+    this.recycleSoonTimer=setTimeout(()=>{this.recycleSoonTimer=null;this.recycleSoonAt=Infinity;void this.recycleAdapters().catch(()=>{});},wait);
+    this.recycleSoonTimer.unref?.();
+  }
+  isWorkerBusy(source,runtimeId){
+    if(runtimeId==='dsh'&&(this.dshWindowClaims||this.dshNativeOpen()))return true;
+    for(const s of this.store.state.sessions){
+      if(s.runtimeId===runtimeId&&s.selection?.modelKey?.startsWith(source+':')&&this.adapterBusy(s,this.adapters.get(s.id)))return true;
+    }
+    return false;
+  }
+  adapterBusy(session,adapter){
+    const id=session.id;
+    return this.runs.has(id)||this.nativeBusy(id)||this.adapterFlights.has(id)||this.commandFlights.has(id)||
+      this.inputLocks.has(id)||this.draining.has(id)||this.rebinding.has(id)||this.permissionChanging.has(id)||
+      adapter?.requests?.size||session.status==='waiting'||session.selectionNext||session.queue?.length;
+  }
+  applyStartupPolicy(){
+    if(this.closed)return;
+    void this.recycleAdapters().catch(()=>{});
+  }
+  async recycleAdapters(){
+    if(this.closed)return;
+    if(typeof this.startupPolicy!=='function'){
+      const candidates=[];for(const [id,adapter]of this.adapters){const session=this.store.session(id);if(session.runtimeId==='dsh'||session.runtimeId==='codex'&&session.selection.modelKey==='native'||this.adapterBusy(session,adapter))continue;candidates.push({id,adapter,used:this.adapterUsed.get(id)??0});}candidates.sort((a,b)=>a.used-b.used);const remove=new Set(candidates.filter(row=>this.now()-row.used>this.adapterIdleMs).map(row=>row.id));for(const row of candidates){if(candidates.length-remove.size<=this.adapterMaxIdle)break;remove.add(row.id);}for(const row of candidates)if(remove.has(row.id)&&this.canRecycleAdapter(row)){this.adapters.delete(row.id);this.adapterUsed.delete(row.id);await row.adapter.close().catch(()=>{});}
+      return;
+    }
+    const prefs=this.startupPolicy(),now=this.now(),byRuntime=new Map();
+    let nextWake=Infinity;
+    for(const [id,adapter]of this.adapters){
+      const session=this.store.session(id);
+      if(session.runtimeId==='codex'&&session.selection.modelKey==='native'||this.adapterBusy(session,adapter))continue;
+      const list=byRuntime.get(session.runtimeId)??[];
+      list.push({id,adapter,used:this.adapterUsed.get(id)??0});
+      byRuntime.set(session.runtimeId,list);
+    }
+    for(const [runtimeId,candidates]of byRuntime){
+      const policy=runtimeIdlePolicy(prefs,runtimeId);
+      candidates.sort((a,b)=>a.used-b.used);
+      const remove=new Set(candidates.filter(row=>now-row.used>policy.idleMs).map(row=>row.id));
+      if(policy.keepWarm){
+        for(const row of candidates){if(candidates.length-remove.size<=policy.maxIdle)break;remove.add(row.id);}
+      }else{
+        for(const row of candidates)if(!remove.has(row.id))nextWake=Math.min(nextWake,policy.idleMs-(now-row.used)+250);
+      }
+      for(const row of candidates){
+        if(!remove.has(row.id))continue;
+        if(!this.canRecycleAdapter(row))continue;
+        this.adapters.delete(row.id);this.adapterUsed.delete(row.id);
+        await row.adapter.close().catch(()=>{});
+      }
+    }
+    const dshPolicy=runtimeIdlePolicy(prefs,'dsh');
+    if(!this.closed&&!dshPolicy.keepWarm&&this.dsh&&!this.dshWindowClaims&&!this.dshNativeOpen()){
+      const hasDshActivity=this.store.state.sessions.some(s=>s.runtimeId==='dsh'&&(this.adapters.has(s.id)||this.adapterBusy(s)));
+      if(!hasDshActivity){
+        const idle=now-this.dshLastUsed;
+        if(idle>dshPolicy.idleMs){
+          const host=this.dsh;this.dsh=null;
+          const closing=host.close().catch(()=>{});this.dshClosing=closing;
+          try{await closing;}finally{if(this.dshClosing===closing)this.dshClosing=null;}
+        }
+        else nextWake=Math.min(nextWake,dshPolicy.idleMs-idle+250);
+      }
+    }
+    if(Number.isFinite(nextWake))this.scheduleQuickRecycle(nextWake);
+  }
+  canRecycleAdapter({id,adapter,used}){
+    return !this.closed&&this.adapters.get(id)===adapter&&(this.adapterUsed.get(id)??0)===used&&!this.adapterBusy(this.store.session(id),adapter);
+  }
   ensureReady(runtimeId){return assertRuntimeReady(this.runtimes.find(r=>r.id===runtimeId),this.runtimeReady?.(runtimeId));}
   validate(runtimeId,selection){
     if(!selection||typeof selection.modelKey!=='string')throw new Error('请选择模型');
@@ -86,7 +173,9 @@ export class Sessions {
     if(session.runtimeId==='claude')options.configDir=join(this.store.root,'engines/claude-code/config');
     if(session.runtimeId==='dsh'){
       if(!model)throw new Error('DSH 统一会话需选择 Qoder CN 或 WorkBuddy 模型；原生模型可在完整界面使用。');
-      this.dsh??=new DshHost(this.store,runtime,{gateway:this.gateway});options.host=this.dsh;
+      await this.dshClosing;
+      if(run?.cancelled||this.closed)throw new CancelledError();
+      this.dsh??=new DshHost(this.store,runtime,{gateway:this.gateway});this.dshLastUsed=this.now();options.host=this.dsh;
     }
     adapter=new this.constructors[session.runtimeId](options);this.adapters.set(session.id,adapter);this.touchAdapter(session.id);return adapter;
   }
@@ -243,6 +332,7 @@ export class Sessions {
     }finally{
     if(this.runs.get(session.id)===run)this.runs.delete(session.id);
     if(['completed','paused'].includes(status))this.touchAdapter(session.id);if(!['completed','paused'].includes(status)&&!(status==='interrupted'&&event.retainAdapter===true)&&this.adapters.get(session.id)===run.adapter){this.adapters.delete(session.id);this.adapterUsed.delete(session.id);void run.adapter?.close().catch(()=>{});}
+    if(typeof this.startupPolicy==='function'&&!session.queue?.length){const policy=runtimeIdlePolicy(this.startupPolicy(),session.runtimeId);if(!policy.keepWarm)this.scheduleQuickRecycle(policy.idleMs+500);}
     // A queued selection is applied before any queued message starts the next turn.
     if(session.selectionNext){
       const queued={...session.selectionNext};delete queued.requestedAt;await this.store.mutate(()=>{delete session.selectionNext;});
@@ -484,8 +574,8 @@ export class Sessions {
   async close(){
     this.closed=true;
     await this.agentRules.close();
-    this.closed=true;clearInterval(this.adapterTimer);this.adapterTimer=null;await Promise.all([...this.runs.keys()].map(id=>this.cancel(id).catch(()=>{})));
+    this.closed=true;clearInterval(this.adapterTimer);this.adapterTimer=null;clearTimeout(this.recycleSoonTimer);this.recycleSoonTimer=null;await Promise.all([...this.runs.keys()].map(id=>this.cancel(id).catch(()=>{})));
     await Promise.allSettled([...this.inputLocks.values()]);
-    await Promise.all([...this.adapters.values()].map(a=>a.close().catch(()=>{})));this.adapters.clear();this.adapterUsed.clear();await this.dsh?.close();
+    await Promise.all([...this.adapters.values()].map(a=>a.close().catch(()=>{})));this.adapters.clear();this.adapterUsed.clear();await this.dshClosing;await this.dsh?.close();
   }
 }

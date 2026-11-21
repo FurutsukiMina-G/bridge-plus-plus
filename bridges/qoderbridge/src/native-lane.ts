@@ -196,7 +196,7 @@ export class NativeLane{
     session.pendingHandlers=[];session.inbox.close();this.closeRuntime(session.runtime);
   }
   closeIdleForCapacity(){
-    const rows=[...this.sessions.values()].filter(s=>!s.busy).sort((a,b)=>Number(a.state==='awaiting')-Number(b.state==='awaiting')||a.touched-b.touched);
+    const rows=[...this.sessions.values()].filter(s=>!s.busy&&s.state!=='awaiting').sort((a,b)=>a.touched-b.touched);
     if(rows[0]){this.close(rows[0]);return true;}return false;
   }
   sweepIdle(){

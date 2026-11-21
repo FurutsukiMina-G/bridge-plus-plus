@@ -11,7 +11,7 @@ import {DECISION_INSTRUCTIONS,decisionInput,compileTools,safeToolName,decisionIs
 import {DecisionOutput} from './decision-output.mjs';
 import {BridgeError,publicError} from './errors.mjs';
 import {runtimePath} from './contain.mjs';
-import {ContextPool,digest,abortable} from './context.mjs';
+import {ContextPool,digest,abortable,reviewClientKey} from './context.mjs';
 import {FinalTextProjector} from './streaming.mjs';
 import {normalizedUsage,requestUsage,replayUsage,addSdkUsage,usageAccounting} from './usage.mjs';
 import {correctionInput} from './recovery.mjs';
@@ -87,17 +87,17 @@ export class SdkTransport {
     this.pendingSlots=0;this.slotAllocation=Promise.resolve();
     this.blankSlots=new BlankWarmSlots(Math.max(cfg.maxBlankWarm??0,cfg.nativeWarmLimit??1));
     this.hold=new HoldLane(cfg,(binding)=>openHoldRuntime(cfg,binding,this.hold,createSession,(body,credential,dir,controller)=>sdkOptions(cfg,credential,body,dir,controller,()=>{})),runtime=>runtime.close(),()=>this.reserveSlot(),this.blankSlots);
-    this.cfg=cfg;this.auth=auth;this.run=run;this.pool=new ContextPool(cfg);this.pool.externalMakeRoom=()=>this.reserveSlot();this.failures=new Map();
+    this.cfg=cfg;this.auth=auth;this.run=run;this.pool=new ContextPool(cfg);this.pool.externalMakeRoom=review=>this.reserveSlot(review);this.failures=new Map();
     this.warm=new WarmRuntimes({ttlMs:cfg.resumePrewarmMs??cfg.prewarmMs??0,max:cfg.maxWarm??4});this.pool.onRemove=record=>this.warm.discard(record.id);
     this.blank=new WarmRuntimes({ttlMs:cfg.prewarmMs??0,max:cfg.maxBlankWarm??0});this.blankPending=new Set();
     this.metrics={started:0,completed:0,deniedTools:0,hostCalls:0,decodedDsml:0,replays:0,correctionCalls:0,recoveredRequests:0,localDecisionRepairs:0,lastFailure:null,warm:this.warm.stats,blankWarm:this.blank.stats};
   }
-  async reserveSlot(){
+  async reserveSlot(review=false){
     const previous=this.slotAllocation;let unlock;this.slotAllocation=new Promise(resolve=>{unlock=resolve;});await previous;
     try{
       while(this.pool.records.size+this.hold.sessions.size+this.pendingSlots>=(this.cfg.maxSessions??24)){
-        const idle=[...this.pool.records.values()].filter(r=>!r.busy).sort((a,b)=>a.touched-b.touched)[0];
-        if(idle)await this.pool.remove(idle);else if(!this.hold.closeIdleForCapacity()){
+        const idle=[...this.pool.records.values()].filter(r=>!r.busy&&(!review||reviewClientKey(r.clientKey))).sort((a,b)=>Number(reviewClientKey(b.clientKey))-Number(reviewClientKey(a.clientKey))||a.touched-b.touched)[0];
+        if(idle)await this.pool.remove(idle);else if(review||!this.hold.closeIdleForCapacity()){
           const counts=this.hold.capacity();counts.busy+=this.pendingSlots+[...this.pool.records.values()].filter(r=>r.busy).length;
           throw new BridgeError(429,'sessions_busy',`All context slots are active (busy=${counts.busy}, awaiting=${counts.awaiting}, idle=${counts.idle})`,counts);
         }
@@ -471,7 +471,10 @@ export class SdkTransport {
             send(safe.body);
           }finally{
             controller.abort();signal.removeEventListener('abort',abort);
-            if(!success&&signal.aborted){record.cancelled=true;record.sessionId=null;}else if(!success||!record.sessionId)await lease.discard();lease.release();
+            if(body.bridge_scope&&body.prompt_cache_key?.startsWith('review-once:')&&reviewClientKey(body.prompt_cache_key))await lease.discard();
+            else if(!success&&signal.aborted){record.cancelled=true;record.sessionId=null;}
+            else if(!success||!record.sessionId)await lease.discard();
+            lease.release();
             if(!closed){closed=true;sink.close();}
             if(prewarmNext)this.prewarm(record,body,credential,native);
             if(success&&blankKey){

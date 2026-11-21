@@ -4,13 +4,14 @@ import {randomUUID} from 'node:crypto';
 import {EventEmitter} from 'node:events';
 import {createReadStream} from 'node:fs';
 import {createInterface} from 'node:readline';
-import {isThinkingTicker,foldThinkingTicker} from '../services/session-events.mjs';
+import {isThinkingTicker,foldThinkingTicker,plainStreamChunk,sameStreamChunk,coalesceSessionEvents} from '../services/session-events.mjs';
+import {normalizeStartupPreferences,STARTUP_PREFERENCES_VERSION} from '../services/startup-preferences.mjs';
 
 const object=value=>value&&typeof value==='object'&&!Array.isArray(value);
 // Persisted update bookkeeping is descriptive only: malformed or outdated rows
 // fall back to "nothing known" instead of failing the whole workspace.
 function updateState(value){
-  const source=object(value)?value:{},version=value=>typeof value==='string'&&/^\d+\.\d+\.\d+$/.test(value)?value:null;
+  const source=object(value)?value:{},version=value=>typeof value==='string'&&/^\d+\.\d+\.\d+(?:-r\d+)?$/.test(value)?value:null;
   const latest=object(source.latest)&&version(source.latest.version)?{
     version:version(source.latest.version),
     tag:typeof source.latest.tag==='string'?source.latest.tag:'v'+source.latest.version,
@@ -34,14 +35,15 @@ function updateState(value){
 const validId=id=>typeof id==='string'&&/^[a-zA-Z0-9][a-zA-Z0-9_-]{0,127}$/.test(id);
 function workspaceState(text){
   const value=JSON.parse(text.replace(/^\uFEFF/,''));
-  if(value.version!==1||!Array.isArray(value.projects)||!Array.isArray(value.sessions)||value.sessions.some(s=>!validId(s?.id)))throw new Error('Unsupported workspace state');
+  if(!value||typeof value!=='object'||value.version!==1||!Array.isArray(value.projects)||!Array.isArray(value.sessions)||value.sessions.some(s=>!validId(s?.id)))throw new Error('Unsupported workspace state');
   return value;
 }
 export class Store extends EventEmitter {
-  constructor(root,{streamFlushMs=1000,streamFlushBytes=4096}={}){
-    super();this.root=root;this.file=join(root,'workspace.json');this.backupFile=join(root,'workspace.backup.json');this.persisted=null;this.recovery=null;this.queue=Promise.resolve();this.handles=new Map();this.closed=false;
+  constructor(root,{streamFlushMs=1000,streamFlushBytes=4096,publishStreamMs=0}={}){
+    super();this.root=root;this.file=join(root,'workspace.json');this.backupFile=join(root,'workspace.backup.json');this.persisted=null;this.persistedPopulated=false;this.recovery=null;this.queue=Promise.resolve();this.handles=new Map();this.closed=false;
     this.contexts=new Map();this.state={version:1,projects:[],sessions:[],catalog:{},preferences:{modelDefaults:{},runtimes:{},theme:'dark',autoDownloadUpdates:false},updates:{lastCheckDay:null,checkedAt:null,latest:null,downloaded:null}};
     this.streamBuffers=new Map();this.streamFlushMs=streamFlushMs;this.streamFlushBytes=streamFlushBytes;this.thinkingTotals=new Map();
+    this.publishStreamMs=publishStreamMs;this.liveStreams=new Map();this.liveSequences=new Map();
   }
   async open(){
     await mkdir(join(this.root,'sessions'),{recursive:true});
@@ -60,19 +62,20 @@ export class Store extends EventEmitter {
         throw new Error(detail+`请从备份 ${this.backupFile} 恢复索引；操作前请先复制现有文件。`);
       }
     }
-    if(value){this.state=value;this.persisted=raw;}
+    if(value){this.state=value;this.persisted=raw;this.persistedPopulated=value.sessions.length>0;}
     this.state.catalog=object(this.state.catalog)?this.state.catalog:{};
     this.state.preferences=object(this.state.preferences)?this.state.preferences:{};
     this.state.preferences.modelDefaults=object(this.state.preferences.modelDefaults)?this.state.preferences.modelDefaults:{};
     this.state.preferences.runtimes=object(this.state.preferences.runtimes)?this.state.preferences.runtimes:{};
     this.state.preferences.autoDownloadUpdates=this.state.preferences.autoDownloadUpdates===true;
+    if(!object(this.state.preferences.startup)||this.state.preferences.startup.version!==STARTUP_PREFERENCES_VERSION)delete this.state.preferences.startup;
     this.state.updates=updateState(this.state.updates);
     for(const session of this.state.sessions)if(['running','waiting','starting','stopping'].includes(session.status))session.status='interrupted';
     for(const catalog of Object.values(this.state.catalog))if(catalog?.status==='loading'){catalog.status='error';catalog.error='上次目录查询已中断，请刷新。';}
     await this.save();return this;
   }
   enqueue(task){this.saveBatch=null;if(this.closed)return Promise.reject(new Error('Workspace store closed'));const next=this.queue.then(task);this.queue=next.catch(()=>{});return next;}
-  snapshot(){return structuredClone(this.state);}
+  snapshot(){const snapshot=structuredClone(this.state);snapshot.preferences.startup=normalizeStartupPreferences(snapshot.preferences.startup);return snapshot;}
   async save(){
     if(this.closed)throw new Error('Workspace store closed');
     const content=JSON.stringify(this.state),next=workspaceState(content);
@@ -83,14 +86,13 @@ export class Store extends EventEmitter {
     const batch={content,populated};
     batch.done=this.enqueue(async()=>{
       if(this.saveBatch===batch)this.saveBatch=null;
-      if(this.persisted!==null){
-        if(!populated&&workspaceState(this.persisted).sessions.length)throw new Error('Refusing to replace a populated session index with an empty workspace');
-      }
+      if(!populated&&this.persistedPopulated)throw new Error('Refusing to replace a populated session index with an empty workspace');
       if(this.copiesCurrent&&batch.content===this.persisted)return;
       this.copiesCurrent=false;
       // Both files hold the latest validated metadata, including a just-created
       // native session ID. Never roll back that ID to a prior null value.
       await this.writeSnapshot(this.backupFile,batch.content);
+      this.persistedPopulated=populated;
       await this.writeSnapshot(this.file,batch.content);this.persisted=batch.content;
       this.copiesCurrent=true;
     });
@@ -138,6 +140,7 @@ export class Store extends EventEmitter {
       this.thinkingTotals.set(sessionId,total);return null;
     }
     const value={...event,id:event.type==='media'&&validId(event.id)?event.id:randomUUID(),at:new Date().toISOString(),sessionId};
+    delete value.liveSeq;
     if(value.type==='usage'&&object(value.data)&&value.data.thinking_token_estimate===undefined){
       const total=this.thinkingTotals.get(sessionId);
       if(total&&total.total>0)value.data={...value.data,thinking_token_estimate:total.total};
@@ -145,37 +148,79 @@ export class Store extends EventEmitter {
     // The estimate belongs to the turn that produced it; the next turn starts from zero.
     if(value.type==='turn-end')this.thinkingTotals.delete(sessionId);
     await this.enqueue(async()=>{
-      // Merge only plain text chunks; a native payload (data) keeps one record per event.
-      const stream=(['thinking','text'].includes(value.type)||value.type==='tool-output'&&value.data===undefined)&&typeof value.text==='string',prior=this.streamBuffers.get(sessionId);
-      const same=stream&&prior&&['type','attemptId','turnId','itemId','toolId'].every(key=>prior.value[key]===value[key]);
-      if(prior&&!same)await this.flushStream(sessionId);
-      if(!stream){await this.writeEvent(sessionId,value);return;}
-      const current=this.streamBuffers.get(sessionId);
-      if(current){current.parts.push(value.text);current.bytes+=Buffer.byteLength(value.text);}
-      else{
-        const timer=setTimeout(()=>{void this.enqueue(()=>this.flushStream(sessionId)).catch(error=>this.emit('event',{type:'error',source:'journal',sessionId,id:randomUUID(),at:new Date().toISOString(),text:'会话记录无法保存：'+error.message}));},this.streamFlushMs);timer.unref();
-        this.streamBuffers.set(sessionId,{value,parts:[value.text],bytes:Buffer.byteLength(value.text),timer});
+      const stream=plainStreamChunk(value)&&(!this.publishStreamMs||value.type!=='tool-output'||Boolean(value.toolId));
+      const batch=this.liveStreams.get(sessionId);
+      if(batch&&(!stream||!sameStreamChunk(batch.value,value)))await this.flushLiveStream(sessionId);
+      const journal=this.streamBuffers.get(sessionId);
+      if(journal&&(!stream||!sameStreamChunk(journal.value,value)))await this.flushStream(sessionId);
+      if(stream){
+        if(this.publishStreamMs){
+          const live=this.bufferChunk(this.liveStreams,sessionId,value,()=>this.flushLiveStream(sessionId),this.publishStreamMs);
+          if(live.bytes>=this.streamFlushBytes)await this.flushLiveStream(sessionId);
+        }else await this.recordStream(sessionId,value);
+      }else{
+        await this.writeEvent(sessionId,value);
+        this.emitLive(value);
       }
-      if(this.streamBuffers.get(sessionId).bytes>=this.streamFlushBytes)await this.flushStream(sessionId);
     });
-    this.emit('event',value);return value;
+    return value;
+  }
+  emitLive(value){
+    const liveSeq=(this.liveSequences.get(value.sessionId)??0)+1;
+    this.liveSequences.set(value.sessionId,liveSeq);
+    this.emit('event',{...value,liveSeq});
   }
   async writeEvent(sessionId,value){
     const handle=await this.journal(sessionId);await handle.write(JSON.stringify(value)+'\n');const context=this.contexts.get(sessionId);if(context){if(value.type==='user')context.users.push(value.text);if(value.type==='plan')context.plan=value.data;}
   }
+  bufferChunk(buffers,sessionId,value,flush,ms){
+    let buffer=buffers.get(sessionId);
+    if(!buffer){
+      buffer={value,parts:[],bytes:0};
+      buffer.timer=this.streamTimer(sessionId,()=>buffers.get(sessionId)===buffer?flush():undefined,ms);
+      buffers.set(sessionId,buffer);
+    }
+    buffer.parts.push(value.text);buffer.bytes+=Buffer.byteLength(value.text);
+    return buffer;
+  }
+  async recordStream(sessionId,value,liveBatch){
+    const journal=this.bufferChunk(this.streamBuffers,sessionId,value,()=>this.flushStream(sessionId),this.streamFlushMs);
+    if(liveBatch){clearTimeout(liveBatch.timer);this.liveStreams.delete(sessionId);}
+    // The sequence and the journal-buffer insertion share one queue task.
+    this.emitLive(value);
+    if(journal.bytes>=this.streamFlushBytes)await this.flushStream(sessionId);
+  }
+  async flushLiveStream(sessionId){
+    const batch=this.liveStreams.get(sessionId);
+    if(batch)await this.recordStream(sessionId,{...batch.value,text:batch.parts.join('')},batch);
+  }
+  streamTimer(sessionId,flush,ms){
+    const timer=setTimeout(()=>{void this.enqueue(flush).catch(error=>this.emit('event',{type:'error',source:'journal',sessionId,id:randomUUID(),at:new Date().toISOString(),text:'会话记录无法保存：'+error.message}));},ms);
+    timer.unref();return timer;
+  }
   async flushStream(sessionId){
     const buffer=this.streamBuffers.get(sessionId);if(!buffer)return;
-    clearTimeout(buffer.timer);await this.writeEvent(sessionId,{...buffer.value,text:buffer.parts.join('')});this.streamBuffers.delete(sessionId);
+    clearTimeout(buffer.timer);
+    await this.writeEvent(sessionId,{...buffer.value,text:buffer.parts.join('')});
+    this.streamBuffers.delete(sessionId);
   }
-  flush(){return this.enqueue(async()=>{for(const id of this.streamBuffers.keys())await this.flushStream(id);});}
-  events(id){
+  flush(){return this.enqueue(async()=>{
+    for(const id of this.liveStreams.keys())await this.flushLiveStream(id);
+    for(const id of this.streamBuffers.keys())await this.flushStream(id);
+  });}
+  events(id,{display=false}={}){
     this.session(id);
-    return this.enqueue(async()=>{await this.flushStream(id);await this.journal(id);return (await readFile(join(this.root,'sessions',id+'.jsonl'),'utf8')).split('\n').filter(Boolean).map(line=>JSON.parse(line));});
+    return this.enqueue(async()=>{
+      await this.flushLiveStream(id);await this.flushStream(id);await this.journal(id);
+      const liveSeq=this.liveSequences.get(id)??0;
+      const events=(await readFile(join(this.root,'sessions',id+'.jsonl'),'utf8')).split('\n').filter(Boolean).map(line=>JSON.parse(line));
+      return display?{events:coalesceSessionEvents(events),liveSeq}:events;
+    });
   }
   taskContext(id){
     this.session(id);
     return this.enqueue(async()=>{
-      await this.flushStream(id);
+      await this.flushLiveStream(id);await this.flushStream(id);
       if(!this.contexts.has(id)){
         await this.journal(id);const context={users:[],plan:null};
         const lines=createInterface({input:createReadStream(join(this.root,'sessions',id+'.jsonl'),{encoding:'utf8'}),crlfDelay:Infinity});

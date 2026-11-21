@@ -6,7 +6,7 @@ import { InputQueue } from './queue.js';
 import { selectModel } from './model.js';
 import { Telemetry, safeError } from './telemetry.js';
 import { type ChatRequest, type Decision, type DecisionRepair, conversationPrompt, conversationMessages, parseDecision, toolDefinitions } from './compat.js';
-import { hasConversationPrefix, routeConversation, prefixIssue,evictionCandidate,prunedConversationPrefix } from './routing.js';
+import { hasConversationPrefix, routeConversation, prefixIssue,evictionCandidate,prunedConversationPrefix,reviewClientKey } from './routing.js';
 import {pruningThreshold,pruningAllowed} from './history-pruning.js';
 import { abortable } from './async.js';
 import { qoderUpstreamIdleTimeout, upstreamSilence } from './timeouts.js';
@@ -134,7 +134,7 @@ export class QoderPool {
     if(this.closed||Date.now()-this.lastBlankDemand>=blankWarmDemandMs||!blankWarmLimit||!this.primeNext())return;
     while(1+this.extraWarm.length<blankWarmLimit){const extra=this.newWarm();if(!extra)break;this.extraWarm.push(extra);}
   }
-  private oneShot(request:ChatRequest){return !hasUsableTools(request)&&!request.prompt_cache_key&&request.messages.length===2&&request.messages[0]?.role==='system'&&request.messages[1]?.role==='user'&&request.messages.every(m=>typeof m.content==='string');}
+  private oneShot(request:ChatRequest){return !hasUsableTools(request)&&(!request.prompt_cache_key||request.bridge_scope&&request.prompt_cache_key.startsWith('review-once:')&&reviewClientKey(request.prompt_cache_key))&&request.messages.length===2&&request.messages[0]?.role==='system'&&request.messages[1]?.role==='user'&&request.messages.every(m=>typeof m.content==='string');}
   private async cache(){
     if(!this.config.isolationCacheDir)return null;
     this.cacheReady??=IsolationCache.open(this.config.isolationCacheDir,this.config.sessionSettings??'{}',this.config.cliPath,this.config.isolationRuntimeIdentity).then(cache=>{
@@ -237,11 +237,14 @@ export class QoderPool {
     // A failed startup prewarm (e.g. network not ready at logon) retries until the runtime is reachable.
     if (this.prewarmError && !this.nextWarm) this.replenish();
   }
-  private sweep(scope?:string) {
+  private sweep(scope?:string,review=false) {
     this.sweepIdle();
     const active=[...this.sessions.values()].filter(r=>!r.nativeReleased);
     if (active.length+this.native.stats().sessions+this.pendingSlots < MAX_SESSIONS) return;
     for(const r of this.sessions.values())if(r.nativeReleased&&!r.busy)this.close(r);
+    const disposable=active.filter(r=>!r.busy&&reviewClientKey(r.clientKey)).sort((a,b)=>a.touched-b.touched)[0];
+    if(disposable){this.close(disposable);return;}
+    if(review)throw new Error('No QoderBridge review slot is available');
     this.native.closeIdleForCapacity();
     if([...this.sessions.values()].filter(r=>!r.nativeReleased).length+this.native.stats().sessions+this.pendingSlots<MAX_SESSIONS)return;
     const oldest = evictionCandidate([...this.sessions.values()].filter(r=>!r.nativeReleased),scope);
@@ -284,7 +287,11 @@ export class QoderPool {
     finally { if (key && this.openingByClient.get(key) === created) this.openingByClient.delete(key); }
   }
   private async acquireNew(request: ChatRequest) {
-    this.sweep(request.bridge_scope);
+    const review=typeof request.bridge_scope==='string'&&reviewClientKey(request.prompt_cache_key);
+    if(review&&request.prompt_cache_key?.startsWith('review:')){
+      for(const row of this.sessions.values())if(!row.busy&&row.bridgeScope===request.bridge_scope&&row.clientKey?.startsWith('review:')&&reviewClientKey(row.clientKey))this.close(row);
+    }
+    this.sweep(request.bridge_scope,review);
     this.lastBlankDemand=Date.now();
     this.pendingSlots++;
     try{
@@ -560,8 +567,9 @@ export class QoderPool {
         record.replayMessages=request.messages;
       }
       if (decision) {
-        record.replayMessages=undefined;
-        record.messages = request.messages;
+        const appendReviewReply=decision.kind==='final'&&request.bridge_scope&&request.prompt_cache_key?.startsWith('review:')&&reviewClientKey(request.prompt_cache_key);
+        record.replayMessages=appendReviewReply?request.messages:undefined;
+        record.messages=appendReviewReply&&decision.kind==='final'?[...request.messages,{role:'assistant',content:decision.content}]:request.messages;
         record.toolSignature = toolSignature;
         record.retryHint = null;
         record.retryMessageHash = null;

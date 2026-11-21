@@ -259,3 +259,79 @@ test('auto-review maps to acceptEdits and falls back like ask on older CLIs',asy
   assert.match(description,/由当前模型审查/);
   assert.equal(legacy.modes.find(mode=>mode.id==='auto-review').native.mode,'default');
 });
+
+test('reviewer reuses a bounded session-scoped lane on allow and resets/rotates on deny, ask, error, or limit',async()=>{
+  const calls=[];
+  let nextReply='{"decision":"allow","risk":"low","reason":"读取项目文件"}';
+  const reviewer=createClaudeReviewer({endpoint,model:'synthetic-model',maxTurns:2,fetch:async(_url,init)=>{
+    calls.push({headers:init.headers,body:JSON.parse(init.body)});
+    return reply(nextReply);
+  }});
+  // First two allows share one lane and grow the conversation prefix cleanly.
+  await reviewer.review({tool_name:'Read',input:{file_path:'a.js'}},{project});
+  await reviewer.review({tool_name:'Read',input:{file_path:'b.js'}},{project});
+  assert.equal(calls.length,2);
+  const lane1=calls[0].headers['x-bridge-review-lane'];
+  assert.match(lane1,/^[a-f0-9]{16}$/);
+  assert.equal(calls[1].headers['x-bridge-review-lane'],lane1);
+  assert.equal(calls[0].body.messages.length,1);
+  assert.equal(calls[1].body.messages.length,3);
+  assert.equal(calls[1].body.messages[1].role,'assistant');
+  // Third call exceeds maxTurns=2 and rotates to a fresh lane with 1 message.
+  await reviewer.review({tool_name:'Read',input:{file_path:'c.js'}},{project});
+  const lane2=calls[2].headers['x-bridge-review-lane'];
+  assert.notEqual(lane2,lane1);
+  assert.equal(calls[2].body.messages.length,1);
+  // A deny verdict resets history and rotates the lane for the following call.
+  nextReply='{"decision":"deny","risk":"high","reason":"拒绝敏感操作"}';
+  assert.equal((await reviewer.review({tool_name:'Bash',input:{command:'cat .env'}},{project})).decision,'deny');
+  assert.equal(calls[3].headers['x-bridge-review-lane'],lane2);
+  nextReply='{"decision":"allow","risk":"low","reason":"读取安全文件"}';
+  await reviewer.review({tool_name:'Read',input:{file_path:'d.js'}},{project});
+  const lane3=calls[4].headers['x-bridge-review-lane'];
+  assert.notEqual(lane3,lane2);
+  assert.equal(calls[4].body.messages.length,1);
+});
+
+test('concurrent review calls run statelessly without sharing or corrupting the active lane',async()=>{
+  const calls=[];let releaseFirst;
+  const reviewer=createClaudeReviewer({endpoint,model:'synthetic-model',fetch:async(_url,init)=>{
+    const entry={headers:init.headers,body:JSON.parse(init.body)};
+    calls.push(entry);
+    if(calls.length===1)await new Promise(resolve=>{releaseFirst=resolve;});
+    return reply('{"decision":"allow","risk":"low","reason":"允许"}');
+  }});
+  const first=reviewer.review({tool_name:'Read',input:{file_path:'first.js'}},{project});
+  await waitFor(()=>calls.length===1);
+  const second=reviewer.review({tool_name:'Read',input:{file_path:'second.js'}},{project});
+  await waitFor(()=>calls.length===2);
+  assert.ok(calls[0].headers['x-bridge-review-lane']);
+  assert.equal(calls[1].headers['x-bridge-review-lane'],undefined);
+  assert.equal(calls[1].body.messages.length,1);
+  releaseFirst();
+  await Promise.all([first,second]);
+  await reviewer.review({tool_name:'Read',input:{file_path:'third.js'}},{project});
+  assert.equal(calls[2].headers['x-bridge-review-lane'],calls[0].headers['x-bridge-review-lane']);
+  assert.equal(calls[2].body.messages.length,3);
+});
+
+test('truncated input invalidates in-flight history and a truncated model answer cannot allow',async()=>{
+  const calls=[],allow='{"decision":"allow","risk":"low","reason":"允许"}';
+  let release;
+  const wait=new Promise(resolve=>{release=resolve;});
+  const reviewer=createClaudeReviewer({endpoint,model:'synthetic-model',fetch:async(_url,init)=>{
+    calls.push({lane:init.headers['x-bridge-review-lane'],messages:JSON.parse(init.body).messages});
+    if(calls.length===1)await wait;
+    return {ok:true,json:async()=>({content:[{type:'text',text:allow}],stop_reason:calls.length===3?'max_tokens':'end_turn'})};
+  }});
+  const review=file_path=>reviewer.review({tool_name:'Read',input:{file_path}},{project});
+  const first=review('first.js');
+  assert.equal((await review('a'.repeat(5000))).decision,'ask');
+  release();assert.equal((await first).decision,'allow');
+  assert.equal((await review('third.js')).decision,'ask');
+  assert.equal((await review('fourth.js')).decision,'allow');
+  assert.equal(calls[1].lane,undefined);
+  assert.notEqual(calls[2].lane,calls[0].lane);
+  assert.notEqual(calls[3].lane,calls[2].lane);
+  assert.deepEqual(calls.map(call=>call.messages.length),[1,1,1,1]);
+});

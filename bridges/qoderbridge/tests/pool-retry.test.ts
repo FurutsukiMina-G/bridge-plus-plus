@@ -46,3 +46,41 @@ test('a rejected model decision keeps the Harness message pending for the next r
   assert.match(prompts[1]!, /preceding model decision was rejected/);
   assert.equal(record.messages.length, 1);
 });
+
+test('review lanes send only the next user delta and yield capacity before main lanes',async()=>{
+  const pool=new QoderPool({auth:'cli',timeout:3000,strategy:'permission',system:'fixture',decisionRetries:0,blankWarmLimit:0,nativeWarmLimit:0});
+  const reply='{"decision":"allow","risk":"low","reason":"fixture"}',prompts:string[]=[];
+  let opens=0;
+  const fake=pool as unknown as {open:()=>Promise<unknown>};
+  fake.open=async()=>{
+    const id=String(++opens);let phase=0;
+    return {id,queue:{push:(item:{message:{content:string}})=>prompts.push(item.message.content),close(){}},
+      q:{next:async()=>phase++%2===0?{done:false,value:{type:'assistant',message:{id:`m${id}-${phase}`,model:'dfmodel',content:[{type:'text',text:reply}],usage:{input_tokens:0,output_tokens:0,credits:0.1}}}}:
+        {done:false,value:{type:'result',subtype:'success',is_error:false,total_credits:phase*0.1,modelUsage:{},usage:{},duration_ms:20,duration_api_ms:15}}},
+      messages:[],touched:Date.now(),locked:Promise.resolve(),lastCredits:null,model:'dfmodel',busy:0,
+      toolSignature:null,policyCalls:[],warm:{close(){}},controller:new AbortController()};
+  };
+  const reviewKey=(value:string)=>'review:'+value.repeat(64);
+  const first=(scope:string,key:string,text:string)=>ChatRequest.parse({model:'qoder-deepseek-flash',bridge_scope:scope,prompt_cache_key:key,messages:[{role:'system',content:'fixture'},{role:'user',content:text}]});
+  try{
+    for(let i=0;i<4;i++){
+      await pool.infer(first('scope'+i,'main','main '+i));
+      await pool.infer(first('scope'+i,reviewKey(String(i)),'review '+i));
+    }
+    assert.equal(opens,8);
+    const recent=first('scope3',reviewKey('3'),'review 3');
+    const next=await pool.infer({...recent,messages:[...recent.messages,{role:'assistant',content:reply},{role:'user',content:'new review'}]});
+    assert.equal(next.report.history_mode,'delta');assert.equal(next.report.sent_message_count,1);assert.equal(opens,8);
+    assert.match(prompts.at(-1)!,/new review/);assert.doesNotMatch(prompts.at(-1)!,/review 3|decision/);
+    await pool.infer(first('scope0','subagent','subagent'));
+    assert.equal(opens,9);
+    for(let i=0;i<4;i++){
+      const main=first('scope'+i,'main','main '+i);
+      const continued=await pool.infer({...main,messages:[...main.messages,{role:'assistant',content:reply},{role:'user',content:'continue main '+i}]});
+      assert.equal(continued.report.history_mode,'delta');
+    }
+    assert.equal(opens,9);
+    await pool.infer(first('scope3',reviewKey('4'),'rotated review'));
+    assert.equal(pool.stats().sessions,8);
+  }finally{pool.closeAll();}
+});

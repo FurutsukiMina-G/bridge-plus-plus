@@ -1514,13 +1514,13 @@ function cleanArray(array) {
   for (let index = 0; index < array.length; index++) if (!objectHasOwnProperty(array, index)) array[index] = null;
   return array;
 }
-function clone(object) {
+function clone(object2) {
   const newObject = create(null);
-  for (const _ref2 of entries(object)) {
+  for (const _ref2 of entries(object2)) {
     var _ref3 = _slicedToArray(_ref2, 2);
     const property = _ref3[0];
     const value = _ref3[1];
-    if (objectHasOwnProperty(object, property)) {
+    if (objectHasOwnProperty(object2, property)) {
       if (arrayIsArray(value)) newObject[property] = cleanArray(value);
       else if (value && typeof value === "object" && value.constructor === Object) newObject[property] = clone(value);
       else newObject[property] = value;
@@ -1557,25 +1557,25 @@ function stringifyValue(value) {
       return objectToString(value);
   }
 }
-function lookupGetter(object, prop) {
-  while (object !== null) {
-    const desc = getOwnPropertyDescriptor(object, prop);
+function lookupGetter(object2, prop) {
+  while (object2 !== null) {
+    const desc = getOwnPropertyDescriptor(object2, prop);
     if (desc) {
       if (desc.get) return unapply(desc.get);
       if (typeof desc.value === "function") return unapply(desc.value);
     }
-    object = getPrototypeOf(object);
+    object2 = getPrototypeOf(object2);
   }
   function fallbackValue() {
     return null;
   }
   return fallbackValue;
 }
-function lookupAccessor(object, prop) {
-  while (object !== null) {
-    const desc = getOwnPropertyDescriptor(object, prop);
+function lookupAccessor(object2, prop) {
+  while (object2 !== null) {
+    const desc = getOwnPropertyDescriptor(object2, prop);
     if (desc) return desc.get ? unapply(desc.get) : null;
-    object = getPrototypeOf(object);
+    object2 = getPrototypeOf(object2);
   }
   return null;
 }
@@ -18948,9 +18948,178 @@ function budgetCheck(raw, { min = 4096, max } = {}) {
   return { ok: true, value, text: `= ${value.toLocaleString()} tokens` };
 }
 
+// app/services/startup-preferences.mjs
+var object = (value) => value && typeof value === "object" && !Array.isArray(value);
+var bool = (value, fallback) => typeof value === "boolean" ? value : fallback;
+var DEFAULT_STARTUP_PREFERENCES = Object.freeze({
+  refreshCatalogOnStart: Object.freeze({ qoder: false, workbuddy: false, antigravity: false, services: false }),
+  checkEnvironmentsOnStart: false,
+  backgroundUpdateChecks: Object.freeze({ app: true, environments: true }),
+  keepWarmRuntimes: Object.freeze({ dsh: false, claude: false, codex: false, kimi: false }),
+  keepWarmWorkers: Object.freeze({ qoder: false, workbuddy: false }),
+  prewarmSources: Object.freeze({ qoder: false, workbuddy: false })
+});
+var STARTUP_PRESETS = Object.freeze({
+  cold: DEFAULT_STARTUP_PREFERENCES,
+  balanced: Object.freeze({
+    refreshCatalogOnStart: Object.freeze({ qoder: false, workbuddy: false, antigravity: false, services: false }),
+    checkEnvironmentsOnStart: false,
+    backgroundUpdateChecks: Object.freeze({ app: true, environments: true }),
+    keepWarmRuntimes: Object.freeze({ dsh: true, claude: true, codex: true, kimi: true }),
+    keepWarmWorkers: Object.freeze({ qoder: true, workbuddy: true }),
+    prewarmSources: Object.freeze({ qoder: false, workbuddy: false })
+  }),
+  warm: Object.freeze({
+    refreshCatalogOnStart: Object.freeze({ qoder: true, workbuddy: true, antigravity: true, services: true }),
+    checkEnvironmentsOnStart: true,
+    backgroundUpdateChecks: Object.freeze({ app: true, environments: true }),
+    keepWarmRuntimes: Object.freeze({ dsh: true, claude: true, codex: true, kimi: true }),
+    keepWarmWorkers: Object.freeze({ qoder: true, workbuddy: true }),
+    prewarmSources: Object.freeze({ qoder: true, workbuddy: true })
+  })
+});
+function normalizeStartupPreferences(value) {
+  const raw = object(value) ? value : {};
+  const refresh = object(raw.refreshCatalogOnStart) ? raw.refreshCatalogOnStart : {};
+  const checks = object(raw.backgroundUpdateChecks) ? raw.backgroundUpdateChecks : {};
+  const runtimes = object(raw.keepWarmRuntimes) ? raw.keepWarmRuntimes : {};
+  const workers = object(raw.keepWarmWorkers) ? raw.keepWarmWorkers : {};
+  const prewarm = object(raw.prewarmSources) ? raw.prewarmSources : {};
+  return {
+    refreshCatalogOnStart: {
+      qoder: bool(refresh.qoder, DEFAULT_STARTUP_PREFERENCES.refreshCatalogOnStart.qoder),
+      workbuddy: bool(refresh.workbuddy, DEFAULT_STARTUP_PREFERENCES.refreshCatalogOnStart.workbuddy),
+      antigravity: bool(refresh.antigravity, DEFAULT_STARTUP_PREFERENCES.refreshCatalogOnStart.antigravity),
+      services: bool(refresh.services, DEFAULT_STARTUP_PREFERENCES.refreshCatalogOnStart.services)
+    },
+    checkEnvironmentsOnStart: bool(raw.checkEnvironmentsOnStart, DEFAULT_STARTUP_PREFERENCES.checkEnvironmentsOnStart),
+    backgroundUpdateChecks: {
+      app: bool(checks.app, DEFAULT_STARTUP_PREFERENCES.backgroundUpdateChecks.app),
+      environments: bool(checks.environments, DEFAULT_STARTUP_PREFERENCES.backgroundUpdateChecks.environments)
+    },
+    keepWarmRuntimes: {
+      dsh: bool(runtimes.dsh, DEFAULT_STARTUP_PREFERENCES.keepWarmRuntimes.dsh),
+      claude: bool(runtimes.claude, DEFAULT_STARTUP_PREFERENCES.keepWarmRuntimes.claude),
+      codex: bool(runtimes.codex, DEFAULT_STARTUP_PREFERENCES.keepWarmRuntimes.codex),
+      kimi: bool(runtimes.kimi, DEFAULT_STARTUP_PREFERENCES.keepWarmRuntimes.kimi)
+    },
+    keepWarmWorkers: {
+      qoder: bool(workers.qoder, DEFAULT_STARTUP_PREFERENCES.keepWarmWorkers.qoder),
+      workbuddy: bool(workers.workbuddy, DEFAULT_STARTUP_PREFERENCES.keepWarmWorkers.workbuddy)
+    },
+    prewarmSources: {
+      qoder: bool(prewarm.qoder, DEFAULT_STARTUP_PREFERENCES.prewarmSources.qoder),
+      workbuddy: bool(prewarm.workbuddy, DEFAULT_STARTUP_PREFERENCES.prewarmSources.workbuddy)
+    }
+  };
+}
+var GROUPS = {
+  refreshCatalogOnStart: ["qoder", "workbuddy", "antigravity", "services"],
+  backgroundUpdateChecks: ["app", "environments"],
+  keepWarmRuntimes: ["dsh", "claude", "codex", "kimi"],
+  keepWarmWorkers: ["qoder", "workbuddy"],
+  prewarmSources: ["qoder", "workbuddy"]
+};
+var TOP_KEYS = /* @__PURE__ */ new Set(["preset", "checkEnvironmentsOnStart", ...Object.keys(GROUPS)]);
+
+// app/ui/startup.js
+var esc7 = (value) => String(value ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
+var PRESETS = [
+  { id: "cold", title: "\u6309\u9700\u51B7\u542F\u52A8", badge: "\u9ED8\u8BA4\u63A8\u8350", desc: "\u6253\u5F00\u6700\u5FEB\u3001\u5360\u7528\u6700\u4F4E\u3002\u9664\u5F00\u673A\u81EA\u542F\u7684\u4E24\u4E2A\u5BF9\u5916\u6A21\u578B\u670D\u52A1\u5916\uFF0C\u5176\u4F59\u7EC4\u4EF6\u7528\u5230\u65F6\u624D\u542F\u52A8\uFF0C\u7A7A\u95F2 5\uFF5E10 \u5206\u949F\u540E\u81EA\u52A8\u91CA\u653E\u3002" },
+  { id: "balanced", title: "\u5E73\u8861\u6A21\u5F0F", badge: null, desc: "\u6253\u5F00\u65F6\u540C\u6837\u4E0D\u5237\u65B0\u76EE\u5F55\u3001\u4E0D\u626B\u63CF\u73AF\u5883\uFF1B\u7528\u8FC7\u7684\u8FD0\u884C\u73AF\u5883\u4FDD\u7559\u7EA6 10 \u5206\u949F\uFF0C\u5185\u7F6E\u7F51\u5173\u4E00\u76F4\u5E38\u9A7B\uFF0C\u9002\u5408\u4E00\u6574\u5929\u65AD\u65AD\u7EED\u7EED\u5730\u5BF9\u8BDD\u3002" },
+  { id: "warm", title: "\u5168\u90E8\u9884\u542F\u52A8", badge: null, desc: "\u6253\u5F00\u65F6\u5237\u65B0\u5168\u90E8\u6A21\u578B\u76EE\u5F55\u3001\u5B8C\u6574\u68C0\u6D4B\u73AF\u5883\uFF1B\u8FD0\u884C\u73AF\u5883\u548C\u5185\u7F6E\u7F51\u5173\u5E38\u9A7B\uFF0C\u5E76\u9884\u70ED\u5907\u7528\u8FD0\u884C\u65F6\u3002\u9996\u8F6E\u7B49\u5F85\u6700\u77ED\uFF0C\u5360\u7528\u6700\u9AD8\u3002" }
+];
+var SECTIONS = [
+  {
+    title: "\u5E94\u7528\u542F\u52A8\u65F6\u81EA\u52A8\u52A8\u4F5C",
+    desc: "\u6253\u5F00 Bridge++ \u65F6\u8981\u4E0D\u8981\u626B\u63CF\u8FD0\u884C\u73AF\u5883\u3001\u5237\u65B0\u6A21\u578B\u76EE\u5F55\u3001\u68C0\u67E5\u66F4\u65B0\u3002\u5173\u95ED\u5237\u65B0\u540E\uFF0C\u8FD8\u6CA1\u6709\u7F13\u5B58\u7684\u6A21\u578B\u6E90\u7B2C\u4E00\u6B21\u4ECD\u4F1A\u81EA\u52A8\u62C9\u53D6\u3002",
+    items: [
+      { path: "checkEnvironmentsOnStart", title: "\u542F\u52A8\u65F6\u5B8C\u6574\u626B\u63CF\u8FD0\u884C\u73AF\u5883", desc: "\u5173\u95ED\u65F6\u6CBF\u7528\u4E0A\u6B21\u68C0\u6D4B\u901A\u8FC7\u7684\u7ED3\u679C\uFF0C\u6253\u5F00\u8F6F\u4EF6\u4E0D\u9010\u4E2A\u542F\u52A8 CLI \u67E5\u7248\u672C\uFF1B\u968F\u65F6\u53EF\u5728\u300C\u8FD0\u884C\u73AF\u5883\u300D\u91CD\u65B0\u68C0\u6D4B\u3002" },
+      { path: "refreshCatalogOnStart.qoder", title: "\u542F\u52A8\u65F6\u81EA\u52A8\u5237\u65B0 Qoder CN \u6A21\u578B\u76EE\u5F55", desc: "\u5173\u95ED\u65F6\u6CBF\u7528\u4E0A\u6B21\u7684\u6A21\u578B\u5217\u8868\uFF0C\u6253\u5F00\u8F6F\u4EF6\u4E0D\u542F\u52A8 Qoder \u8FDB\u7A0B\uFF1B\u9700\u8981\u65F6\u5728\u300C\u6A21\u578B\u6E90\u300D\u624B\u52A8\u5237\u65B0\u3002" },
+      { path: "refreshCatalogOnStart.workbuddy", title: "\u542F\u52A8\u65F6\u81EA\u52A8\u5237\u65B0 WorkBuddy \u6A21\u578B\u76EE\u5F55", desc: "\u5173\u95ED\u65F6\u6CBF\u7528\u4E0A\u6B21\u7684\u6A21\u578B\u5217\u8868\uFF0C\u6253\u5F00\u8F6F\u4EF6\u4E0D\u542F\u52A8 WorkBuddy \u8FDB\u7A0B\uFF1B\u9700\u8981\u65F6\u5728\u300C\u6A21\u578B\u6E90\u300D\u624B\u52A8\u5237\u65B0\u3002" },
+      { path: "refreshCatalogOnStart.antigravity", title: "\u542F\u52A8\u65F6\u81EA\u52A8\u5237\u65B0 Antigravity \u6A21\u578B\u76EE\u5F55", desc: "\u5173\u95ED\u65F6\u6CBF\u7528\u4E0A\u6B21\u7684 Gemini \u6A21\u578B\u5217\u8868\uFF0C\u6253\u5F00\u8F6F\u4EF6\u4E0D\u8C03\u7528 agy CLI\u3002" },
+      { path: "refreshCatalogOnStart.services", title: "\u542F\u52A8\u65F6\u540C\u6B65\u5237\u65B0\u72EC\u7ACB\u5BF9\u5916\u63A5\u53E3\u76EE\u5F55", desc: "\u5173\u95ED\u65F6\u6253\u5F00\u8F6F\u4EF6\u4E0D\u8BA9\u4E24\u4E2A\u5BF9\u5916\u6A21\u578B\u670D\u52A1\uFF088646 / 8647\uFF09\u91CD\u65B0\u62C9\u53D6\u76EE\u5F55\uFF1B\u5B83\u4EEC\u6709\u8BF7\u6C42\u65F6\u6BCF 15 \u5206\u949F\u81EA\u5DF1\u5237\u65B0\u4E00\u6B21\u3002" },
+      { path: "backgroundUpdateChecks.environments", title: "\u542F\u52A8\u65F6\u9759\u9ED8\u68C0\u67E5\u5F00\u53D1\u73AF\u5883\u66F4\u65B0", desc: "\u6BCF\u5929\u7B2C\u4E00\u6B21\u6253\u5F00\u65F6\u68C0\u67E5 DSH\u3001Kimi\u3001Claude Code \u6709\u6CA1\u6709\u65B0\u7248\u672C\uFF1B\u5173\u95ED\u540E\u53EF\u5230\u300C\u8FD0\u884C\u73AF\u5883\u300D\u624B\u52A8\u68C0\u67E5\u3002" },
+      { path: "backgroundUpdateChecks.app", title: "\u542F\u52A8\u65F6\u9759\u9ED8\u68C0\u67E5 Bridge++ \u66F4\u65B0", desc: "\u6BCF\u5929\u7B2C\u4E00\u6B21\u6253\u5F00\u65F6\u68C0\u67E5 Bridge++ \u6709\u6CA1\u6709\u65B0\u7248\u672C\uFF0C\u53EA\u8BFB\u4E00\u6B21\u53D1\u5E03\u4FE1\u606F\u3002" }
+    ]
+  },
+  {
+    title: "\u8FD0\u884C\u73AF\u5883\u8FDB\u7A0B\u5E38\u9A7B",
+    desc: "\u5173\u95ED\u65F6\uFF0C\u4E00\u8F6E\u7ED3\u675F\u540E\u7A7A\u95F2\u7EA6 5 \u5206\u949F\u5C31\u9000\u51FA\u8FDB\u7A0B\uFF0C\u4E0B\u6B21\u53D1\u6D88\u606F\u81EA\u52A8\u6062\u590D\u539F\u4F1A\u8BDD\uFF1B\u6253\u5F00\u65F6\u4FDD\u7559\u7EA6 10 \u5206\u949F\u3002",
+    items: [
+      { path: "keepWarmRuntimes.dsh", title: "DeepSeek Harness (DSH) \u5BBF\u4E3B\u5E38\u9A7B", desc: "\u5173\u95ED\u65F6\uFF0C\u6240\u6709 DSH \u4F1A\u8BDD\u548C\u5B8C\u6574\u754C\u9762\u7A97\u53E3\u90FD\u7A7A\u95F2\u7EA6 5 \u5206\u949F\u540E\u9000\u51FA DSH \u5BBF\u4E3B\u8FDB\u7A0B\uFF0C\u91CA\u653E\u5B83\u5360\u7684\u51E0\u767E MB \u5185\u5B58\u3002" },
+      { path: "keepWarmRuntimes.claude", title: "Claude Code \u4F1A\u8BDD\u8FDB\u7A0B\u5E38\u9A7B", desc: "\u5173\u95ED\u65F6\u7A7A\u95F2\u7EA6 5 \u5206\u949F\u540E\u9000\u51FA Claude Code \u8FDB\u7A0B\uFF0C\u4E0B\u6B21\u53D1\u6D88\u606F\u81EA\u52A8\u6062\u590D\u539F\u4F1A\u8BDD\u3002" },
+      { path: "keepWarmRuntimes.codex", title: "Codex\uFF08\u7B2C\u4E09\u65B9\u6A21\u578B\uFF09\u670D\u52A1\u5E38\u9A7B", desc: "\u5173\u95ED\u65F6\u7A7A\u95F2\u7EA6 5 \u5206\u949F\u540E\u9000\u51FA Codex app-server \u8FDB\u7A0B\uFF1B\u539F\u751F Codex \u672C\u6765\u5C31\u662F\u6BCF\u8F6E\u5355\u72EC\u542F\u52A8\u3002" },
+      { path: "keepWarmRuntimes.kimi", title: "Kimi Code ACP \u8FDB\u7A0B\u5E38\u9A7B", desc: "\u5173\u95ED\u65F6\u7A7A\u95F2\u7EA6 5 \u5206\u949F\u540E\u9000\u51FA Kimi ACP \u8FDB\u7A0B\uFF0C\u4E0B\u6B21\u53D1\u6D88\u606F\u81EA\u52A8\u6062\u590D\u539F\u4F1A\u8BDD\u3002" }
+    ],
+    note: "Antigravity CLI \u6BCF\u8F6E\u5355\u72EC\u542F\u52A8\uFF0C\u8FD9\u4E00\u8F6E\u7ED3\u675F\u5C31\u9000\u51FA\uFF0C\u4E0D\u4F1A\u5E38\u9A7B\u3002"
+  },
+  {
+    title: "\u5185\u7F6E\u6A21\u578B\u6E90\u7F51\u5173\u8FDB\u7A0B\u5E38\u9A7B",
+    desc: "\u5173\u95ED\u65F6\uFF0C\u6CA1\u6709\u4F1A\u8BDD\u7528\u8FD9\u4E2A\u6A21\u578B\u6E90\u7EA6 10 \u5206\u949F\u540E\uFF0C\u56DE\u6536\u5185\u7F6E\u7F51\u5173\u548C\u5B83\u7684\u6A21\u578B\u6E90\u8FD0\u884C\u65F6\uFF1B\u4E0B\u6B21\u53D1\u6D88\u606F\u518D\u542F\u52A8\uFF08Qoder \u51B7\u542F\u52A8\u8981\u5341\u51E0\u79D2\u5230\u51E0\u5341\u79D2\uFF09\u3002",
+    items: [
+      { path: "keepWarmWorkers.qoder", title: "Qoder CN \u5185\u7F6E\u7F51\u5173\u5E38\u9A7B", desc: "\u5173\u95ED\u65F6\uFF0C\u7EA6 10 \u5206\u949F\u6CA1\u6709\u4F1A\u8BDD\u4F7F\u7528\u5C31\u56DE\u6536\u5185\u7F6E Qoder \u7F51\u5173\u548C\u5B83\u7684\u8FD0\u884C\u65F6\u3002" },
+      { path: "keepWarmWorkers.workbuddy", title: "WorkBuddy \u5185\u7F6E\u7F51\u5173\u5E38\u9A7B", desc: "\u5173\u95ED\u65F6\uFF0C\u7EA6 10 \u5206\u949F\u6CA1\u6709\u4F1A\u8BDD\u4F7F\u7528\u5C31\u56DE\u6536\u5185\u7F6E WorkBuddy \u7F51\u5173\u548C\u5B83\u7684\u8FD0\u884C\u65F6\u3002" }
+    ],
+    note: "\u5BF9\u5916\u63A5\u53E3\u7684\u4E24\u4E2A\u72EC\u7ACB\u6A21\u578B\u670D\u52A1\uFF088646 / 8647\uFF09\u4E0D\u53D7\u8FD9\u91CC\u5F71\u54CD\uFF0C\u5F00\u7740\u5C31\u4E00\u76F4\u5E38\u9A7B\uFF1B\u5F00\u673A\u81EA\u542F\u5728\u300C\u8BBE\u7F6E \u2192 \u5BF9\u5916\u63A5\u53E3\u300D\u91CC\u7BA1\u7406\u3002"
+  },
+  {
+    title: "\u6A21\u578B\u6E90\u5907\u7528\u8FD0\u884C\u65F6\u9884\u70ED",
+    desc: "\u51FA\u73B0\u4E00\u6B21\u6027\u8BF7\u6C42\uFF08\u6807\u9898\u751F\u6210\u3001\u7F51\u9875\u6458\u8981\u3001\u5B50\u4EE3\u7406\u7B2C\u4E00\u8F6E\u7B49\uFF09\u540E\uFF0C\u5728\u540E\u53F0\u591A\u5907\u4E00\u4E2A\u7A7A\u767D\u8FD0\u884C\u65F6\uFF0C\u4E0B\u4E00\u4E2A\u8FD9\u7C7B\u8BF7\u6C42\u4E0D\u7528\u7B49\u51B7\u542F\u52A8\uFF1B10 \u5206\u949F\u5185\u6CA1\u6709\u65B0\u7684\u8FD9\u7C7B\u8BF7\u6C42\u5C31\u4E0D\u518D\u8865\u3002\u4EE3\u4EF7\u662F\u6BCF\u6B21\u8865\u5145\u90FD\u8981\u591A\u521D\u59CB\u5316\u4E00\u4E2A\u8FD0\u884C\u65F6\u3002",
+    items: [
+      { path: "prewarmSources.qoder", title: "\u9884\u70ED Qoder CN \u5907\u7528\u7A7A\u767D\u8FD0\u884C\u65F6", desc: "\u5173\u95ED\u65F6\u4E0D\u9884\u70ED\u7A7A\u767D\u8FD0\u884C\u65F6\u548C\u539F\u751F\u5DE5\u5177\u69FD\uFF0C\u65B0\u5BF9\u8BDD\u73B0\u7528\u73B0\u542F\u52A8\uFF08Qoder \u6BCF\u6B21\u5341\u51E0\u79D2\u5230\u51E0\u5341\u79D2\uFF09\u3002\u6539\u52A8\u5728\u5185\u7F6E\u7F51\u5173\u7A7A\u95F2\u56DE\u6536\u6216\u91CD\u65B0\u542F\u52A8\u540E\u751F\u6548\u3002" },
+      { path: "prewarmSources.workbuddy", title: "\u9884\u70ED WorkBuddy \u5907\u7528\u7A7A\u767D\u8FD0\u884C\u65F6", desc: "\u5173\u95ED\u65F6\u4E0D\u9884\u70ED\u7A7A\u767D\u4F1A\u8BDD\uFF0C\u65B0\u5BF9\u8BDD\u73B0\u7528\u73B0\u542F\u52A8\uFF08WorkBuddy \u6BCF\u6B21\u51E0\u79D2\uFF09\u3002\u6539\u52A8\u5728\u5185\u7F6E\u7F51\u5173\u7A7A\u95F2\u56DE\u6536\u6216\u91CD\u65B0\u542F\u52A8\u540E\u751F\u6548\u3002" }
+    ]
+  }
+];
+function readPath(prefs, path2) {
+  const parts = path2.split(".");
+  let current = prefs;
+  for (const part of parts) current = current?.[part];
+  return current === true;
+}
+function startupPatchFromPath(path2, enabled) {
+  const parts = String(path2 ?? "").split(".");
+  if (parts.length === 1) return { [parts[0]]: enabled === true };
+  if (parts.length === 2) return { [parts[0]]: { [parts[1]]: enabled === true } };
+  throw new Error("\u65E0\u6548\u7684\u542F\u52A8\u914D\u7F6E\u8DEF\u5F84");
+}
+function activeStartupPreset(prefs) {
+  const normalized = JSON.stringify(normalizeStartupPreferences(prefs));
+  for (const [id, preset] of Object.entries(STARTUP_PRESETS)) {
+    if (JSON.stringify(normalizeStartupPreferences(preset)) === normalized) return id;
+  }
+  return null;
+}
+function startupSectionsHtml(rawPrefs) {
+  const prefs = normalizeStartupPreferences(rawPrefs ?? DEFAULT_STARTUP_PREFERENCES);
+  const preset = activeStartupPreset(prefs);
+  const presetCards = PRESETS.map((row) => {
+    const active = preset === row.id;
+    return `<button class="startup-preset${active ? " active" : ""}" data-startup-preset="${row.id}" aria-pressed="${active}">
+      <span class="sp-head"><b>${esc7(row.title)}</b>${row.badge ? `<span class="sp-badge">${esc7(row.badge)}</span>` : ""}${active ? `<span class="sp-check">${icon("check")}</span>` : ""}</span>
+      <span class="sp-desc">${esc7(row.desc)}</span>
+    </button>`;
+  }).join("");
+  const groups = SECTIONS.map((section) => `<section class="startup-group">
+    <div class="startup-group-head"><h2>${esc7(section.title)}</h2><p>${esc7(section.desc)}</p></div>
+    <div class="startup-list">${section.items.map((item) => {
+    const checked = readPath(prefs, item.path);
+    return `<label class="startup-row"><span class="startup-row-text"><b>${esc7(item.title)}</b><small>${esc7(item.desc)}</small></span><span class="startup-switch"><input type="checkbox" data-startup-toggle="${esc7(item.path)}" ${checked ? "checked" : ""}><span class="startup-slider" aria-hidden="true"></span></span></label>`;
+  }).join("")}</div>
+    ${section.note ? `<div class="startup-note">${icon("info")}<span>${esc7(section.note)}</span></div>` : ""}
+  </section>`).join("");
+  return `<div class="startup-presets-head"><h2>\u9884\u8BBE\u6A21\u5F0F</h2>${preset ? "" : '<span class="startup-custom-tag">\u81EA\u5B9A\u4E49\u7EC4\u5408</span>'}</div>
+    <div class="startup-presets">${presetCards}</div>${groups}`;
+}
+function startupPageHtml(rawPrefs) {
+  return `<div class="settings-head"><h1>\u542F\u52A8\u4E0E\u8D44\u6E90</h1><p>\u9009\u62E9\u54EA\u4E9B\u8FD0\u884C\u73AF\u5883\u3001\u6A21\u578B\u6E90\u548C\u540E\u53F0\u4EFB\u52A1\u63D0\u524D\u542F\u52A8\uFF0C\u54EA\u4E9B\u7528\u5230\u65F6\u518D\u542F\u52A8\u3002\u5F00\u5173\u7ACB\u5373\u4FDD\u5B58\uFF1B\u6B63\u5728\u8FD0\u884C\u7684\u4EFB\u52A1\u4E0D\u4F1A\u88AB\u6253\u65AD\u3002</p></div>
+    <div id="startup-settings">${startupSectionsHtml(rawPrefs)}</div>`;
+}
+
 // app/ui/app.js
 var $2 = (selector) => document.querySelector(selector);
-var esc7 = (value) => String(value ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
+var esc8 = (value) => String(value ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
 var labels = { idle: "\u51C6\u5907\u5C31\u7EEA", starting: "\u6B63\u5728\u8FDE\u63A5", running: "\u8FD0\u884C\u4E2D", waiting: "\u7B49\u5F85\u6388\u6743", completed: "\u5DF2\u5B8C\u6210", failed: "\u8FD0\u884C\u5931\u8D25", interrupted: "\u5DF2\u4E2D\u65AD", paused: "\u5DF2\u6682\u505C" };
 var sourceNames = { qoder: "Qoder CN", workbuddy: "WorkBuddy", antigravity: "Antigravity \xB7 Gemini" };
 var tiles2 = { dsh: "DS", kimi: "Ki", codex: "Cx", antigravity: "AG", claude: "CC" };
@@ -19030,6 +19199,9 @@ var lastBusy = false;
 var dragging = null;
 var mediaGen = 0;
 var dropDepth = 0;
+var lastFoldersHtml = "";
+var lastUpdateSlotHtml = "";
+var chatPendingHidden = false;
 f.use({ renderer: { image(token) {
   return markerHtml(token.href, token.text);
 } } });
@@ -19062,7 +19234,7 @@ async function call(method, args = {}) {
 function toast(text3, error = false) {
   clearTimeout(toastTimer);
   const el = $2("#toast");
-  el.innerHTML = `${icon(error ? "alert" : "check")}<span>${esc7(text3)}</span>`;
+  el.innerHTML = `${icon(error ? "alert" : "check")}<span>${esc8(text3)}</span>`;
   el.className = `toast${error ? " error" : ""}`;
   toastTimer = setTimeout(() => el.classList.add("hidden"), error ? 7e3 : Math.max(3600, text3.length * 110));
 }
@@ -19094,6 +19266,7 @@ function morph(from, to) {
   const settled = from.classList.contains("settled");
   for (const { name } of [...from.attributes]) if (!to.hasAttribute(name) && name !== "open") from.removeAttribute(name);
   for (const { name, value } of [...to.attributes]) if (from.getAttribute(name) !== value) from.setAttribute(name, value);
+  if (from.tagName === "INPUT" && (from.type === "checkbox" || from.type === "radio")) from.checked = to.checked;
   if (settled) from.classList.add("settled");
   const old = [...from.childNodes], next = [...to.childNodes];
   next.forEach((node, i2) => {
@@ -19142,9 +19315,6 @@ function patchBlocks(container, blocks, quiet) {
     }
   });
 }
-new MutationObserver(() => {
-  for (const a3 of document.getAnimations()) if (a3.startTime !== 0 && a3.effect?.getTiming().iterations === Infinity) a3.startTime = 0;
-}).observe(document.body, { childList: true, subtree: true });
 var models = () => Object.values(state.snapshot?.catalog ?? {}).flatMap((c) => c.models ?? []);
 var project = () => state.snapshot?.projects.find((p) => p.id === state.projectId);
 var session = () => state.snapshot?.sessions.find((s) => s.id === state.sessionId);
@@ -19165,7 +19335,7 @@ var pretty = (data) => {
 };
 var clip2 = (text3, max = 2e4) => text3.length > max ? `${text3.slice(0, max)}
 \u2026 \u5DF2\u622A\u65AD ${(text3.length - max).toLocaleString()} \u5B57\u7B26` : text3;
-var tile2 = (r) => `<span class="rt-tile rt-${esc7(r?.id ?? "none")}">${esc7(tiles2[r?.id] ?? "?")}</span>`;
+var tile2 = (r) => `<span class="rt-tile rt-${esc8(r?.id ?? "none")}">${esc8(tiles2[r?.id] ?? "?")}</span>`;
 var effortName = (e) => e === "none" ? "\u5173\u95ED" : e;
 function ago2(date) {
   const s = (Date.now() - Date.parse(date)) / 1e3;
@@ -19258,8 +19428,8 @@ function selectRuntime(runtimeId) {
 }
 function modelLabel(selection, model) {
   if (!selection?.modelKey) return '<span class="ml-name">\u9009\u62E9\u6A21\u578B</span>';
-  if (selection.modelKey === "native") return `<span class="ml-name">\u539F\u751F\u6A21\u578B</span><span class="ml-meta">${esc7(selection.nativeModel || "\u5F53\u524D\u9ED8\u8BA4")}${selection.reasoning ? ` \xB7 ${esc7(effortName(selection.reasoning))}` : ""}</span>`;
-  if (!model) return `<span class="ml-name">${esc7(selection.modelKey.split(":").slice(1).join(":"))}</span><span class="ml-meta">\u76EE\u5F55\u4E2D\u4E0D\u53EF\u7528</span>`;
+  if (selection.modelKey === "native") return `<span class="ml-name">\u539F\u751F\u6A21\u578B</span><span class="ml-meta">${esc8(selection.nativeModel || "\u5F53\u524D\u9ED8\u8BA4")}${selection.reasoning ? ` \xB7 ${esc8(effortName(selection.reasoning))}` : ""}</span>`;
+  if (!model) return `<span class="ml-name">${esc8(selection.modelKey.split(":").slice(1).join(":"))}</span><span class="ml-meta">\u76EE\u5F55\u4E2D\u4E0D\u53EF\u7528</span>`;
   const parts = [];
   if (model.source !== "antigravity") {
     parts.push(selection.reasoning ? effortName(selection.reasoning) : "\u9ED8\u8BA4\u601D\u8003");
@@ -19267,7 +19437,7 @@ function modelLabel(selection, model) {
     if (ctx) parts.push(compact(ctx));
     if (selection.contextBudget) parts.push(`\u9884\u7B97 ${compact(selection.contextBudget)}`);
   } else parts.push("\u539F\u751F\u6267\u884C");
-  return `<span class="ml-name">${esc7(sourceName(model))}</span><span class="ml-meta">${esc7(parts.join(" \xB7 "))}</span>`;
+  return `<span class="ml-name">${esc8(sourceName(model))}</span><span class="ml-meta">${esc8(parts.join(" \xB7 "))}</span>`;
 }
 function modelTitle(selection, model, locked) {
   const lead = locked ? "\u67E5\u770B\u6216\u8C03\u6574\u6B64\u4F1A\u8BDD\u7684\u53C2\u6570" : "\u9009\u62E9\u6A21\u578B\u3001\u601D\u8003\u5F3A\u5EA6\u4E0E\u4E0A\u4E0B\u6587\u7A97\u53E3";
@@ -19342,10 +19512,10 @@ function renderSidebarFrame() {
   });
 }
 function sessionRow(s) {
-  return `<button class="session-row${s.id === state.sessionId ? " active" : ""}" data-session="${s.id}" title="${esc7(s.title)}${s.lastFailure?.message ? `
-\u4E0A\u4E00\u8F6E\u4E2D\u65AD\uFF1A${esc7(s.lastFailure.message)}` : ""}">
-    <span class="dot ${esc7(s.status)}"></span><span class="session-title">${esc7(s.title)}</span>
-    <span class="session-meta">${esc7(runtime(s.runtimeId)?.short ?? s.runtimeId)} \xB7 ${busy(s) ? `<span class="session-activity" data-activity="${s.id}">${esc7(activityOf(s).short)}</span>` : ago2(s.updatedAt)}</span>
+  return `<button class="session-row${s.id === state.sessionId ? " active" : ""}" data-session="${s.id}" title="${esc8(s.title)}${s.lastFailure?.message ? `
+\u4E0A\u4E00\u8F6E\u4E2D\u65AD\uFF1A${esc8(s.lastFailure.message)}` : ""}">
+    <span class="dot ${esc8(s.status)}"></span><span class="session-title">${esc8(s.title)}</span>
+    <span class="session-meta">${esc8(runtime(s.runtimeId)?.short ?? s.runtimeId)} \xB7 ${busy(s) ? `<span class="session-activity" data-activity="${s.id}">${esc8(activityOf(s).short)}</span>` : ago2(s.updatedAt)}</span>
     <span class="row-action" data-archive="${s.id}" title="\u5F52\u6863">${icon("archive")}</span></button>`;
 }
 function renderFolders() {
@@ -19353,25 +19523,24 @@ function renderFolders() {
   if (!snap || !el) return;
   $2("#app-version").textContent = `v${snap.app.version}`;
   renderUpdateSlot();
-  if (!snap.projects.length) {
-    el.innerHTML = `<div class="folders-empty">${icon("folder")}<p>\u6253\u5F00\u4E00\u4E2A\u672C\u673A\u6587\u4EF6\u5939\uFF0C\u4F1A\u8BDD\u4F1A\u6309\u6587\u4EF6\u5939\u6574\u7406\u5728\u8FD9\u91CC\u3002</p><button class="btn sm" id="empty-add-project">${icon("folderPlus")}\u6253\u5F00\u6587\u4EF6\u5939</button></div>`;
-    return;
-  }
-  el.innerHTML = snap.projects.map((p) => {
+  const html2 = !snap.projects.length ? `<div class="folders-empty">${icon("folder")}<p>\u6253\u5F00\u4E00\u4E2A\u672C\u673A\u6587\u4EF6\u5939\uFF0C\u4F1A\u8BDD\u4F1A\u6309\u6587\u4EF6\u5939\u6574\u7406\u5728\u8FD9\u91CC\u3002</p><button class="btn sm" id="empty-add-project">${icon("folderPlus")}\u6253\u5F00\u6587\u4EF6\u5939</button></div>` : snap.projects.map((p) => {
     const rows = snap.sessions.filter((s) => !s.archived && s.projectId === p.id && (!query || s.title.toLowerCase().includes(query))).sort((a3, b) => Date.parse(b.updatedAt) - Date.parse(a3.updatedAt));
     if (query && !rows.length) return "";
     const collapsed = !query && ui.collapsed.includes(p.id), live = rows.filter(busy).length, limit = showAll.has(p.id) || query ? rows.length : 12;
     return `<div class="folder${collapsed ? " collapsed" : ""}${p.id === state.projectId ? " current" : ""}">
-      <div class="folder-head" data-folder="${p.id}" title="${esc7(p.path)}">${icon("chevronDown", "chev")}${icon("folder", "folder-icon")}<span class="folder-name">${esc7(p.name)}</span>${live ? `<span class="live-count" title="${live} \u4E2A\u4F1A\u8BDD\u6B63\u5728\u8FD0\u884C">${live}</span>` : ""}
-        <span class="folder-actions"><button class="icon-btn xs" data-new-in="${p.id}" title="\u5728\u6B64\u6587\u4EF6\u5939\u65B0\u5EFA\u4F1A\u8BDD">${icon("plus")}</button><button class="icon-btn xs" data-reveal="${p.id}" title="\u5728\u8D44\u6E90\u7BA1\u7406\u5668\u4E2D\u6253\u5F00">${icon("external")}</button></span></div>
-      <div class="folder-sessions">${rows.length ? rows.slice(0, limit).map(sessionRow).join("") + (rows.length > limit ? `<button class="show-more" data-show-all="${p.id}">\u663E\u793A\u5168\u90E8 ${rows.length} \u4E2A\u4F1A\u8BDD</button>` : "") : '<div class="folder-empty">\u8FD8\u6CA1\u6709\u4F1A\u8BDD</div>'}</div></div>`;
+        <div class="folder-head" data-folder="${p.id}" title="${esc8(p.path)}">${icon("chevronDown", "chev")}${icon("folder", "folder-icon")}<span class="folder-name">${esc8(p.name)}</span>${live ? `<span class="live-count" title="${live} \u4E2A\u4F1A\u8BDD\u6B63\u5728\u8FD0\u884C">${live}</span>` : ""}
+          <span class="folder-actions"><button class="icon-btn xs" data-new-in="${p.id}" title="\u5728\u6B64\u6587\u4EF6\u5939\u65B0\u5EFA\u4F1A\u8BDD">${icon("plus")}</button><button class="icon-btn xs" data-reveal="${p.id}" title="\u5728\u8D44\u6E90\u7BA1\u7406\u5668\u4E2D\u6253\u5F00">${icon("external")}</button></span></div>
+        <div class="folder-sessions">${rows.length ? rows.slice(0, limit).map(sessionRow).join("") + (rows.length > limit ? `<button class="show-more" data-show-all="${p.id}">\u663E\u793A\u5168\u90E8 ${rows.length} \u4E2A\u4F1A\u8BDD</button>` : "") : '<div class="folder-empty">\u8FD8\u6CA1\u6709\u4F1A\u8BDD</div>'}</div></div>`;
   }).join("") || '<div class="folders-empty"><p>\u6CA1\u6709\u5339\u914D\u7684\u4F1A\u8BDD</p></div>';
+  if (html2 === lastFoldersHtml) return;
+  lastFoldersHtml = html2;
+  patchHtml(el, html2);
 }
 function renderTopbar() {
   const s = session(), p = project();
   const left = ui.left ? "" : `<button class="icon-btn" id="toggle-left" title="\u5C55\u5F00\u4FA7\u680F (Ctrl+B)">${icon("panelLeft")}</button><span class="topbar-brand">${logo(18)}</span>`;
-  const crumb = p ? `<span class="crumb" title="${esc7(p.path)}">${icon("folder")}${esc7(p.name)}</span>` : "";
-  const title = s ? `<span class="crumb-sep">/</span><button class="title-btn" id="rename-session" title="\u91CD\u547D\u540D\u4F1A\u8BDD">${esc7(s.title)}</button>` : p ? '<span class="crumb-sep">/</span><span class="title-muted">\u65B0\u4F1A\u8BDD</span>' : '<span class="title-muted">Bridge++</span>';
+  const crumb = p ? `<span class="crumb" title="${esc8(p.path)}">${icon("folder")}${esc8(p.name)}</span>` : "";
+  const title = s ? `<span class="crumb-sep">/</span><button class="title-btn" id="rename-session" title="\u91CD\u547D\u540D\u4F1A\u8BDD">${esc8(s.title)}</button>` : p ? '<span class="crumb-sep">/</span><span class="title-muted">\u65B0\u4F1A\u8BDD</span>' : '<span class="title-muted">Bridge++</span>';
   const actions = s ? `${hasNativeUi(s.runtimeId) ? `<button class="ghost-btn" id="native-session" title="\u5728\u539F\u751F\u5B8C\u6574\u754C\u9762\u4E2D\u7EE7\u7EED">${icon("external")}<span>\u539F\u751F\u754C\u9762</span></button>` : ""}<button class="icon-btn" id="session-more" title="\u66F4\u591A">${icon("more")}</button>` : "";
   const right = ui.right ? "" : `<button class="icon-btn" id="toggle-right" title="\u5C55\u5F00\u53F3\u4FA7\u9762\u677F (Ctrl+Alt+B)">${icon("panelRight")}</button>`;
   $2("#topbar").innerHTML = `<div class="topbar-left">${left}${crumb}${title}${topBalances()}</div><div class="topbar-right">${actions}${right}</div>`;
@@ -19383,7 +19552,7 @@ function topBalances() {
     if (!a3 || !Number.isFinite(a3.balance)) return "";
     const n = a3.balance >= 1e3 ? Math.round(a3.balance).toLocaleString("zh-CN") : Number(a3.balance.toFixed(1)).toString();
     const tip = `${sourceNames[source] ?? source} ${a3.unit ?? "\u79EF\u5206"}\u4F59\u989D${a3.fetchedAt ? `\uFF0C${since(a3.fetchedAt)}\u66F4\u65B0` : ""}${a3.error ? `\uFF1B\u4E0A\u6B21\u8BFB\u53D6\u5931\u8D25\uFF1A${a3.error}` : ""}\u3002\u70B9\u51FB\u91CD\u65B0\u8BFB\u53D6`;
-    return `<button class="top-balance${balanceLoading.has(source) ? " loading" : ""}${a3.error ? " stale" : ""}" data-balance-refresh="${source}" title="${esc7(tip)}"><span class="tb-name">${source === "qoder" ? "Qoder" : "WorkBuddy"}</span>${esc7(n)}</button>`;
+    return `<button class="top-balance${balanceLoading.has(source) ? " loading" : ""}${a3.error ? " stale" : ""}" data-balance-refresh="${source}" title="${esc8(tip)}"><span class="tb-name">${source === "qoder" ? "Qoder" : "WorkBuddy"}</span>${esc8(n)}</button>`;
   }).filter(Boolean);
   return chips.length ? `<span class="top-balances"><span class="tb-label">\u4F59\u989D</span>${chips.join("")}</span>` : "";
 }
@@ -19585,8 +19754,8 @@ function renderQueue() {
   const running2 = busy(s);
   const held = new Set(s.queueDispatch?.ids ?? []), onHold = items.some((q2) => held.has(q2.id));
   const head = running2 ? `\u6392\u961F ${items.length} \u6761 \xB7 \u672C\u8F6E\u7ED3\u675F\u540E\u81EA\u52A8\u53D1\u9001` : onHold ? "\u4E0A\u6B21\u53D1\u9001\u540E\u6CA1\u6536\u5230\u539F\u751F\u786E\u8BA4\uFF0C\u6D88\u606F\u5148\u4FDD\u7559\uFF0C\u4E0D\u4F1A\u81EA\u52A8\u91CD\u53D1" : `\u6709 ${items.length} \u6761\u6392\u961F\u6D88\u606F\u6CA1\u6709\u53D1\u51FA\uFF08\u4E0A\u4E00\u8F6E\u6CA1\u6709\u6B63\u5E38\u7ED3\u675F\uFF09`;
-  const actions = (q2) => held.has(q2.id) ? `<span class="queue-held" title="\u8BF7\u5728\u539F\u751F\u754C\u9762\u786E\u8BA4\u8FD9\u6761\u6D88\u606F\u662F\u5426\u5DF2\u7ECF\u53D1\u51FA\uFF0C\u518D\u51B3\u5B9A\u662F\u5426\u91CD\u53D1">\u5F85\u6838\u5BF9</span>` : `<button class="icon-btn xs" data-queue-edit="${esc7(q2.id)}" title="\u53D6\u56DE\u5230\u8F93\u5165\u6846\u4FEE\u6539">${icon("edit")}</button><button class="icon-btn xs" data-queue-remove="${esc7(q2.id)}" title="\u5220\u9664\u8FD9\u6761">${icon("close")}</button>`;
-  patchHtml(el, `<div class="queue-head">${icon(onHold && !running2 ? "alert" : "clock")}<span>${esc7(head)}</span>${running2 || onHold ? "" : `<button class="btn sm primary" data-queue-send="all">${icon("arrowUp")}\u73B0\u5728\u53D1\u9001</button>`}</div>${items.map((q2) => `<div class="queue-item"><span class="queue-text" title="${esc7(q2.text)}">${esc7(q2.text || `${q2.attachments?.length ?? 0} \u4E2A\u9644\u4EF6`)}</span>${q2.attachments?.length ? `<span class="queue-att" title="${esc7(q2.attachments.map((a3) => a3.name).join("\u3001"))}">${icon("paperclip")}${q2.attachments.length}</span>` : ""}${actions(q2)}</div>`).join("")}`);
+  const actions = (q2) => held.has(q2.id) ? `<span class="queue-held" title="\u8BF7\u5728\u539F\u751F\u754C\u9762\u786E\u8BA4\u8FD9\u6761\u6D88\u606F\u662F\u5426\u5DF2\u7ECF\u53D1\u51FA\uFF0C\u518D\u51B3\u5B9A\u662F\u5426\u91CD\u53D1">\u5F85\u6838\u5BF9</span>` : `<button class="icon-btn xs" data-queue-edit="${esc8(q2.id)}" title="\u53D6\u56DE\u5230\u8F93\u5165\u6846\u4FEE\u6539">${icon("edit")}</button><button class="icon-btn xs" data-queue-remove="${esc8(q2.id)}" title="\u5220\u9664\u8FD9\u6761">${icon("close")}</button>`;
+  patchHtml(el, `<div class="queue-head">${icon(onHold && !running2 ? "alert" : "clock")}<span>${esc8(head)}</span>${running2 || onHold ? "" : `<button class="btn sm primary" data-queue-send="all">${icon("arrowUp")}\u73B0\u5728\u53D1\u9001</button>`}</div>${items.map((q2) => `<div class="queue-item"><span class="queue-text" title="${esc8(q2.text)}">${esc8(q2.text || `${q2.attachments?.length ?? 0} \u4E2A\u9644\u4EF6`)}</span>${q2.attachments?.length ? `<span class="queue-att" title="${esc8(q2.attachments.map((a3) => a3.name).join("\u3001"))}">${icon("paperclip")}${q2.attachments.length}</span>` : ""}${actions(q2)}</div>`).join("")}`);
 }
 async function dequeue(s, queueId) {
   const item = await call("session:dequeue", { sessionId: s.id, queueId });
@@ -19668,7 +19837,7 @@ function attachButtonHtml() {
   const caps = attachCaps(), kinds = allowedKinds(caps);
   if (caps === null) return "";
   const tip = kinds.length ? `\u6DFB\u52A0${kinds.map(kindName).join("\u3001")}\uFF08\u4E5F\u53EF\u4EE5\u62D6\u8FDB\u6765\u6216\u7C98\u8D34\uFF09` : refusal(caps);
-  return `<button class="chip-btn attach-btn${kinds.length ? "" : " unavailable"}" id="attach-btn" title="${esc7(tip)}" aria-label="${esc7(tip)}">${icon("paperclip")}</button>`;
+  return `<button class="chip-btn attach-btn${kinds.length ? "" : " unavailable"}" id="attach-btn" title="${esc8(tip)}" aria-label="${esc8(tip)}">${icon("paperclip")}</button>`;
 }
 function renderTray() {
   const el = $2("#attach-tray");
@@ -19777,7 +19946,7 @@ function showDropHint(on) {
   }
   const caps = attachCaps(), kinds = allowedKinds(caps);
   hint.className = `drop-hint${kinds.length ? "" : " refused"}`;
-  hint.innerHTML = kinds.length ? `${icon("paperclip")}<span>\u677E\u5F00\u5373\u53EF\u6DFB\u52A0${esc7(kinds.map(kindName).join("\u3001"))}</span>` : `${icon("alert")}<span>${esc7(refusal(caps))}</span>`;
+  hint.innerHTML = kinds.length ? `${icon("paperclip")}<span>\u677E\u5F00\u5373\u53EF\u6DFB\u52A0${esc8(kinds.map(kindName).join("\u3001"))}</span>` : `${icon("alert")}<span>${esc8(refusal(caps))}</span>`;
   hint.hidden = false;
 }
 function renderComposerControls() {
@@ -19787,16 +19956,16 @@ function renderComposerControls() {
   const steer = running2 && deliveryFor(s) === "steer";
   prompt.placeholder = !p ? "\u5148\u6253\u5F00\u4E00\u4E2A\u5DE5\u4F5C\u6587\u4EF6\u5939\uFF0C\u518D\u5F00\u59CB\u2026" : s ? running2 ? steer ? "\u8865\u5145\u6216\u7EA0\u6B63\u8981\u6C42\uFF0CEnter \u63D2\u8BDD\uFF0C\u6A21\u578B\u4E0B\u4E00\u6B65\u5C31\u80FD\u770B\u5230\u2026" : "Enter \u6392\u961F\uFF0C\u672C\u8F6E\u7ED3\u675F\u540E\u81EA\u52A8\u53D1\u9001\u2026" : "\u7EE7\u7EED\u8FD9\u4E2A\u4EFB\u52A1\u2026" : "\u63CF\u8FF0\u8981\u5B8C\u6210\u7684\u4EFB\u52A1\uFF0CAgent \u4F1A\u5728\u6240\u9009\u6587\u4EF6\u5939\u4E2D\u5DE5\u4F5C\u2026";
   const selection = s ? s.selection : composerSelection(), model = s ? modelOf(s.selection) : currentModel();
-  const folder = s ? "" : `<button class="chip-btn" id="folder-chip" data-value="${esc7(p?.id ?? "")}" title="${esc7(p?.path ?? "\u9009\u62E9\u5DE5\u4F5C\u6587\u4EF6\u5939")}">${icon("folder")}<span class="chip-text">${esc7(p?.name ?? "\u9009\u62E9\u6587\u4EF6\u5939")}</span>${icon("chevronDown", "caret")}</button>`;
+  const folder = s ? "" : `<button class="chip-btn" id="folder-chip" data-value="${esc8(p?.id ?? "")}" title="${esc8(p?.path ?? "\u9009\u62E9\u5DE5\u4F5C\u6587\u4EF6\u5939")}">${icon("folder")}<span class="chip-text">${esc8(p?.name ?? "\u9009\u62E9\u6587\u4EF6\u5939")}</span>${icon("chevronDown", "caret")}</button>`;
   const envOk = !!s || usable(env);
-  const envChip = `<button class="chip-btn${s ? " locked" : ""}${envOk ? "" : " unavailable"}" id="env-chip" data-value="${esc7(env?.id ?? "")}" title="${s ? "\u4F1A\u8BDD\u521B\u5EFA\u540E\u4E0D\u80FD\u66F4\u6362\u8FD0\u884C\u73AF\u5883" : envOk ? "\u5148\u9009\u62E9\u8FD0\u884C\u73AF\u5883" : esc7(unusableReason(env))}">${tile2(env)}<span class="chip-text">${esc7(env?.name ?? "\u9009\u62E9\u73AF\u5883")}</span>${icon(s ? "lock" : "chevronDown", "caret")}</button>`;
+  const envChip = `<button class="chip-btn${s ? " locked" : ""}${envOk ? "" : " unavailable"}" id="env-chip" data-value="${esc8(env?.id ?? "")}" title="${s ? "\u4F1A\u8BDD\u521B\u5EFA\u540E\u4E0D\u80FD\u66F4\u6362\u8FD0\u884C\u73AF\u5883" : envOk ? "\u5148\u9009\u62E9\u8FD0\u884C\u73AF\u5883" : esc8(unusableReason(env))}">${tile2(env)}<span class="chip-text">${esc8(env?.name ?? "\u9009\u62E9\u73AF\u5883")}</span>${icon(s ? "lock" : "chevronDown", "caret")}</button>`;
   const chipTitle = modelTitle(selection, model, !!s) + (s?.selectionNext ? `
 \u5DF2\u6392\u961F\uFF08\u672C\u8F6E\u7ED3\u675F\u540E\u5E94\u7528\uFF09\uFF1A${paramsText(s.selectionNext)}` : "");
-  const modelChip = `<button class="chip-btn model-chip${s?.selectionNext ? " has-queued" : ""}" id="model-chip" data-value="${esc7(selection.modelKey ?? "")}" title="${esc7(chipTitle)}">${icon("layers")}<span class="chip-text">${modelLabel(selection, model)}</span>${s?.selectionNext ? `<span class="queued-dot" aria-label="\u53C2\u6570\u4FEE\u6539\u5DF2\u6392\u961F"></span>` : ""}${icon("chevronDown", "caret")}</button>`;
+  const modelChip = `<button class="chip-btn model-chip${s?.selectionNext ? " has-queued" : ""}" id="model-chip" data-value="${esc8(selection.modelKey ?? "")}" title="${esc8(chipTitle)}">${icon("layers")}<span class="chip-text">${modelLabel(selection, model)}</span>${s?.selectionNext ? `<span class="queued-dot" aria-label="\u53C2\u6570\u4FEE\u6539\u5DF2\u6392\u961F"></span>` : ""}${icon("chevronDown", "caret")}</button>`;
   const permChip = permissionChipHtml(s, env);
   const waiting = !running2 && !!env?.checking;
   const choice = running2 && s.interject?.steer === true ? `<div class="delivery-seg" role="radiogroup" aria-label="\u8FD0\u884C\u4E2D\u53D1\u9001\u65B9\u5F0F"><button role="radio" aria-checked="${steer}" class="${steer ? "on" : ""}" data-delivery="steer" title="\u63D2\u8FDB\u6B63\u5728\u8FD0\u884C\u7684\u8FD9\u4E00\u8F6E\uFF0C\u6A21\u578B\u4E0B\u4E00\u6B65\u5C31\u80FD\u770B\u5230">\u63D2\u8BDD</button><button role="radio" aria-checked="${!steer}" class="${steer ? "" : "on"}" data-delivery="queue" title="\u7B49\u8FD9\u4E00\u8F6E\u7ED3\u675F\u540E\u518D\u53D1\u9001">\u6392\u961F</button></div>` : "";
-  const actions = running2 ? `<div class="run-actions">${choice}<button class="send stop" id="stop-run" title="\u505C\u6B62\u672C\u8F6E" aria-label="\u505C\u6B62\u672C\u8F6E">${icon("stop")}</button><button class="send run-send" id="send" title="${esc7(sendTitle(s))}" aria-label="${steer ? "\u63D2\u8BDD" : "\u6392\u961F"}">${icon("arrowUp")}</button></div>` : `<button class="send" id="send" title="${waiting ? "\u6B63\u5728\u68C0\u6D4B\u8FD0\u884C\u73AF\u5883\uFF0C\u7A0D\u7B49\u51E0\u79D2" : "\u53D1\u9001 (Enter)"}" aria-label="\u53D1\u9001" ${p && envOk && !waiting ? "" : "disabled"}>${icon("arrowUp")}</button>`;
+  const actions = running2 ? `<div class="run-actions">${choice}<button class="send stop" id="stop-run" title="\u505C\u6B62\u672C\u8F6E" aria-label="\u505C\u6B62\u672C\u8F6E">${icon("stop")}</button><button class="send run-send" id="send" title="${esc8(sendTitle(s))}" aria-label="${steer ? "\u63D2\u8BDD" : "\u6392\u961F"}">${icon("arrowUp")}</button></div>` : `<button class="send" id="send" title="${waiting ? "\u6B63\u5728\u68C0\u6D4B\u8FD0\u884C\u73AF\u5883\uFF0C\u7A0D\u7B49\u51E0\u79D2" : "\u53D1\u9001 (Enter)"}" aria-label="\u53D1\u9001" ${p && envOk && !waiting ? "" : "disabled"}>${icon("arrowUp")}</button>`;
   el.innerHTML = `<div class="composer-left">${attachButtonHtml()}${folder}${envChip}<span class="chip-sep">${icon("chevronRight")}</span>${modelChip}${permChip}</div>${actions}`;
   $2(".composer-box")?.classList.toggle("running", running2);
   syncDraftMark();
@@ -19837,20 +20006,20 @@ function permissionChipHtml(s, env) {
   const label = permissionLabel(p, mode) + (next !== void 0 ? " \u2192 " + permissionLabel(p, next) : "");
   const scope = permissionScope(p, s, env);
   const tip = s ? "\u6B64\u4F1A\u8BDD\u7684\u6388\u6743\u65B9\u5F0F\uFF1B\u8FD0\u884C\u4E2D\u5207\u6362\u4F1A\u5728\u4E0B\u4E00\u8F6E\u751F\u6548" : `\u65B0\u4F1A\u8BDD\u7684\u9ED8\u8BA4\u6388\u6743\u65B9\u5F0F\uFF08${env.name}${scope}\uFF09`;
-  return `<button class="chip-btn perm-chip${p.issue ? " warn" : ""}${mode === "auto" || permissionWarning(env.id, mode) ? " risky" : ""}" id="perm-chip" data-value="${esc7(mode ?? "")}" title="${esc7(tip)}">${icon(permissionIcons[mode] ?? "shield")}<span class="chip-text">${esc7(label)}</span>${icon("chevronDown", "caret")}</button>`;
+  return `<button class="chip-btn perm-chip${p.issue ? " warn" : ""}${mode === "auto" || permissionWarning(env.id, mode) ? " risky" : ""}" id="perm-chip" data-value="${esc8(mode ?? "")}" title="${esc8(tip)}">${icon(permissionIcons[mode] ?? "shield")}<span class="chip-text">${esc8(label)}</span>${icon("chevronDown", "caret")}</button>`;
 }
 function permissionMenuHtml() {
   const s = session(), env = runtime(s ? s.runtimeId : state.runtimeId), p = permissionsFor(s, env);
   if (!p) return `<div class="menu-label">\u6388\u6743\u65B9\u5F0F</div><div class="menu-static"><span class="mi-main"><span class="mi-sub">\u6B64\u8FD0\u884C\u73AF\u5883\u6CA1\u6709\u53EF\u5207\u6362\u7684\u6388\u6743\u65B9\u5F0F\u3002</span></span></div>`;
   const { mode, next } = s ? sessionPermission(s) : { mode: p.current ?? null, next: void 0 };
   const scope = permissionScope(p, s, env);
-  const head = s ? `\u6B64\u4F1A\u8BDD \xB7 ${esc7(env.name)}${scope}${busy(s) ? " \xB7 \u4E0B\u4E00\u8F6E\u751F\u6548" : ""}` : `\u65B0\u4F1A\u8BDD\u9ED8\u8BA4 \xB7 ${esc7(env.name)}${scope}`;
+  const head = s ? `\u6B64\u4F1A\u8BDD \xB7 ${esc8(env.name)}${scope}${busy(s) ? " \xB7 \u4E0B\u4E00\u8F6E\u751F\u6548" : ""}` : `\u65B0\u4F1A\u8BDD\u9ED8\u8BA4 \xB7 ${esc8(env.name)}${scope}`;
   const items = permissionChoices(p).map((m) => {
     const id = m.id ?? null, selected = id === mode, queued = next !== void 0 && id === next && id !== mode;
-    return `<button class="menu-item perm-item${selected ? " selected" : ""}" data-permission-choice="${esc7(id ?? "__default")}">${icon(permissionIcons[id] ?? "shield", "mi-icon")}<span class="mi-main"><span class="mi-name">${esc7(m.label)}${queued ? '<span class="mi-tag">\u4E0B\u4E00\u8F6E</span>' : ""}</span><span class="mi-sub">${esc7(m.description ?? "")}</span></span>${selected ? icon("check", "mi-check") : ""}</button>`;
+    return `<button class="menu-item perm-item${selected ? " selected" : ""}" data-permission-choice="${esc8(id ?? "__default")}">${icon(permissionIcons[id] ?? "shield", "mi-icon")}<span class="mi-main"><span class="mi-name">${esc8(m.label)}${queued ? '<span class="mi-tag">\u4E0B\u4E00\u8F6E</span>' : ""}</span><span class="mi-sub">${esc8(m.description ?? "")}</span></span>${selected ? icon("check", "mi-check") : ""}</button>`;
   }).join("");
-  const issue = p.issue ? `<div class="menu-note warn">${icon("alert")}<span>${esc7(p.issue)}</span></div>` : "";
-  const migrated = p.migration?.reason ? `<div class="menu-note">${icon("info")}<span>${esc7(p.migration.reason)}</span></div>` : "";
+  const issue = p.issue ? `<div class="menu-note warn">${icon("alert")}<span>${esc8(p.issue)}</span></div>` : "";
+  const migrated = p.migration?.reason ? `<div class="menu-note">${icon("info")}<span>${esc8(p.migration.reason)}</span></div>` : "";
   const exec = p.protocol === "exec-json" ? `<div class="menu-note">${icon("info")}<span>\u539F\u751F Codex \u6309\u5B98\u65B9 CLI \u7684 exec \u65B9\u5F0F\u8FD0\u884C\uFF0C\u4E0D\u80FD\u9010\u6761\u8BE2\u95EE\uFF1B\u9700\u8981\u66F4\u9AD8\u6743\u9650\u7684\u64CD\u4F5C\u7531\u539F\u751F\u6C99\u7BB1\u62D2\u7EDD\uFF0C\u6216\u4EA4\u7ED9\u81EA\u52A8\u5BA1\u67E5\u3002</span></div>` : "";
   const review = env?.id === "dsh" && p.modes?.some((m) => m.id === "auto-review") ? `<div class="menu-note">${icon("zap")}<span>\u81EA\u52A8\u5BA1\u67E5\u4F1A\u5728\u6BCF\u6B21\u5DE5\u5177\u8C03\u7528\u524D\u53E6\u53D1\u4E00\u6B21\u6A21\u578B\u8BF7\u6C42\uFF0C\u8BF7\u6C42\u6570\u5927\u7EA6\u7FFB\u500D\uFF0C\u4E5F\u66F4\u6162\u3002</span></div>` : "";
   const claudeAuto = env?.id === "claude" && p.modes?.some((m) => m.id === "auto-review") ? `<div class="menu-note">${icon("zap")}<span>\u201C\u81EA\u52A8\u5BA1\u67E5\u201D\u7528 Claude Code \u539F\u751F\u7684 auto \u6A21\u5F0F\uFF1A\u5DE5\u4F5C\u533A\u5185\u7684\u7F16\u8F91\u76F4\u63A5\u6267\u884C\uFF0C\u5176\u4ED6\u64CD\u4F5C\u5148\u7531\u540C\u4E00\u4E2A\u6A21\u578B\u5224\u65AD\u662F\u5426\u5B89\u5168\uFF0C\u4F1A\u591A\u53D1\u6A21\u578B\u8BF7\u6C42\u3002</span></div>` : "";
@@ -19863,7 +20032,7 @@ function changePermission(runtimeId, mode, current, apply3) {
     return;
   }
   closeMenu();
-  modal(warning.title, `<p class="modal-text">${esc7(warning.text)}</p>`, apply3, { confirm: warning.confirm, danger: true });
+  modal(warning.title, `<p class="modal-text">${esc8(warning.text)}</p>`, apply3, { confirm: warning.confirm, danger: true });
 }
 function runtimePermissionHtml(r) {
   const p = r.permissions;
@@ -19874,19 +20043,19 @@ function runtimePermissionHtml(r) {
 function permissionBlockHtml(r, scope, p) {
   const choices = permissionChoices(p), current = p.current ?? null, chosen = choices.find((m) => (m.id ?? null) === current) ?? choices[0];
   const named = scope ? permissionScopes[p.protocol] ?? (scope === "native" ? "\u539F\u751F\u6A21\u578B" : "\u7B2C\u4E09\u65B9\u6A21\u578B") : "", title = named ? ` \xB7 ${named}` : "";
-  const version2 = p.observed?.version ? `<span class="perm-observed">\u5DF2\u6309\u672C\u673A ${esc7(String(p.observed.version))} \u6838\u5B9E\u53EF\u7528\u6A21\u5F0F</span>` : "";
-  const migrated = p.migration?.reason ? `<p class="perm-desc">${esc7(p.migration.reason)}</p>` : "";
-  return `<div class="perm-block"><div class="perm-title">${icon("shield")}<span>\u6388\u6743\u65B9\u5F0F</span><span class="perm-scope">\xB7 ${named ? `${esc7(named)} \xB7 ` : ""}\u65B0\u4F1A\u8BDD\u9ED8\u8BA4</span></div><div class="perm-options" role="radiogroup" aria-label="${esc7(r.name)}${esc7(title)} \u6388\u6743\u65B9\u5F0F">${choices.map((m) => {
+  const version2 = p.observed?.version ? `<span class="perm-observed">\u5DF2\u6309\u672C\u673A ${esc8(String(p.observed.version))} \u6838\u5B9E\u53EF\u7528\u6A21\u5F0F</span>` : "";
+  const migrated = p.migration?.reason ? `<p class="perm-desc">${esc8(p.migration.reason)}</p>` : "";
+  return `<div class="perm-block"><div class="perm-title">${icon("shield")}<span>\u6388\u6743\u65B9\u5F0F</span><span class="perm-scope">\xB7 ${named ? `${esc8(named)} \xB7 ` : ""}\u65B0\u4F1A\u8BDD\u9ED8\u8BA4</span></div><div class="perm-options" role="radiogroup" aria-label="${esc8(r.name)}${esc8(title)} \u6388\u6743\u65B9\u5F0F">${choices.map((m) => {
     const id = m.id ?? null;
-    return `<button class="perm-option${id === current ? " active" : ""}" role="radio" aria-checked="${id === current}" data-runtime-permission="${esc7(r.id)}|${esc7(id ?? "__default")}|${esc7(scope)}" title="${esc7(m.description ?? "")}">${icon(permissionIcons[id] ?? "shield")}${esc7(m.label)}</button>`;
-  }).join("")}</div><p class="perm-desc">${esc7(chosen?.description ?? p.description ?? "")}</p>${migrated}${version2}${p.issue ? `<p class="perm-issue">${icon("alert")}<span>${esc7(p.issue)}</span></p>` : ""}</div>`;
+    return `<button class="perm-option${id === current ? " active" : ""}" role="radio" aria-checked="${id === current}" data-runtime-permission="${esc8(r.id)}|${esc8(id ?? "__default")}|${esc8(scope)}" title="${esc8(m.description ?? "")}">${icon(permissionIcons[id] ?? "shield")}${esc8(m.label)}</button>`;
+  }).join("")}</div><p class="perm-desc">${esc8(chosen?.description ?? p.description ?? "")}</p>${migrated}${version2}${p.issue ? `<p class="perm-issue">${icon("alert")}<span>${esc8(p.issue)}</span></p>` : ""}</div>`;
 }
 function renderBanner() {
   const el = $2("#composer-banner");
   if (!el) return;
   const s = session(), notes = [];
   if (s?.selectionIssue) {
-    el.innerHTML = `<div class="banner warn" id="session-model-warning">${icon("alert")}<span>${esc7(s.selectionIssue)}</span><span class="banner-actions"><button class="btn sm" id="refresh-session-model">\u5237\u65B0\u6765\u6E90</button><button class="btn primary sm" id="rebind-session-model" ${busy(s) ? "disabled" : ""}>\u91CD\u65B0\u786E\u8BA4\u6A21\u578B</button></span></div>`;
+    el.innerHTML = `<div class="banner warn" id="session-model-warning">${icon("alert")}<span>${esc8(s.selectionIssue)}</span><span class="banner-actions"><button class="btn sm" id="refresh-session-model">\u5237\u65B0\u6765\u6E90</button><button class="btn primary sm" id="rebind-session-model" ${busy(s) ? "disabled" : ""}>\u91CD\u65B0\u786E\u8BA4\u6A21\u578B</button></span></div>`;
     return;
   }
   if (!s && project()) {
@@ -19905,8 +20074,8 @@ function renderBanner() {
   }
   const limit = s && !busy(s) ? limitNotice(s.lastFailure) : "";
   if (limit) notes.push(limit);
-  const queued = s?.selectionNext ? `<div class="banner" id="queued-params-banner">${icon("clock")}<span>\u53C2\u6570\u4FEE\u6539\u5DF2\u6392\u961F\uFF1A${esc7(paramsText(s.selectionNext))}\uFF0C\u672C\u8F6E\u7ED3\u675F\u540E\u81EA\u52A8\u5E94\u7528\u3002</span><span class="banner-actions"><button class="btn sm" id="cancel-queued-params">\u53D6\u6D88</button></span></div>` : "";
-  el.innerHTML = queued + notes.map((text3) => `<div class="banner">${icon("info")}<span>${esc7(text3)}</span></div>`).join("");
+  const queued = s?.selectionNext ? `<div class="banner" id="queued-params-banner">${icon("clock")}<span>\u53C2\u6570\u4FEE\u6539\u5DF2\u6392\u961F\uFF1A${esc8(paramsText(s.selectionNext))}\uFF0C\u672C\u8F6E\u7ED3\u675F\u540E\u81EA\u52A8\u5E94\u7528\u3002</span><span class="banner-actions"><button class="btn sm" id="cancel-queued-params">\u53D6\u6D88</button></span></div>` : "";
+  el.innerHTML = queued + notes.map((text3) => `<div class="banner">${icon("info")}<span>${esc8(text3)}</span></div>`).join("");
 }
 function ringSvg(ratio) {
   const r = 8.5, c = 2 * Math.PI * r, level = ratio == null ? "none" : ratio >= 0.85 ? "high" : ratio >= 0.6 ? "mid" : "low";
@@ -19934,20 +20103,27 @@ function renderFooter() {
   const cacheText = cache ? `${cache.status === "estimated" ? "\u2248" : ""}${pct(cache.ratio)}` : "\u672A\u62A5\u544A";
   const cacheTitle = cache ? `\u6700\u8FD1\u4E00\u6B21\u8BF7\u6C42\u547D\u4E2D ${pct(cache.ratio)}\uFF0C\u672C\u4F1A\u8BDD\u7D2F\u8BA1 ${pct(cache.sessionRatio)}${cache.status === "estimated" ? "\uFF08\u4F30\u7B97\uFF09" : ""}` : "\u5F53\u524D\u8FD0\u884C\u73AF\u5883\u6216\u6A21\u578B\u6E90\u6CA1\u6709\u62A5\u544A\u7F13\u5B58\u547D\u4E2D";
   const ctxTitle = ctx.used !== null ? `\u4E0A\u4E0B\u6587\u5DF2\u7528 ${compact(ctx.used)} / ${compact(ctx.window)} tokens` : ctx.window ? `\u4E0A\u4E0B\u6587\u7A97\u53E3 ${compact(ctx.window)} tokens\uFF0C\u8FD8\u6CA1\u6709\u7528\u91CF\u6570\u636E` : "\u8FD8\u6CA1\u6709\u4E0A\u4E0B\u6587\u6570\u636E";
-  patchHtml(el, `<span class="footer-left"><span class="dot ${esc7(s.status)}"></span><span class="footer-status">${esc7(live ? activityOf(s).long : labels[s.status] ?? s.status)}</span>${live ? `<span class="footer-elapsed">\xB7 ${elapsed(turnStartedAt())}</span>` : ""}</span>
-    <span class="footer-center"><span class="metric" title="${esc7(rateTitle)}">${icon("zap")}${rateText}</span><span class="metric-sep"></span><span class="metric" title="${esc7(cacheTitle)}">${icon("database")}\u7F13\u5B58\u547D\u4E2D ${cacheText}</span></span>
-    <span class="footer-right" title="${esc7(ctxTitle)}" id="context-ring"><span class="ctx-text">${ctx.ratio !== null ? pct(ctx.ratio) : ctx.window ? compact(ctx.window) : "\u2014"}</span>${ringSvg(ctx.ratio)}</span>`);
+  patchHtml(el, `<span class="footer-left"><span class="dot ${esc8(s.status)}"></span><span class="footer-status">${esc8(live ? activityOf(s).long : labels[s.status] ?? s.status)}</span>${live ? `<span class="footer-elapsed">\xB7 ${elapsed(turnStartedAt())}</span>` : ""}</span>
+    <span class="footer-center"><span class="metric" title="${esc8(rateTitle)}">${icon("zap")}${rateText}</span><span class="metric-sep"></span><span class="metric" title="${esc8(cacheTitle)}">${icon("database")}\u7F13\u5B58\u547D\u4E2D ${cacheText}</span></span>
+    <span class="footer-right" title="${esc8(ctxTitle)}" id="context-ring"><span class="ctx-text">${ctx.ratio !== null ? pct(ctx.ratio) : ctx.window ? compact(ctx.window) : "\u2014"}</span>${ringSvg(ctx.ratio)}</span>`);
+}
+function updateElapsedNodes() {
+  if (document.hidden) return;
+  if (busy(session())) {
+    const text3 = elapsed(turnStartedAt());
+    const fe2 = $2(".footer-elapsed");
+    if (fe2 && fe2.textContent !== `\xB7 ${text3}`) fe2.textContent = `\xB7 ${text3}`;
+    const w2 = $2("#working-elapsed");
+    if (w2 && w2.textContent !== text3) w2.textContent = text3;
+  }
+  for (const el of document.querySelectorAll("[data-elapsed-from]")) {
+    const text3 = elapsed(el.dataset.elapsedFrom);
+    if (el.textContent !== text3) el.textContent = text3;
+  }
 }
 function tick() {
   const live = state.snapshot?.sessions.some(busy);
-  if (live && !tickTimer) tickTimer = setInterval(() => {
-    if (busy(session())) {
-      renderFooter();
-      const w2 = $2("#working-elapsed");
-      if (w2) w2.textContent = elapsed(turnStartedAt());
-    }
-    for (const el of document.querySelectorAll("[data-elapsed-from]")) el.textContent = elapsed(el.dataset.elapsedFrom);
-  }, 1e3);
+  if (live && !tickTimer) tickTimer = setInterval(updateElapsedNodes, 1e3);
   else if (!live && tickTimer) {
     clearInterval(tickTimer);
     tickTimer = null;
@@ -20034,11 +20210,11 @@ function toolBlock(key, t, running2, names = /* @__PURE__ */ new Map()) {
   const start2 = t.start, end = t.end, raw = start2?.name ?? end?.name ?? "\u5DE5\u5177", name = toolNames[raw] ?? raw;
   const status = toolStatus(t, running2), summary = attachmentSummary(toolSummary(start2 ?? end), names), file = start2?.data ? toolFilePath(argsOf(start2.data)) : null;
   const input = start2?.data ? clip2(pretty(argsOf(start2.data))) : "", output = clip2(toolOutput(t));
-  return `<details class="tool ${status}" data-expand="tool-${esc7(key)}"><summary>${toolMark(status)}<span class="tool-name">${esc7(name)}</span><span class="tool-summary"${file ? ` data-link-path="${esc7(file)}"` : ""}>${esc7(summary === raw ? "" : summary)}</span>${icon("chevronRight", "tool-caret")}</summary><div class="tool-body">${input && input !== "{}" ? `<div class="tool-label">\u8F93\u5165</div><pre>${esc7(input)}</pre>` : ""}${output ? `<div class="tool-label">\u8F93\u51FA</div><pre>${esc7(output)}</pre>` : ""}${!input && !output ? '<div class="tool-label">\u6CA1\u6709\u53EF\u663E\u793A\u7684\u53C2\u6570</div>' : ""}</div></details>`;
+  return `<details class="tool ${status}" data-expand="tool-${esc8(key)}"><summary>${toolMark(status)}<span class="tool-name">${esc8(name)}</span><span class="tool-summary"${file ? ` data-link-path="${esc8(file)}"` : ""}>${esc8(summary === raw ? "" : summary)}</span>${icon("chevronRight", "tool-caret")}</summary><div class="tool-body">${input && input !== "{}" ? `<div class="tool-label">\u8F93\u5165</div><pre>${esc8(input)}</pre>` : ""}${output ? `<div class="tool-label">\u8F93\u51FA</div><pre>${esc8(output)}</pre>` : ""}${!input && !output ? '<div class="tool-label">\u6CA1\u6709\u53EF\u663E\u793A\u7684\u53C2\u6570</div>' : ""}</div></details>`;
 }
 function foldBlock(run, running2, open2) {
   const first = run.find((b) => b.work.tool).key.replace(/^tool:/, ""), id = `tools-${first}`, { status, title, detail } = foldSummary(run, running2);
-  return [`tools:${first}`, `<details class="tool tool-fold ${status}" data-expand="${esc7(id)}"><summary>${toolMark(status)}<span class="tool-name">${esc7(title)}</span><span class="tool-summary">${esc7(detail)}</span>${icon("chevronRight", "tool-caret")}</summary><div class="tool-fold-body">${open2.has(id) ? run.map((b) => b.html()).join("") : ""}</div></details>`];
+  return [`tools:${first}`, `<details class="tool tool-fold ${status}" data-expand="${esc8(id)}"><summary>${toolMark(status)}<span class="tool-name">${esc8(title)}</span><span class="tool-summary">${esc8(detail)}</span>${icon("chevronRight", "tool-caret")}</summary><div class="tool-fold-body">${open2.has(id) ? run.map((b) => b.html()).join("") : ""}</div></details>`];
 }
 function diffStat(text3) {
   let files = 0, adds = 0, dels = 0;
@@ -20051,7 +20227,7 @@ function diffStat(text3) {
 }
 function diffHtml(text3) {
   if (!text3) return '<div class="pane-empty small">\u6CA1\u6709\u6587\u672C\u5DEE\u5F02\u3002</div>';
-  return `<pre class="diff">${clip2(text3, 3e5).split("\n").map((l) => `<span class="dl${l.startsWith("diff ") || l.startsWith("+++") || l.startsWith("---") || l.startsWith("index ") ? " dh" : l.startsWith("+") ? " da" : l.startsWith("-") ? " dd" : l.startsWith("@@") ? " dk" : ""}">${esc7(l) || " "}</span>`).join("")}</pre>`;
+  return `<pre class="diff">${clip2(text3, 3e5).split("\n").map((l) => `<span class="dl${l.startsWith("diff ") || l.startsWith("+++") || l.startsWith("---") || l.startsWith("index ") ? " dh" : l.startsWith("+") ? " da" : l.startsWith("-") ? " dd" : l.startsWith("@@") ? " dk" : ""}">${esc8(l) || " "}</span>`).join("")}</pre>`;
 }
 function approvalSummary(e) {
   const d = e.data ?? {};
@@ -20066,24 +20242,24 @@ function approvalSummary(e) {
 var REVIEW_RISK = { low: "\u4F4E\u98CE\u9669", medium: "\u4E2D\u7B49\u98CE\u9669", high: "\u9AD8\u98CE\u9669" };
 function reviewNote(review) {
   if (!review?.reason) return "";
-  return `<div class="approval-review ${esc7(review.risk ?? "")}">${icon("shield")}<span>\u81EA\u52A8\u5BA1\u67E5${review.risk && REVIEW_RISK[review.risk] ? `\uFF08${REVIEW_RISK[review.risk]}\uFF09` : ""}\uFF1A${esc7(review.reason)}</span></div>`;
+  return `<div class="approval-review ${esc8(review.risk ?? "")}">${icon("shield")}<span>\u81EA\u52A8\u5BA1\u67E5${review.risk && REVIEW_RISK[review.risk] ? `\uFF08${REVIEW_RISK[review.risk]}\uFF09` : ""}\uFF1A${esc8(review.reason)}</span></div>`;
 }
 function approvalBlock(e, resolved) {
   const done = resolved.get(e.approvalId);
-  if (done !== void 0) return `<div class="approval-done ${done === "reject" || done === "reject-session" ? "rejected" : ""}">${icon(done === "expired" ? "clock" : done?.startsWith?.("reject") ? "close" : "check")}<span>${e.type === "question" ? "\u95EE\u9898" : "\u6388\u6743"}${esc7(resolvedLabels[done] ?? "\u5DF2\u5904\u7406")}</span><span class="muted">${esc7(e.name ?? "")}</span></div>`;
+  if (done !== void 0) return `<div class="approval-done ${done === "reject" || done === "reject-session" ? "rejected" : ""}">${icon(done === "expired" ? "clock" : done?.startsWith?.("reject") ? "close" : "check")}<span>${e.type === "question" ? "\u95EE\u9898" : "\u6388\u6743"}${esc8(resolvedLabels[done] ?? "\u5DF2\u5904\u7406")}</span><span class="muted">${esc8(e.name ?? "")}</span></div>`;
   const summary = approvalSummary(e), choices = e.choices?.length ? e.choices : ["approve", "reject"];
   let buttons;
   if (choices.includes("native")) buttons = '<button class="btn primary sm" data-approval-native="true">\u5728\u5B8C\u6574\u5DE5\u5177\u754C\u9762\u5904\u7406</button>';
-  else if (e.type === "question") buttons = `<button class="btn primary sm" data-question="${esc7(e.approvalId)}">\u56DE\u7B54</button><button class="btn sm danger" data-approval="${esc7(e.approvalId)}" data-choice="reject">\u4E0D\u56DE\u7B54</button>${hasNativeUi(session()?.runtimeId) ? '<button class="btn sm" data-approval-native="true">\u5728\u539F\u751F\u754C\u9762\u5904\u7406</button>' : ""}`;
-  else buttons = choices.filter((c) => choiceLabels[c]).map((c) => `<button class="btn sm${c === "approve" ? " primary" : c.startsWith("reject") ? " danger" : ""}" data-approval="${esc7(e.approvalId)}" data-choice="${esc7(c)}">${choiceLabels[c]}</button>`).join("");
-  return `<div class="approval-card"><div class="approval-head">${icon(e.type === "question" ? "info" : "key")}<b>${e.type === "question" ? "Agent \u9700\u8981\u4F60\u8865\u5145\u4FE1\u606F" : "Agent \u8BF7\u6C42\u6388\u6743"}</b>${e.name ? `<span class="muted">${esc7(e.name)}</span>` : ""}</div>${summary ? `<div class="approval-summary">${esc7(summary)}</div>` : ""}${reviewNote(e.data?.review)}<details class="approval-details" data-expand="approval-${esc7(e.approvalId)}"><summary>\u8BE6\u7EC6\u53C2\u6570</summary><pre>${esc7(clip2(pretty(e.data)))}</pre></details><div class="approval-actions">${buttons}</div></div>`;
+  else if (e.type === "question") buttons = `<button class="btn primary sm" data-question="${esc8(e.approvalId)}">\u56DE\u7B54</button><button class="btn sm danger" data-approval="${esc8(e.approvalId)}" data-choice="reject">\u4E0D\u56DE\u7B54</button>${hasNativeUi(session()?.runtimeId) ? '<button class="btn sm" data-approval-native="true">\u5728\u539F\u751F\u754C\u9762\u5904\u7406</button>' : ""}`;
+  else buttons = choices.filter((c) => choiceLabels[c]).map((c) => `<button class="btn sm${c === "approve" ? " primary" : c.startsWith("reject") ? " danger" : ""}" data-approval="${esc8(e.approvalId)}" data-choice="${esc8(c)}">${choiceLabels[c]}</button>`).join("");
+  return `<div class="approval-card"><div class="approval-head">${icon(e.type === "question" ? "info" : "key")}<b>${e.type === "question" ? "Agent \u9700\u8981\u4F60\u8865\u5145\u4FE1\u606F" : "Agent \u8BF7\u6C42\u6388\u6743"}</b>${e.name ? `<span class="muted">${esc8(e.name)}</span>` : ""}</div>${summary ? `<div class="approval-summary">${esc8(summary)}</div>` : ""}${reviewNote(e.data?.review)}<details class="approval-details" data-expand="approval-${esc8(e.approvalId)}"><summary>\u8BE6\u7EC6\u53C2\u6570</summary><pre>${esc8(clip2(pretty(e.data)))}</pre></details><div class="approval-actions">${buttons}</div></div>`;
 }
 function planBlock(e, live) {
   const d = e.data ?? {}, items = (d.entries ?? d.plan ?? []).map((x2) => ({ text: x2.content ?? x2.step ?? "", status: String(x2.status ?? "") }));
   if (!items.length) return miscBlock(e, "list", "\u8BA1\u5212");
   const doing = (x2) => /progress/i.test(x2.status), stalled = !live && items.some(doing);
   const mark = (x2) => x2.status === "completed" ? icon("check") : doing(x2) ? live ? '<span class="spinner"></span>' : '<span class="plan-stalled" title="\u8FD9\u4E00\u8F6E\u5DF2\u7ECF\u7ED3\u675F\uFF0C\u8FD9\u4E00\u9879\u6CA1\u6709\u5B8C\u6210"></span>' : '<span class="plan-dot"></span>';
-  return `<div class="plan-card"><div class="plan-head">${icon("list")}<span>\u8BA1\u5212</span><span class="muted">${items.filter((x2) => x2.status === "completed").length}/${items.length}</span>${stalled ? '<span class="plan-state">\u672A\u5B8C\u6210</span>' : ""}</div><ul>${items.map((x2) => `<li class="${doing(x2) ? live ? "doing" : "stalled" : x2.status === "completed" ? "done" : ""}">${mark(x2)}<span>${esc7(x2.text)}</span></li>`).join("")}</ul></div>`;
+  return `<div class="plan-card"><div class="plan-head">${icon("list")}<span>\u8BA1\u5212</span><span class="muted">${items.filter((x2) => x2.status === "completed").length}/${items.length}</span>${stalled ? '<span class="plan-state">\u672A\u5B8C\u6210</span>' : ""}</div><ul>${items.map((x2) => `<li class="${doing(x2) ? live ? "doing" : "stalled" : x2.status === "completed" ? "done" : ""}">${mark(x2)}<span>${esc8(x2.text)}</span></li>`).join("")}</ul></div>`;
 }
 var steerNotes = {
   pending: ["clock", "\u63D2\u8BDD \xB7 \u7B49\u5F85\u63D2\u5165\u4E0B\u4E00\u6B65"],
@@ -20095,16 +20271,16 @@ function userBlock(e, discarded, steers) {
   let note = "";
   if (e.delivery === "steer") {
     const s = steers.get(e.steerId), key = steerNotes[s?.state] ? s.state : "pending", [ico, text3] = steerNotes[key];
-    note = `<div class="user-note ${key}"${s?.reason ? ` title="${esc7(s.reason)}"` : ""}>${icon(ico)}<span>${esc7(text3)}${key === "failed" && s?.reason ? `\uFF1A${esc7(s.reason)}` : ""}</span></div>`;
+    note = `<div class="user-note ${key}"${s?.reason ? ` title="${esc8(s.reason)}"` : ""}>${icon(ico)}<span>${esc8(text3)}${key === "failed" && s?.reason ? `\uFF1A${esc8(s.reason)}` : ""}</span></div>`;
   } else if (e.fromQueue?.length) note = `<div class="user-note queued">${icon("clock")}<span>${e.fromQueue.length > 1 ? `\u6392\u961F\u7684 ${e.fromQueue.length} \u6761\u6D88\u606F\uFF0C\u5408\u5E76\u53D1\u51FA` : "\u6392\u961F\u6D88\u606F\uFF0C\u4E0A\u4E00\u8F6E\u7ED3\u675F\u540E\u53D1\u51FA"}</span></div>`;
-  return `<article class="message user-message${e.delivery === "steer" ? " steer" : ""}">${userMediaHtml(e.attachments, discarded)}${e.text ? `<div class="user-bubble">${esc7(e.text)}</div>` : ""}${note}<div class="user-meta">${clock(e.at)}</div></article>`;
+  return `<article class="message user-message${e.delivery === "steer" ? " steer" : ""}">${userMediaHtml(e.attachments, discarded)}${e.text ? `<div class="user-bubble">${esc8(e.text)}</div>` : ""}${note}<div class="user-meta">${clock(e.at)}</div></article>`;
 }
 function miscBlock(e, ico, label) {
-  return `<details class="tool" data-expand="${esc7(e.id)}"><summary>${icon(ico, "tool-status")}<span class="tool-name">${label}</span><span class="tool-summary">${esc7(toolSummary(e))}</span>${icon("chevronRight", "tool-caret")}</summary><div class="tool-body"><pre>${esc7(clip2(e.text ?? pretty(e.data ?? {})))}</pre></div></details>`;
+  return `<details class="tool" data-expand="${esc8(e.id)}"><summary>${icon(ico, "tool-status")}<span class="tool-name">${label}</span><span class="tool-summary">${esc8(toolSummary(e))}</span>${icon("chevronRight", "tool-caret")}</summary><div class="tool-body"><pre>${esc8(clip2(e.text ?? pretty(e.data ?? {})))}</pre></div></details>`;
 }
 function diffBlock(e) {
   const text3 = typeof e.text === "string" && e.text ? e.text : null;
-  return `<details class="tool diff-event" data-expand="diff-${esc7(e.turnId ?? e.id)}"><summary>${icon("fileDiff", "tool-status")}<span class="tool-name">\u4EE3\u7801\u53D8\u66F4</span><span class="tool-summary">${esc7(text3 ? diffStat(text3) : "\u5DE5\u4F5C\u533A\u53D8\u66F4")}</span>${icon("chevronRight", "tool-caret")}</summary><div class="tool-body">${text3 ? diffHtml(text3) : `<pre>${esc7(clip2(pretty(e.data)))}</pre>`}</div></details>`;
+  return `<details class="tool diff-event" data-expand="diff-${esc8(e.turnId ?? e.id)}"><summary>${icon("fileDiff", "tool-status")}<span class="tool-name">\u4EE3\u7801\u53D8\u66F4</span><span class="tool-summary">${esc8(text3 ? diffStat(text3) : "\u5DE5\u4F5C\u533A\u53D8\u66F4")}</span>${icon("chevronRight", "tool-caret")}</summary><div class="tool-body">${text3 ? diffHtml(text3) : `<pre>${esc8(clip2(pretty(e.data)))}</pre>`}</div></details>`;
 }
 function turnEndBlock(e) {
   const t = e.turnId ? metrics.turn(e.turnId) : null, why = ["completed", "paused"].includes(e.status) ? "" : stopLabel(e.reason), parts = [{ completed: "\u672C\u8F6E\u5B8C\u6210", interrupted: "\u5DF2\u505C\u6B62", failed: "\u672C\u8F6E\u672A\u5B8C\u6210", paused: "\u5DF2\u6682\u505C" }[e.status] ?? "\u672C\u8F6E\u7ED3\u675F", ...why ? [why] : [], clock(e.at)];
@@ -20113,7 +20289,7 @@ function turnEndBlock(e) {
   if (t?.cacheRatio != null) parts.push(`\u7F13\u5B58 ${t.cacheStatus === "estimated" ? "\u2248" : ""}${pct(t.cacheRatio)}`);
   if (t?.credits != null) parts.push(`\u79EF\u5206 ${t.creditsPartial ? "\u2265" : ""}${creditText(t.credits)}`);
   parts.push(...turnExtras(e.stats));
-  return `<div class="turn-end ${esc7(e.status)}"><span>${parts.map(esc7).join(" \xB7 ")}</span></div>`;
+  return `<div class="turn-end ${esc8(e.status)}"><span>${parts.map(esc8).join(" \xB7 ")}</span></div>`;
 }
 var creditText = (v2) => v2 >= 100 ? String(Math.round(v2)) : String(Number(v2.toFixed(v2 < 10 ? 2 : 1)));
 function sessionTotalHtml(total) {
@@ -20125,7 +20301,7 @@ function sessionTotalHtml(total) {
     ...total.credits != null ? [`\u79EF\u5206 ${total.creditsPartial ? "\u2265" : ""}${creditText(total.credits)}`] : []
   ];
   const tip = "\u8FD9\u4E2A\u4F1A\u8BDD\u5230\u672C\u8F6E\u7ED3\u675F\u4E3A\u6B62\u7684\u5168\u90E8\u8BF7\u6C42\uFF0C\u5305\u62EC\u81EA\u52A8\u5BA1\u67E5\u3001\u6807\u9898\u3001\u957F\u671F\u8981\u6C42\u8BC6\u522B\u8FD9\u4E9B\u8F85\u52A9\u8BF7\u6C42\u3002\u79EF\u5206\u662F Qoder \u6309\u8BF7\u6C42\u56DE\u62A5\u7684\u5B9E\u9645\u6263\u5206\uFF08\u5DF2\u542B\u6298\u6263\uFF09\uFF1BWorkBuddy \u4E0D\u6309\u8BF7\u6C42\u56DE\u62A5\u79EF\u5206\uFF0C\u4E0D\u7B97\u5728\u5185\u3002";
-  return `<div class="turn-total" title="${esc7(tip)}">\u672C\u4F1A\u8BDD\u7D2F\u8BA1 ${parts.map(esc7).join(" \xB7 ")}</div>`;
+  return `<div class="turn-total" title="${esc8(tip)}">\u672C\u4F1A\u8BDD\u7D2F\u8BA1 ${parts.map(esc8).join(" \xB7 ")}</div>`;
 }
 function renderChat(quiet = false) {
   const chat = $2("#chat"), scroller = $2("#scroller");
@@ -20161,7 +20337,7 @@ function renderChat(quiet = false) {
     else if (e.type === "text") {
       if (!e.text?.trim()) continue;
       add(`text:${e.id}`, `<article class="message"><div class="message-content markdown">${cachedMarkdown(e)}</div><div class="message-tools"><button class="icon-btn xs copy-answer" title="\u590D\u5236">${icon("copy")}</button></div></article>`);
-    } else if (e.type === "thinking") add(`thinking:${e.id}`, () => `<details class="thinking" data-expand="thinking-${esc7(e.id)}"><summary>${icon("bulb")}<span>\u601D\u8003\u8FC7\u7A0B</span><span class="muted">${(e.text ?? "").length.toLocaleString()} \u5B57</span>${icon("chevronRight", "tool-caret")}</summary><div class="thinking-body">${esc7(clip2(e.text ?? "", 6e4))}</div></details>`, { thinking: true });
+    } else if (e.type === "thinking") add(`thinking:${e.id}`, () => `<details class="thinking" data-expand="thinking-${esc8(e.id)}"><summary>${icon("bulb")}<span>\u601D\u8003\u8FC7\u7A0B</span><span class="muted">${(e.text ?? "").length.toLocaleString()} \u5B57</span>${icon("chevronRight", "tool-caret")}</summary><div class="thinking-body">${esc8(clip2(e.text ?? "", 6e4))}</div></details>`, { thinking: true });
     else if (["tool-start", "tool-output", "tool-end"].includes(e.type)) {
       const key = toolKey(e);
       if (!key) {
@@ -20181,13 +20357,13 @@ function renderChat(quiet = false) {
     else if (e.type === "approval" || e.type === "question") add(`approval:${e.approvalId ?? e.id}`, approvalBlock(e, resolved));
     else if (e.type === "notice" && e.source === "long-term-rule") {
       if (!e.undone) add(`note:${e.id}`, ruleNoticeHtml(e, rulesUndone.has(e.ruleId)));
-    } else if (e.type === "notice" && e.source === "auto-review" && /^自动审查已允许/.test(e.text ?? "")) add(`note:${e.id}`, () => `<div class="event-note notice quiet" title="${esc7(e.text)}">${icon("shield")}<span>${esc7(e.text)}</span></div>`, { review: true });
+    } else if (e.type === "notice" && e.source === "auto-review" && /^自动审查已允许/.test(e.text ?? "")) add(`note:${e.id}`, () => `<div class="event-note notice quiet" title="${esc8(e.text)}">${icon("shield")}<span>${esc8(e.text)}</span></div>`, { review: true });
     else if (e.type === "error" || e.type === "notice") {
       if (e.type === "error" && upstreamSaid.has(`${e.turnId}\0${e.text}`)) continue;
       const note = e.type === "notice" && e.source === "gateway" ? gatewayNotice(e.text) : null;
       if (note?.transient) continue;
       const quiet2 = e.type === "notice" && e.source === "native-warning";
-      add(`note:${e.id}`, `<div class="event-note ${e.type}${quiet2 ? " quiet" : ""}"${quiet2 ? ` title="${esc7(e.text)}"` : ""}>${icon(e.type === "error" ? "alert" : "info")}<span>${esc7(note ? `${note.long}${note.detail ? ` \xB7 ${note.detail}` : ""}` : e.text)}</span>${e.detail ? `<details><summary>\u8BCA\u65AD\u8BE6\u60C5</summary><pre>${esc7(e.detail)}</pre></details>` : ""}</div>`);
+      add(`note:${e.id}`, `<div class="event-note ${e.type}${quiet2 ? " quiet" : ""}"${quiet2 ? ` title="${esc8(e.text)}"` : ""}>${icon(e.type === "error" ? "alert" : "info")}<span>${esc8(note ? `${note.long}${note.detail ? ` \xB7 ${note.detail}` : ""}` : e.text)}</span>${e.detail ? `<details><summary>\u8BCA\u65AD\u8BE6\u60C5</summary><pre>${esc8(e.detail)}</pre></details>` : ""}</div>`);
     } else if (e.type === "upstream-error") {
       const last = blocks.at(-1);
       if (sameUpstream(last?.upstream?.e, e)) {
@@ -20200,7 +20376,7 @@ function renderChat(quiet = false) {
     } else if (e.type === "turn-end") {
       const said = new Set(events.filter((x2) => x2.turnId === e.turnId && ["error", "upstream-error"].includes(x2.type)).flatMap((x2) => [x2.text, x2.message]));
       const note = e.status === "completed" ? "" : stopNote(e.reason, said);
-      if (note) add(`stop:${e.id}`, `<div class="event-note error">${icon("alert")}<span>${esc7(note)}</span></div>`);
+      if (note) add(`stop:${e.id}`, `<div class="event-note error">${icon("alert")}<span>${esc8(note)}</span></div>`);
       add(`end:${e.id}`, turnEndBlock(e));
       const total = sessionTotalHtml(metrics.totalUntil(Date.parse(e.at ?? "")));
       if (total) add(`total:${e.id}`, total);
@@ -20210,7 +20386,7 @@ function renderChat(quiet = false) {
   else if (!events.length) add("empty", `<div class="empty-chat">${icon("spark")}<span>\u4F1A\u8BDD\u5DF2\u51C6\u5907\u597D\uFF0C\u53D1\u9001\u7B2C\u4E00\u4E2A\u4EFB\u52A1\u5F00\u59CB\u534F\u4F5C\u3002</span></div>`);
   if (running2) {
     const now = activityOf(s);
-    add("working", `<div class="working" data-state="${esc7(now.kind)}"><span class="pulse"></span><span class="working-label">${esc7(now.long)}</span>${now.detail ? `<span class="working-detail" title="${esc7(now.detail)}">${esc7(now.detail)}</span>` : ""}<span class="working-elapsed" id="working-elapsed">${elapsed(turnStartedAt())}</span></div>`);
+    add("working", `<div class="working" data-state="${esc8(now.kind)}"><span class="pulse"></span><span class="working-label">${esc8(now.long)}</span>${now.detail ? `<span class="working-detail" title="${esc8(now.detail)}">${esc8(now.detail)}</span>` : ""}<span class="working-elapsed" id="working-elapsed">${elapsed(turnStartedAt())}</span></div>`);
   }
   const near = scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight < 160;
   patchBlocks(chat, foldRuns(blocks).map((b) => b.fold ? foldBlock(b.fold, running2, open2) : [b.key, b.work ? b.html() : b.html]), quiet);
@@ -20238,30 +20414,47 @@ function stopSession(id) {
     }
   });
 }
+function flushChat() {
+  chatPendingHidden = false;
+  if (chatTimer) {
+    clearTimeout(chatTimer);
+    chatTimer = null;
+  }
+  renderChat();
+  renderFooter();
+}
 function scheduleChat() {
+  if (document.hidden) {
+    chatPendingHidden = true;
+    return;
+  }
   if (chatTimer) return;
   chatTimer = setTimeout(() => {
     chatTimer = null;
+    if (document.hidden) {
+      chatPendingHidden = true;
+      return;
+    }
     renderChat();
     renderFooter();
-  }, document.hasFocus() ? 55 : 250);
+  }, document.hasFocus() ? 80 : 500);
 }
 window.addEventListener("focus", () => {
-  if (!chatTimer) return;
-  clearTimeout(chatTimer);
-  chatTimer = null;
-  renderChat();
-  renderFooter();
+  if (chatTimer || chatPendingHidden) flushChat();
 });
 var activityDirty = /* @__PURE__ */ new Set();
 var activityTimer = null;
 function queueActivity(id) {
+  if (document.hidden) {
+    activityDirty.add(id);
+    return;
+  }
   if (document.hasFocus()) {
     paintActivity(id);
     return;
   }
   activityDirty.add(id);
-  if (!activityTimer) activityTimer = setTimeout(flushActivity, 250);
+  if (!activityTimer) activityTimer = setTimeout(flushActivity, 500);
 }
 function flushActivity() {
   clearTimeout(activityTimer);
@@ -20270,12 +20463,21 @@ function flushActivity() {
   activityDirty.clear();
   for (const id of ids) paintActivity(id);
 }
-var markFocus = () => document.body.classList.toggle("window-inactive", !document.hasFocus());
+var markFocus = () => document.body.classList.toggle("window-inactive", !document.hasFocus() || document.hidden);
 window.addEventListener("focus", () => {
   markFocus();
   flushActivity();
+  updateElapsedNodes();
 });
 window.addEventListener("blur", markFocus);
+document.addEventListener("visibilitychange", () => {
+  markFocus();
+  if (!document.hidden) {
+    if (chatPendingHidden || chatTimer) flushChat();
+    flushActivity();
+    updateElapsedNodes();
+  }
+});
 markFocus();
 function openMenu(anchor, kind) {
   closeMenu();
@@ -20358,7 +20560,7 @@ function fileMenuHtml() {
   const f2 = menu.file, here = f2.inside && f2.exists, name = f2.path.split(/[\\/]/).filter(Boolean).pop() ?? f2.path;
   const item = (id, glyph, label, on = true) => `<button class="menu-item" data-file-menu="${id}" ${on ? "" : "disabled"}>${icon(glyph, "mi-icon")}<span class="mi-main"><span class="mi-name">${label}</span></span></button>`;
   const note = here ? "" : `<div class="menu-note">${icon("info")}<span>${f2.inside ? "\u8FD9\u4E2A\u6587\u4EF6\u5DF2\u7ECF\u4E0D\u5B58\u5728" : "\u4E0D\u5728\u5F53\u524D\u5DE5\u4F5C\u6587\u4EF6\u5939\u91CC\uFF0C\u53EA\u80FD\u590D\u5236\u8DEF\u5F84"}</span></div>`;
-  return `<div class="menu-label" title="${esc7(f2.path)}">${esc7(name)}</div>${item("preview", "eye", "\u9884\u89C8", here && !!f2.preview)}${item("reveal", "folder", "\u5728\u8D44\u6E90\u7BA1\u7406\u5668\u4E2D\u663E\u793A", here)}${item("open", "external", "\u7528\u9ED8\u8BA4\u5E94\u7528\u6253\u5F00", here && f2.kind === "file" && f2.openable !== false)}${item("copy", "copy", "\u590D\u5236\u8DEF\u5F84")}${note}${here && f2.kind === "file" && f2.openable === false ? `<div class="menu-note">${icon("info")}<span>\u8FD9\u7C7B\u6587\u4EF6\u53EF\u80FD\u4F1A\u8FD0\u884C\u7A0B\u5E8F\uFF0C\u4E0D\u80FD\u76F4\u63A5\u6253\u5F00\uFF0C\u53EF\u4EE5\u5728\u8D44\u6E90\u7BA1\u7406\u5668\u91CC\u67E5\u770B</span></div>` : ""}`;
+  return `<div class="menu-label" title="${esc8(f2.path)}">${esc8(name)}</div>${item("preview", "eye", "\u9884\u89C8", here && !!f2.preview)}${item("reveal", "folder", "\u5728\u8D44\u6E90\u7BA1\u7406\u5668\u4E2D\u663E\u793A", here)}${item("open", "external", "\u7528\u9ED8\u8BA4\u5E94\u7528\u6253\u5F00", here && f2.kind === "file" && f2.openable !== false)}${item("copy", "copy", "\u590D\u5236\u8DEF\u5F84")}${note}${here && f2.kind === "file" && f2.openable === false ? `<div class="menu-note">${icon("info")}<span>\u8FD9\u7C7B\u6587\u4EF6\u53EF\u80FD\u4F1A\u8FD0\u884C\u7A0B\u5E8F\uFF0C\u4E0D\u80FD\u76F4\u63A5\u6253\u5F00\uFF0C\u53EF\u4EE5\u5728\u8D44\u6E90\u7BA1\u7406\u5668\u91CC\u67E5\u770B</span></div>` : ""}`;
 }
 var SELECTABLE = ".queue-text,pre,.code-view,.terminal-output,.thinking-body,.approval-summary,.upstream-message,.upstream-details,.user-bubble,.markdown,.mono,.transcript,.settings-body";
 var textField = (node) => {
@@ -20404,7 +20606,7 @@ document.addEventListener("mousedown", (e) => {
 }, true);
 function linkMenuHtml() {
   const { host } = new URL(menu.url);
-  return `<div class="menu-label" title="${esc7(menu.url)}">${esc7(host)}</div><button class="menu-item" data-link-menu="open">${icon("external", "mi-icon")}<span class="mi-main"><span class="mi-name">\u5728\u6D4F\u89C8\u5668\u4E2D\u6253\u5F00</span></span></button><button class="menu-item" data-link-menu="copy">${icon("copy", "mi-icon")}<span class="mi-main"><span class="mi-name">\u590D\u5236\u94FE\u63A5</span></span></button>`;
+  return `<div class="menu-label" title="${esc8(menu.url)}">${esc8(host)}</div><button class="menu-item" data-link-menu="open">${icon("external", "mi-icon")}<span class="mi-main"><span class="mi-name">\u5728\u6D4F\u89C8\u5668\u4E2D\u6253\u5F00</span></span></button><button class="menu-item" data-link-menu="copy">${icon("copy", "mi-icon")}<span class="mi-main"><span class="mi-name">\u590D\u5236\u94FE\u63A5</span></span></button>`;
 }
 async function previewFile(f2, line) {
   if (!f2.inside || !f2.exists) throw new Error(f2.inside ? "\u8FD9\u4E2A\u6587\u4EF6\u5DF2\u7ECF\u4E0D\u5B58\u5728" : "\u8FD9\u4E2A\u6587\u4EF6\u4E0D\u5728\u5F53\u524D\u5DE5\u4F5C\u6587\u4EF6\u5939\u91CC");
@@ -20432,17 +20634,17 @@ async function fileMenuAction(id, f2) {
   toast("\u5DF2\u590D\u5236\u8DEF\u5F84");
 }
 function folderMenuHtml() {
-  return `<div class="menu-label">\u5DE5\u4F5C\u6587\u4EF6\u5939</div>${state.snapshot.projects.map((p) => `<button class="menu-item${p.id === state.projectId ? " selected" : ""}" data-pick-folder="${p.id}">${icon("folder", "mi-icon")}<span class="mi-main"><span class="mi-name">${esc7(p.name)}</span><span class="mi-sub">${esc7(p.path)}</span></span>${p.id === state.projectId ? icon("check", "mi-check") : ""}</button>`).join("")}${state.snapshot.projects.length ? '<div class="menu-sep"></div>' : ""}<button class="menu-item" id="menu-open-folder">${icon("folderPlus", "mi-icon")}<span class="mi-main"><span class="mi-name">\u6253\u5F00\u6587\u4EF6\u5939\u2026</span></span></button>`;
+  return `<div class="menu-label">\u5DE5\u4F5C\u6587\u4EF6\u5939</div>${state.snapshot.projects.map((p) => `<button class="menu-item${p.id === state.projectId ? " selected" : ""}" data-pick-folder="${p.id}">${icon("folder", "mi-icon")}<span class="mi-main"><span class="mi-name">${esc8(p.name)}</span><span class="mi-sub">${esc8(p.path)}</span></span>${p.id === state.projectId ? icon("check", "mi-check") : ""}</button>`).join("")}${state.snapshot.projects.length ? '<div class="menu-sep"></div>' : ""}<button class="menu-item" id="menu-open-folder">${icon("folderPlus", "mi-icon")}<span class="mi-main"><span class="mi-name">\u6253\u5F00\u6587\u4EF6\u5939\u2026</span></span></button>`;
 }
 function envMenuHtml() {
   const s = session();
   if (s) {
     const r = runtime(s.runtimeId);
-    return `<div class="menu-label">\u8FD0\u884C\u73AF\u5883</div><div class="menu-static">${tile2(r)}<span class="mi-main"><span class="mi-name">${esc7(r?.name ?? s.runtimeId)}</span><span class="mi-sub">\u4F1A\u8BDD\u521B\u5EFA\u540E\u4E0D\u80FD\u66F4\u6362\u8FD0\u884C\u73AF\u5883\u3002\u8981\u6362\u73AF\u5883\uFF0C\u8BF7\u65B0\u5EFA\u4F1A\u8BDD\u3002</span></span>${icon("lock", "mi-check")}</div>`;
+    return `<div class="menu-label">\u8FD0\u884C\u73AF\u5883</div><div class="menu-static">${tile2(r)}<span class="mi-main"><span class="mi-name">${esc8(r?.name ?? s.runtimeId)}</span><span class="mi-sub">\u4F1A\u8BDD\u521B\u5EFA\u540E\u4E0D\u80FD\u66F4\u6362\u8FD0\u884C\u73AF\u5883\u3002\u8981\u6362\u73AF\u5883\uFF0C\u8BF7\u65B0\u5EFA\u4F1A\u8BDD\u3002</span></span>${icon("lock", "mi-check")}</div>`;
   }
   return `<div class="menu-label">\u8FD0\u884C\u73AF\u5883 \xB7 \u5148\u9009\u73AF\u5883\uFF0C\u518D\u9009\u6A21\u578B</div>${state.snapshot.runtimes.map((r) => {
     const ok = usable(r), current = ok && r.id === state.runtimeId;
-    return `<button class="menu-item env-item${current ? " selected" : ""}" data-env="${r.id}" ${ok ? "" : "disabled"}>${tile2(r)}<span class="mi-main"><span class="mi-name">${esc7(r.name)}<span class="mi-tag">${esc7(r.protocol)}</span></span><span class="mi-sub">${ok ? esc7(r.description) : r.checking ? esc7(unusableReason(r)) : `${esc7(unusableReason(r))} \xB7 \u53EF\u5728\u8BBE\u7F6E \u2192 \u8FD0\u884C\u73AF\u5883\u91CC\u5B89\u88C5\u6216\u6307\u5B9A\u8DEF\u5F84`}</span></span>${current ? icon("check", "mi-check") : ""}</button>`;
+    return `<button class="menu-item env-item${current ? " selected" : ""}" data-env="${r.id}" ${ok ? "" : "disabled"}>${tile2(r)}<span class="mi-main"><span class="mi-name">${esc8(r.name)}<span class="mi-tag">${esc8(r.protocol)}</span></span><span class="mi-sub">${ok ? esc8(r.description) : r.checking ? esc8(unusableReason(r)) : `${esc8(unusableReason(r))} \xB7 \u53EF\u5728\u8BBE\u7F6E \u2192 \u8FD0\u884C\u73AF\u5883\u91CC\u5B89\u88C5\u6216\u6307\u5B9A\u8DEF\u5F84`}</span></span>${current ? icon("check", "mi-check") : ""}</button>`;
   }).join("")}<div class="menu-sep"></div><button class="menu-item subtle" data-open-settings="runtimes">${icon("settings", "mi-icon")}<span class="mi-main"><span class="mi-name">\u7BA1\u7406\u8FD0\u884C\u73AF\u5883\u2026</span></span></button>`;
 }
 function sessionMenuHtml() {
@@ -20508,16 +20710,16 @@ function priceTag(m) {
   const p = priceNow(m.pricing);
   if (!p) return "";
   const tip = ["\u79EF\u5206\u500D\u7387" + (Number.isFinite(p.base) ? ` ${factorText(p.base)}` : ""), m.pricing.original && m.pricing.original !== p.base ? `\u539F\u4EF7 ${factorText(m.pricing.original)}` : "", m.pricing.badge, ...(m.pricing.windows ?? []).map(windowText), m.pricing.peak?.note, p.until ? `\u9650\u514D\u81F3 ${new Date(p.until).toLocaleString("zh-CN", { month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit" })}` : ""].filter(Boolean).join("\n");
-  if (p.free) return `<span class="mi-tag price free" title="${esc7(tip)}">${m.pricing.limited || p.until ? "\u9650\u514D" : "\u514D\u8D39"}</span>`;
+  if (p.free) return `<span class="mi-tag price free" title="${esc8(tip)}">${m.pricing.limited || p.until ? "\u9650\u514D" : "\u514D\u8D39"}</span>`;
   if (p.value === null) return "";
-  const peak = p.peak ? `<span class="mi-tag price peak" title="${esc7(m.pricing.peak?.note ?? "")}">${esc7(m.pricing.peak?.label || "\u9AD8\u5CF0")} \xD7${m.pricing.peak?.factor ?? 2}</span>` : "";
+  const peak = p.peak ? `<span class="mi-tag price peak" title="${esc8(m.pricing.peak?.note ?? "")}">${esc8(m.pricing.peak?.label || "\u9AD8\u5CF0")} \xD7${m.pricing.peak?.factor ?? 2}</span>` : "";
   const original = Number.isFinite(m.pricing.original) && m.pricing.original !== p.value ? m.pricing.original : p.active ? p.base : null;
-  if (p.active) return `<span class="mi-tag price deal" title="${esc7(tip)}">${esc7(windowWord(p.active))} ${factorText(p.value)}<s>${factorText(original)}</s></span>${peak}`;
-  const soon = p.next ? `<span class="mi-tag price soon" title="${esc7(tip)}">${p.next.wait < 60 ? `${p.next.wait} \u5206\u949F\u540E` : `${p.next.start} \u8D77`}${esc7(windowWord(p.next))} ${factorText(p.base * p.next.factor)}</span>` : "";
-  return `<span class="mi-tag price${original ? " deal" : ""}" title="${esc7(tip)}">${factorText(p.value)}${original ? `<s>${factorText(original)}</s>` : ""}</span>${peak}${soon}`;
+  if (p.active) return `<span class="mi-tag price deal" title="${esc8(tip)}">${esc8(windowWord(p.active))} ${factorText(p.value)}<s>${factorText(original)}</s></span>${peak}`;
+  const soon = p.next ? `<span class="mi-tag price soon" title="${esc8(tip)}">${p.next.wait < 60 ? `${p.next.wait} \u5206\u949F\u540E` : `${p.next.start} \u8D77`}${esc8(windowWord(p.next))} ${factorText(p.base * p.next.factor)}</span>` : "";
+  return `<span class="mi-tag price${original ? " deal" : ""}" title="${esc8(tip)}">${factorText(p.value)}${original ? `<s>${factorText(original)}</s>` : ""}</span>${peak}${soon}`;
 }
 function modelItemHtml(m) {
-  return `<button class="menu-item model-item${m.key === state.modelKey ? " selected" : ""}" data-model-key="${esc7(m.key)}"><span class="mi-main"><span class="mi-name">${esc7(sourceName(m))}</span><span class="mi-sub mono">${esc7(m.id)}</span></span><span class="mi-tags">${priceTag(m)}${m.reasoning.some((e) => e !== "none") ? '<span class="mi-tag">\u601D\u8003</span>' : ""}${m.contextMaximum ? `<span class="mi-tag">${compact(m.contextMaximum)}</span>` : ""}</span>${m.key === state.modelKey ? icon("check", "mi-check") : ""}</button>`;
+  return `<button class="menu-item model-item${m.key === state.modelKey ? " selected" : ""}" data-model-key="${esc8(m.key)}"><span class="mi-main"><span class="mi-name">${esc8(sourceName(m))}</span><span class="mi-sub mono">${esc8(m.id)}</span></span><span class="mi-tags">${priceTag(m)}${m.reasoning.some((e) => e !== "none") ? '<span class="mi-tag">\u601D\u8003</span>' : ""}${m.contextMaximum ? `<span class="mi-tag">${compact(m.contextMaximum)}</span>` : ""}</span>${m.key === state.modelKey ? icon("check", "mi-check") : ""}</button>`;
 }
 function modelListHtml() {
   const env = state.runtimeId, q2 = state.menuSearch.trim().toLowerCase();
@@ -20526,14 +20728,14 @@ function modelListHtml() {
     const list = all.filter((m) => !q2 || `${sourceName(m)} ${m.name} ${m.id}`.toLowerCase().includes(q2));
     if (!list.length) return "";
     const open2 = !!q2 || openGroups.has(source), chosen = all.find((m) => m.key === state.modelKey);
-    return `<div class="model-group${open2 ? " open" : ""}"><button class="model-group-head" data-model-group="${source}" aria-expanded="${open2}">${icon("chevronRight", "mg-caret")}<span class="mg-name">${esc7(sourceNames[source])}</span><span class="mg-count">${q2 ? `${list.length}/${all.length}` : all.length} \u4E2A</span>${chosen && !open2 ? `<span class="mg-chosen" title="\u5F53\u524D\u9009\u62E9">${icon("check")}${esc7(sourceName(chosen))}</span>` : ""}</button>${open2 ? `<div class="model-group-body">${list.map(modelItemHtml).join("")}</div>` : ""}</div>`;
+    return `<div class="model-group${open2 ? " open" : ""}"><button class="model-group-head" data-model-group="${source}" aria-expanded="${open2}">${icon("chevronRight", "mg-caret")}<span class="mg-name">${esc8(sourceNames[source])}</span><span class="mg-count">${q2 ? `${list.length}/${all.length}` : all.length} \u4E2A</span>${chosen && !open2 ? `<span class="mg-chosen" title="\u5F53\u524D\u9009\u62E9">${icon("check")}${esc8(sourceName(chosen))}</span>` : ""}</button>${open2 ? `<div class="model-group-body">${list.map(modelItemHtml).join("")}</div>` : ""}</div>`;
   }).join("");
-  const native = !gatewayOnly(env) && (!q2 || "\u539F\u751F native".includes(q2)) ? `<div class="menu-label">\u539F\u751F</div><button class="menu-item model-item${state.modelKey === "native" ? " selected" : ""}" data-model-key="native"><span class="mi-main"><span class="mi-name">\u539F\u751F\u6A21\u578B\u8BBE\u7F6E</span><span class="mi-sub">\u4F7F\u7528 ${esc7(runtime(env)?.name ?? "")} \u81EA\u5DF1\u7684\u6A21\u578B\u4E0E\u767B\u5F55</span></span>${state.modelKey === "native" ? icon("check", "mi-check") : ""}</button>` : "";
+  const native = !gatewayOnly(env) && (!q2 || "\u539F\u751F native".includes(q2)) ? `<div class="menu-label">\u539F\u751F</div><button class="menu-item model-item${state.modelKey === "native" ? " selected" : ""}" data-model-key="native"><span class="mi-main"><span class="mi-name">\u539F\u751F\u6A21\u578B\u8BBE\u7F6E</span><span class="mi-sub">\u4F7F\u7528 ${esc8(runtime(env)?.name ?? "")} \u81EA\u5DF1\u7684\u6A21\u578B\u4E0E\u767B\u5F55</span></span>${state.modelKey === "native" ? icon("check", "mi-check") : ""}</button>` : "";
   return groups + native || `<div class="menu-empty">${models().length ? "\u6CA1\u6709\u5339\u914D\u7684\u6A21\u578B" : "\u8FD8\u6CA1\u6709\u6A21\u578B\u76EE\u5F55\u3002\u8BF7\u5230\u8BBE\u7F6E \u2192 \u6A21\u578B\u6E90\u4E0B\u8F7D\u7EC4\u4EF6\u5E76\u767B\u5F55\u3002"}</div>`;
 }
 function effortRow(model, value) {
   if (!model.reasoning.length) return `<div class="param"><span class="param-label">${icon("bulb")}\u601D\u8003\u5F3A\u5EA6</span><span class="param-inline">\u6765\u6E90\u672A\u58F0\u660E\u6863\u4F4D\uFF0C\u4F7F\u7528\u9ED8\u8BA4</span></div>`;
-  return `<div class="param"><span class="param-label">${icon("bulb")}\u601D\u8003\u5F3A\u5EA6</span><div class="seg">${["", ...model.reasoning].map((e) => `<button class="${value === e ? "on" : ""}" data-effort="${esc7(e)}">${e ? esc7(effortName(e)) : `\u9ED8\u8BA4${model.defaultReasoning ? `<small>${esc7(effortName(model.defaultReasoning))}</small>` : ""}`}</button>`).join("")}</div></div>`;
+  return `<div class="param"><span class="param-label">${icon("bulb")}\u601D\u8003\u5F3A\u5EA6</span><div class="seg">${["", ...model.reasoning].map((e) => `<button class="${value === e ? "on" : ""}" data-effort="${esc8(e)}">${e ? esc8(effortName(e)) : `\u9ED8\u8BA4${model.defaultReasoning ? `<small>${esc8(effortName(model.defaultReasoning))}</small>` : ""}`}</button>`).join("")}</div></div>`;
 }
 function contextRow(model, value) {
   if (!model.contexts.length) return "";
@@ -20542,7 +20744,7 @@ function contextRow(model, value) {
 function budgetRow(model, value, context) {
   if (!model.contextMaximum) return "";
   const max = budgetMax(model, context), text3 = value ? formatTokens(value) : "";
-  return `<div class="param"><span class="param-label">${icon("database")}\u672C\u5730\u538B\u7F29\u9884\u7B97</span><div class="budget"><input id="budget-input" type="text" inputmode="decimal" autocomplete="off" spellcheck="false" placeholder="\u4E0D\u8BBE\u7F6E" value="${esc7(text3)}" data-max="${max ?? ""}" aria-describedby="budget-help" title="\u53EF\u4EE5\u5199 900K\u30011M\u30010.75M\u300190\u4E07 \u6216\u5177\u4F53\u6570\u5B57\uFF1BK\u3001M \u6309 1000 \u8FDB\u4F4D\uFF0C\u548C\u6A21\u578B\u6E90\u6807\u7684\u7A97\u53E3\u4E00\u81F4"><span class="budget-help" id="budget-help">${esc7(value ? budgetCheck(text3, { max }).text : `\u4F8B\u5982 200K\u30010.5M\uFF0C\u6700\u5927 ${compact(max)}`)}</span></div></div>`;
+  return `<div class="param"><span class="param-label">${icon("database")}\u672C\u5730\u538B\u7F29\u9884\u7B97</span><div class="budget"><input id="budget-input" type="text" inputmode="decimal" autocomplete="off" spellcheck="false" placeholder="\u4E0D\u8BBE\u7F6E" value="${esc8(text3)}" data-max="${max ?? ""}" aria-describedby="budget-help" title="\u53EF\u4EE5\u5199 900K\u30011M\u30010.75M\u300190\u4E07 \u6216\u5177\u4F53\u6570\u5B57\uFF1BK\u3001M \u6309 1000 \u8FDB\u4F4D\uFF0C\u548C\u6A21\u578B\u6E90\u6807\u7684\u7A97\u53E3\u4E00\u81F4"><span class="budget-help" id="budget-help">${esc8(value ? budgetCheck(text3, { max }).text : `\u4F8B\u5982 200K\u30010.5M\uFF0C\u6700\u5927 ${compact(max)}`)}</span></div></div>`;
 }
 function paintBudgetHelp(input) {
   const help = $2("#budget-help");
@@ -20568,14 +20770,14 @@ function nativeEfforts() {
 function nativeChoiceHtml() {
   const rows = nativeCatalog.get(state.runtimeId) ?? [];
   if (!rows.length) return "";
-  const group = (items, label) => items.length ? `<optgroup label="${label}">${items.map((r) => `<option value="${esc7(r.id)}">${esc7(r.name)} \xB7 ${esc7(r.id)}${r.hidden ? " \xB7 \u9690\u85CF" : ""}</option>`).join("")}</optgroup>` : "";
+  const group = (items, label) => items.length ? `<optgroup label="${label}">${items.map((r) => `<option value="${esc8(r.id)}">${esc8(r.name)} \xB7 ${esc8(r.id)}${r.hidden ? " \xB7 \u9690\u85CF" : ""}</option>`).join("")}</optgroup>` : "";
   return `<select id="native-model-choice" aria-label="\u5B8C\u6574\u539F\u751F\u6A21\u578B\u5217\u8868"><option value="">\u624B\u52A8\u586B\u5199 / \u539F\u751F\u5F53\u524D\u6A21\u578B</option>${group(rows.filter((r) => !r.hidden), "\u5E38\u89C4\u6A21\u578B")}${group(rows.filter((r) => r.hidden), "\u539F\u751F\u9690\u85CF\u6761\u76EE")}</select>`;
 }
 function nativeParamsHtml() {
   const rows = nativeCatalog.get(state.runtimeId) ?? [], canList = ["codex", "antigravity"].includes(state.runtimeId);
-  return `<div class="param"><span class="param-label">${icon("cpu")}\u539F\u751F\u6A21\u578B ID</span><div class="native-row"><input id="native-id" placeholder="\u7559\u7A7A\u4F7F\u7528\u539F\u751F\u5F53\u524D\u6A21\u578B" value="${esc7(state.nativeModel)}" autocomplete="off" spellcheck="false">${canList ? `<button class="btn sm" id="load-native-models">${rows.length ? "\u5237\u65B0\u76EE\u5F55" : "\u8BFB\u53D6\u539F\u751F\u76EE\u5F55"}</button>` : ""}</div></div>
+  return `<div class="param"><span class="param-label">${icon("cpu")}\u539F\u751F\u6A21\u578B ID</span><div class="native-row"><input id="native-id" placeholder="\u7559\u7A7A\u4F7F\u7528\u539F\u751F\u5F53\u524D\u6A21\u578B" value="${esc8(state.nativeModel)}" autocomplete="off" spellcheck="false">${canList ? `<button class="btn sm" id="load-native-models">${rows.length ? "\u5237\u65B0\u76EE\u5F55" : "\u8BFB\u53D6\u539F\u751F\u76EE\u5F55"}</button>` : ""}</div></div>
     <div id="native-choice-slot">${nativeChoiceHtml()}</div>
-    <div class="param"><span class="param-label">${icon("bulb")}\u601D\u8003\u5F3A\u5EA6</span><select id="native-effort"><option value="">\u539F\u751F\u9ED8\u8BA4</option>${nativeEfforts().map((e) => `<option value="${esc7(e)}" ${state.reasoning === e ? "selected" : ""}>${esc7(effortName(e))}</option>`).join("")}</select></div>
+    <div class="param"><span class="param-label">${icon("bulb")}\u601D\u8003\u5F3A\u5EA6</span><select id="native-effort"><option value="">\u539F\u751F\u9ED8\u8BA4</option>${nativeEfforts().map((e) => `<option value="${esc8(e)}" ${state.reasoning === e ? "selected" : ""}>${esc8(effortName(e))}</option>`).join("")}</select></div>
     <div class="param-hint" id="native-model-summary">${rows.length ? `\u5171 ${rows.length} \u4E2A\u539F\u751F\u6A21\u578B${rows.some((r) => r.hidden) ? `\uFF08\u542B ${rows.filter((r) => r.hidden).length} \u4E2A\u9690\u85CF\u6761\u76EE\uFF09` : ""}` : "\u5DE5\u5177\u3001\u6280\u80FD\u3001MCP \u4E0E\u6743\u9650\u90FD\u4F7F\u7528\u539F\u751F\u914D\u7F6E\u3002"}</div>
     <div class="param-actions"><button class="btn sm" id="save-model-default">${icon("check")}\u8BB0\u4F4F\u6B64\u642D\u914D</button></div>`;
 }
@@ -20590,17 +20792,17 @@ function repaintNativeEffort() {
   if (!select) return;
   const efforts = nativeEfforts();
   if (!efforts.includes(state.reasoning)) state.reasoning = "";
-  select.innerHTML = `<option value="">\u539F\u751F\u9ED8\u8BA4</option>${efforts.map((e) => `<option value="${esc7(e)}">${esc7(effortName(e))}</option>`).join("")}`;
+  select.innerHTML = `<option value="">\u539F\u751F\u9ED8\u8BA4</option>${efforts.map((e) => `<option value="${esc8(e)}">${esc8(effortName(e))}</option>`).join("")}`;
   select.value = state.reasoning;
 }
 function sessionParamsHtml(s) {
   const m = modelOf(s.selection), p = state.params;
   const native = s.selection.modelKey === "native";
-  if (!m || m.source === "antigravity") return `<div class="menu-session-head">${icon("lock")}<div><b>${esc7(m?.name ?? (native ? "\u539F\u751F\u6A21\u578B" : s.selection.modelKey))}</b><small>${esc7(native ? s.selection.nativeModel || "\u539F\u751F\u5F53\u524D\u6A21\u578B" : m ? m.id : "\u4E0D\u5728\u5F53\u524D\u6A21\u578B\u76EE\u5F55\u4E2D")}</small></div></div><div class="param-note">${icon("info")}<span>${m ? "Gemini \u7531 Antigravity \u539F\u751F\u6267\u884C\uFF0C\u53C2\u6570\u5728\u539F\u751F\u754C\u9762\u4E2D\u8C03\u6574\u3002" : native ? "\u539F\u751F\u6A21\u578B\u4F1A\u8BDD\u7684\u53C2\u6570\u8BF7\u5728\u539F\u751F\u754C\u9762\u4E2D\u8C03\u6574\u3002" : "\u8FD9\u4E2A\u6A21\u578B\u4E0D\u5728\u5F53\u524D\u76EE\u5F55\u4E2D\u3002\u8BF7\u5237\u65B0\u6A21\u578B\u6E90\uFF0C\u518D\u7528\u7F16\u8F91\u6846\u4E0A\u65B9\u7684\u201C\u91CD\u65B0\u786E\u8BA4\u6A21\u578B\u201D\u3002"}</span></div>`;
+  if (!m || m.source === "antigravity") return `<div class="menu-session-head">${icon("lock")}<div><b>${esc8(m?.name ?? (native ? "\u539F\u751F\u6A21\u578B" : s.selection.modelKey))}</b><small>${esc8(native ? s.selection.nativeModel || "\u539F\u751F\u5F53\u524D\u6A21\u578B" : m ? m.id : "\u4E0D\u5728\u5F53\u524D\u6A21\u578B\u76EE\u5F55\u4E2D")}</small></div></div><div class="param-note">${icon("info")}<span>${m ? "Gemini \u7531 Antigravity \u539F\u751F\u6267\u884C\uFF0C\u53C2\u6570\u5728\u539F\u751F\u754C\u9762\u4E2D\u8C03\u6574\u3002" : native ? "\u539F\u751F\u6A21\u578B\u4F1A\u8BDD\u7684\u53C2\u6570\u8BF7\u5728\u539F\u751F\u754C\u9762\u4E2D\u8C03\u6574\u3002" : "\u8FD9\u4E2A\u6A21\u578B\u4E0D\u5728\u5F53\u524D\u76EE\u5F55\u4E2D\u3002\u8BF7\u5237\u65B0\u6A21\u578B\u6E90\uFF0C\u518D\u7528\u7F16\u8F91\u6846\u4E0A\u65B9\u7684\u201C\u91CD\u65B0\u786E\u8BA4\u6A21\u578B\u201D\u3002"}</span></div>`;
   const running2 = busy(s), pending2 = s.selectionNext;
-  const queued = pending2 ? `<div class="param-pending">${icon("clock")}<span><b>\u5DF2\u6392\u961F</b>${esc7(paramsText(pending2))}<small>\u672C\u8F6E\u7ED3\u675F\u540E\u81EA\u52A8\u5E94\u7528</small></span><button class="btn sm" id="cancel-session-params">\u53D6\u6D88\u6392\u961F</button></div>` : "";
+  const queued = pending2 ? `<div class="param-pending">${icon("clock")}<span><b>\u5DF2\u6392\u961F</b>${esc8(paramsText(pending2))}<small>\u672C\u8F6E\u7ED3\u675F\u540E\u81EA\u52A8\u5E94\u7528</small></span><button class="btn sm" id="cancel-session-params">\u53D6\u6D88\u6392\u961F</button></div>` : "";
   const timing = running2 ? "\u4EFB\u52A1\u6B63\u5728\u8FD0\u884C\uFF1A\u65B0\u53C2\u6570\u5148\u6392\u961F\uFF0C\u672C\u8F6E\u7ED3\u675F\u540E\u81EA\u52A8\u5E94\u7528\uFF0C\u5E94\u7528\u524D\u53EF\u4EE5\u968F\u65F6\u53D6\u6D88\u3002" : "";
-  return `<div class="menu-session-head">${icon("lock")}<div><b>${esc7(m.name)}</b><small>${esc7(sourceNames[m.source])} \xB7 ${esc7(m.id)}</small></div></div><div class="menu-params">${effortRow(m, p.reasoning)}${contextRow(m, p.contextTokens)}${budgetRow(m, p.contextBudget, p.contextTokens)}<div class="param-hint">${budgetNote}\u4F1A\u8BDD\u521B\u5EFA\u540E\u4E0D\u80FD\u66F4\u6362\u6A21\u578B\u6216\u8FD0\u884C\u73AF\u5883\uFF1B\u5E94\u7528\u65B0\u53C2\u6570\u4F1A\u91CD\u542F\u8FD9\u4E2A\u4F1A\u8BDD\u7684\u8FD0\u884C\u73AF\u5883\uFF0C\u4E0B\u4E00\u8F6E\u4F1A\u91CD\u65B0\u53D1\u9001\u5B8C\u6574\u4E0A\u4E0B\u6587\u3002${timing}</div>${queued}<div class="param-actions"><button class="btn primary sm" id="apply-session-params">${running2 ? pending2 ? "\u66FF\u6362\u6392\u961F\u7684\u53C2\u6570" : "\u672C\u8F6E\u7ED3\u675F\u540E\u5E94\u7528" : "\u5E94\u7528\u5230\u6B64\u4F1A\u8BDD"}</button></div></div>`;
+  return `<div class="menu-session-head">${icon("lock")}<div><b>${esc8(m.name)}</b><small>${esc8(sourceNames[m.source])} \xB7 ${esc8(m.id)}</small></div></div><div class="menu-params">${effortRow(m, p.reasoning)}${contextRow(m, p.contextTokens)}${budgetRow(m, p.contextBudget, p.contextTokens)}<div class="param-hint">${budgetNote}\u4F1A\u8BDD\u521B\u5EFA\u540E\u4E0D\u80FD\u66F4\u6362\u6A21\u578B\u6216\u8FD0\u884C\u73AF\u5883\uFF1B\u5E94\u7528\u65B0\u53C2\u6570\u4F1A\u91CD\u542F\u8FD9\u4E2A\u4F1A\u8BDD\u7684\u8FD0\u884C\u73AF\u5883\uFF0C\u4E0B\u4E00\u8F6E\u4F1A\u91CD\u65B0\u53D1\u9001\u5B8C\u6574\u4E0A\u4E0B\u6587\u3002${timing}</div>${queued}<div class="param-actions"><button class="btn primary sm" id="apply-session-params">${running2 ? pending2 ? "\u66FF\u6362\u6392\u961F\u7684\u53C2\u6570" : "\u672C\u8F6E\u7ED3\u675F\u540E\u5E94\u7528" : "\u5E94\u7528\u5230\u6B64\u4F1A\u8BDD"}</button></div></div>`;
 }
 function modelMenuHtml() {
   const s = session();
@@ -20702,7 +20904,7 @@ function renderRightBody() {
   else if (ui.rightTab === "tasks") renderTasks();
   else void renderChanges();
 }
-var emptyPane = (ico, text3, extra = "") => `<div class="pane-empty">${icon(ico)}<span>${esc7(text3)}</span>${extra}</div>`;
+var emptyPane = (ico, text3, extra = "") => `<div class="pane-empty">${icon(ico)}<span>${esc8(text3)}</span>${extra}</div>`;
 function statusClass(status) {
   const s = status.trim();
   return s === "??" ? "untracked" : s.includes("D") ? "deleted" : s.includes("A") ? "added" : s.includes("R") ? "renamed" : "modified";
@@ -20717,10 +20919,10 @@ function paintChanges() {
   const agent = lastAgentDiff(), agentOpen = !!body.querySelector(".agent-diff")?.open, message = body.querySelector("#commit-message")?.value ?? "", checked = new Set([...body.querySelectorAll('input[name="stage-file"]:checked')].map((x2) => x2.value));
   const rows = g.files.map((f2) => {
     const slash2 = f2.path.lastIndexOf("/"), dir = slash2 >= 0 ? f2.path.slice(0, slash2 + 1) : "", name = f2.path.slice(slash2 + 1), staged = f2.status[0] !== " " && f2.status[0] !== "?";
-    return `<div class="change-row${state.diffPath === f2.path ? " open" : ""}"><input type="checkbox" name="stage-file" value="${esc7(f2.path)}" aria-label="\u9009\u62E9 ${esc7(f2.path)}"><button class="change-main" data-diff-file="${esc7(f2.path)}" title="${esc7(f2.oldPath ? `${f2.oldPath} \u2192 ${f2.path}` : f2.path)}"><span class="badge ${statusClass(f2.status)}">${esc7(f2.status.trim() === "??" ? "U" : f2.status.trim()[0] ?? "M")}</span><span class="change-path"><span class="change-name">${esc7(name)}</span><span class="change-dir">${esc7(dir)}</span></span>${staged ? '<span class="staged">\u5DF2\u6682\u5B58</span>' : ""}</button></div>${state.diffPath === f2.path ? `<div class="diff-box" id="diff-container">${diffHtml(state.diff)}</div>` : ""}`;
+    return `<div class="change-row${state.diffPath === f2.path ? " open" : ""}"><input type="checkbox" name="stage-file" value="${esc8(f2.path)}" aria-label="\u9009\u62E9 ${esc8(f2.path)}"><button class="change-main" data-diff-file="${esc8(f2.path)}" title="${esc8(f2.oldPath ? `${f2.oldPath} \u2192 ${f2.path}` : f2.path)}"><span class="badge ${statusClass(f2.status)}">${esc8(f2.status.trim() === "??" ? "U" : f2.status.trim()[0] ?? "M")}</span><span class="change-path"><span class="change-name">${esc8(name)}</span><span class="change-dir">${esc8(dir)}</span></span>${staged ? '<span class="staged">\u5DF2\u6682\u5B58</span>' : ""}</button></div>${state.diffPath === f2.path ? `<div class="diff-box" id="diff-container">${diffHtml(state.diff)}</div>` : ""}`;
   }).join("");
-  body.innerHTML = `<div class="changes"><div class="pane-toolbar"><span class="pane-title">${icon("git")}${g.repository ? esc7(g.branch) : "\u672A\u521D\u59CB\u5316 Git"}</span><span class="pane-meta">${g.repository ? `${g.files.length} \u4E2A\u6587\u4EF6` : ""}</span><button class="icon-btn sm" id="refresh-git" title="\u5237\u65B0">${icon("refresh")}</button></div>
-    ${agent ? `<details class="agent-diff" data-expand="agent-diff"><summary>${icon("spark")}<span>\u672C\u4F1A\u8BDD Agent \u62A5\u544A\u7684\u53D8\u66F4</span><span class="muted">${esc7(typeof agent.text === "string" && agent.text ? diffStat(agent.text) : "")}</span></summary>${typeof agent.text === "string" && agent.text ? diffHtml(agent.text) : `<pre>${esc7(clip2(pretty(agent.data)))}</pre>`}</details>` : ""}
+  body.innerHTML = `<div class="changes"><div class="pane-toolbar"><span class="pane-title">${icon("git")}${g.repository ? esc8(g.branch) : "\u672A\u521D\u59CB\u5316 Git"}</span><span class="pane-meta">${g.repository ? `${g.files.length} \u4E2A\u6587\u4EF6` : ""}</span><button class="icon-btn sm" id="refresh-git" title="\u5237\u65B0">${icon("refresh")}</button></div>
+    ${agent ? `<details class="agent-diff" data-expand="agent-diff"><summary>${icon("spark")}<span>\u672C\u4F1A\u8BDD Agent \u62A5\u544A\u7684\u53D8\u66F4</span><span class="muted">${esc8(typeof agent.text === "string" && agent.text ? diffStat(agent.text) : "")}</span></summary>${typeof agent.text === "string" && agent.text ? diffHtml(agent.text) : `<pre>${esc8(clip2(pretty(agent.data)))}</pre>`}</details>` : ""}
     ${!g.repository ? emptyPane("git", "\u8FD9\u4E2A\u6587\u4EF6\u5939\u8FD8\u4E0D\u662F Git \u4ED3\u5E93", '<button class="btn sm" id="init-git">\u521D\u59CB\u5316 Git \u4ED3\u5E93</button>') : !g.files.length ? emptyPane("check", "\u5DE5\u4F5C\u76EE\u5F55\u662F\u5E72\u51C0\u7684", "<small>Agent \u4FEE\u6539\u7684\u6587\u4EF6\u4F1A\u51FA\u73B0\u5728\u8FD9\u91CC\u3002</small>") : `<div class="change-list">${rows}</div><div class="commit-box"><div class="commit-actions"><button class="btn sm" id="stage-selected">\u6682\u5B58\u6240\u9009</button><span class="muted">\u53EA\u63D0\u4EA4\u5DF2\u6682\u5B58\u7684\u53D8\u66F4</span></div><textarea id="commit-message" rows="2" placeholder="\u63D0\u4EA4\u8BF4\u660E"></textarea><button class="btn primary sm" id="commit">${icon("check")}\u63D0\u4EA4\u5230\u672C\u5730</button></div>`}</div>`;
   const details = body.querySelector(".agent-diff");
   if (details) details.open = agentOpen;
@@ -20768,11 +20970,11 @@ async function loadTree(path2 = "", projectId = state.projectId, cache = state.t
   cache.set(path2, await call("project:tree", { projectId, path: path2 }));
 }
 function treeHtml(path2 = "", depth = 0) {
-  return (state.tree.get(path2) ?? []).map((f2) => `<button class="tree-row d${Math.min(depth, 9)}${state.file?.path === f2.path ? " active" : ""}" data-file-path="${esc7(f2.path)}" data-directory="${f2.directory}">${f2.directory ? icon(state.expanded.has(f2.path) ? "chevronDown" : "chevronRight", "tree-caret") : '<span class="tree-caret"></span>'}${icon(f2.directory ? "folder" : "file", "tree-icon")}<span class="tree-name">${esc7(f2.name)}</span></button>${f2.directory && state.expanded.has(f2.path) ? treeHtml(f2.path, depth + 1) : ""}`).join("");
+  return (state.tree.get(path2) ?? []).map((f2) => `<button class="tree-row d${Math.min(depth, 9)}${state.file?.path === f2.path ? " active" : ""}" data-file-path="${esc8(f2.path)}" data-directory="${f2.directory}">${f2.directory ? icon(state.expanded.has(f2.path) ? "chevronDown" : "chevronRight", "tree-caret") : '<span class="tree-caret"></span>'}${icon(f2.directory ? "folder" : "file", "tree-icon")}<span class="tree-name">${esc8(f2.name)}</span></button>${f2.directory && state.expanded.has(f2.path) ? treeHtml(f2.path, depth + 1) : ""}`).join("");
 }
 function codeHtml(text3) {
   const lines = text3.split("\n"), max = 4e3;
-  return `<pre class="code">${lines.slice(0, max).map((l, i2) => `<span class="cl"><span class="ln">${i2 + 1}</span><span class="lc">${esc7(l) || " "}</span></span>`).join("")}</pre>${lines.length > max ? `<div class="pane-note">\u4EC5\u9884\u89C8\u524D ${max} \u884C\uFF0C\u5171 ${lines.length.toLocaleString()} \u884C\u3002\u8FDB\u5165\u7F16\u8F91\u53EF\u67E5\u770B\u5168\u90E8\u5185\u5BB9\u3002</div>` : ""}`;
+  return `<pre class="code">${lines.slice(0, max).map((l, i2) => `<span class="cl"><span class="ln">${i2 + 1}</span><span class="lc">${esc8(l) || " "}</span></span>`).join("")}</pre>${lines.length > max ? `<div class="pane-note">\u4EC5\u9884\u89C8\u524D ${max} \u884C\uFF0C\u5171 ${lines.length.toLocaleString()} \u884C\u3002\u8FDB\u5165\u7F16\u8F91\u53EF\u67E5\u770B\u5168\u90E8\u5185\u5BB9\u3002</div>` : ""}`;
 }
 async function renderFiles() {
   const body = $2("#rp-body"), projectId = state.projectId, epoch = rightEpoch;
@@ -20785,8 +20987,8 @@ async function renderFiles() {
     if (!state.tree.has("")) await loadTree();
     if (projectId !== state.projectId || epoch !== rightEpoch || ui.rightTab !== "files") return;
     const f2 = state.file;
-    body.innerHTML = `<div class="files${f2 ? " has-file" : ""}"><div class="tree-pane"><div class="pane-toolbar"><span class="pane-title">${icon("folder")}${esc7(project().name)}</span><button class="icon-btn sm" id="refresh-files" title="\u5237\u65B0">${icon("refresh")}</button></div><div id="tree" class="tree">${treeHtml() || '<div class="pane-empty small">\u7A7A\u6587\u4EF6\u5939</div>'}</div></div>
-      ${f2 ? `<div class="preview-pane${state.dirty ? " dirty" : ""}" id="preview-pane"><div class="pane-toolbar"><span class="pane-title mono" title="${esc7(f2.path)}">${icon("file")}<span class="file-path">${esc7(f2.path)}</span><i class="dirty-dot" title="\u672A\u4FDD\u5B58"></i></span><span class="pane-actions">${f2.editing ? '<button class="btn sm" id="cancel-edit">\u5B8C\u6210</button><button class="btn primary sm" id="save-file">\u4FDD\u5B58</button>' : `<button class="btn sm" id="reference-file" title="\u628A\u6587\u4EF6\u8DEF\u5F84\u52A0\u5165\u4EFB\u52A1\u8349\u7A3F">\u5F15\u7528</button><button class="btn sm" id="edit-file">${icon("edit")}\u7F16\u8F91</button>`}<button class="icon-btn sm" id="close-file" title="\u5173\u95ED\u6587\u4EF6">${icon("close")}</button></span></div>${f2.editing ? '<textarea id="editor" class="editor" spellcheck="false" aria-label="\u6587\u4EF6\u7F16\u8F91\u5668"></textarea>' : `<div class="code-view">${codeHtml(f2.text)}</div>`}</div>` : ""}</div>`;
+    body.innerHTML = `<div class="files${f2 ? " has-file" : ""}"><div class="tree-pane"><div class="pane-toolbar"><span class="pane-title">${icon("folder")}${esc8(project().name)}</span><button class="icon-btn sm" id="refresh-files" title="\u5237\u65B0">${icon("refresh")}</button></div><div id="tree" class="tree">${treeHtml() || '<div class="pane-empty small">\u7A7A\u6587\u4EF6\u5939</div>'}</div></div>
+      ${f2 ? `<div class="preview-pane${state.dirty ? " dirty" : ""}" id="preview-pane"><div class="pane-toolbar"><span class="pane-title mono" title="${esc8(f2.path)}">${icon("file")}<span class="file-path">${esc8(f2.path)}</span><i class="dirty-dot" title="\u672A\u4FDD\u5B58"></i></span><span class="pane-actions">${f2.editing ? '<button class="btn sm" id="cancel-edit">\u5B8C\u6210</button><button class="btn primary sm" id="save-file">\u4FDD\u5B58</button>' : `<button class="btn sm" id="reference-file" title="\u628A\u6587\u4EF6\u8DEF\u5F84\u52A0\u5165\u4EFB\u52A1\u8349\u7A3F">\u5F15\u7528</button><button class="btn sm" id="edit-file">${icon("edit")}\u7F16\u8F91</button>`}<button class="icon-btn sm" id="close-file" title="\u5173\u95ED\u6587\u4EF6">${icon("close")}</button></span></div>${f2.editing ? '<textarea id="editor" class="editor" spellcheck="false" aria-label="\u6587\u4EF6\u7F16\u8F91\u5668"></textarea>' : `<div class="code-view">${codeHtml(f2.text)}</div>`}</div>` : ""}</div>`;
     if (f2?.editing) {
       const editor = $2("#editor");
       editor.value = f2.text;
@@ -20851,7 +21053,7 @@ async function discardFile(close2) {
     reportDirty();
     await renderFiles();
   };
-  if (state.dirty) modal("\u653E\u5F03\u672A\u4FDD\u5B58\u7684\u4FEE\u6539\uFF1F", `<p>${esc7(f2.path)} \u6709\u672A\u4FDD\u5B58\u7684\u4FEE\u6539\u3002\u653E\u5F03\u540E\u4F1A\u6062\u590D\u4E3A\u78C1\u76D8\u4E0A\u7684\u5185\u5BB9\u3002</p>`, done, { confirm: "\u653E\u5F03\u4FEE\u6539", danger: true });
+  if (state.dirty) modal("\u653E\u5F03\u672A\u4FDD\u5B58\u7684\u4FEE\u6539\uFF1F", `<p>${esc8(f2.path)} \u6709\u672A\u4FDD\u5B58\u7684\u4FEE\u6539\u3002\u653E\u5F03\u540E\u4F1A\u6062\u590D\u4E3A\u78C1\u76D8\u4E0A\u7684\u5185\u5BB9\u3002</p>`, done, { confirm: "\u653E\u5F03\u4FEE\u6539", danger: true });
   else if (close2) await done();
   else {
     f2.editing = false;
@@ -20871,9 +21073,9 @@ function renderTasksLive() {
   const snap = state.snapshot, live = snap.sessions.filter((s) => !s.archived && busy(s));
   const sources2 = ["qoder", "workbuddy", "antigravity"].map((id) => {
     const c = snap.catalog[id], status = c?.status ?? "none";
-    return `<div class="task-row"><span class="dot ${status === "ready" ? "completed" : status === "loading" ? "running" : status === "error" ? "failed" : "idle"}"></span><span class="task-main static"><span class="task-title">${sourceNames[id]}</span><span class="task-sub">${status === "loading" ? "\u6B63\u5728\u8BFB\u53D6\u76EE\u5F55\u2026" : status === "needs-component" ? "\u9700\u8981\u4E0B\u8F7D\u7EC4\u4EF6" : status === "ready" ? `${c.models.filter((m) => m.enabled).length} \u4E2A\u6A21\u578B \xB7 ${since(c.checkedAt)}\u66F4\u65B0` : status === "error" ? esc7(c.error) : "\u5C1A\u672A\u8BFB\u53D6"}</span></span><button class="icon-btn sm" data-refresh-source="${id}" title="\u5237\u65B0\u76EE\u5F55" ${status === "loading" ? "disabled" : ""}>${icon("refresh")}</button></div>`;
+    return `<div class="task-row"><span class="dot ${status === "ready" ? "completed" : status === "loading" ? "running" : status === "error" ? "failed" : "idle"}"></span><span class="task-main static"><span class="task-title">${sourceNames[id]}</span><span class="task-sub">${status === "loading" ? "\u6B63\u5728\u8BFB\u53D6\u76EE\u5F55\u2026" : status === "needs-component" ? "\u9700\u8981\u4E0B\u8F7D\u7EC4\u4EF6" : status === "ready" ? `${c.models.filter((m) => m.enabled).length} \u4E2A\u6A21\u578B \xB7 ${since(c.checkedAt)}\u66F4\u65B0` : status === "error" ? esc8(c.error) : "\u5C1A\u672A\u8BFB\u53D6"}</span></span><button class="icon-btn sm" data-refresh-source="${id}" title="\u5237\u65B0\u76EE\u5F55" ${status === "loading" ? "disabled" : ""}>${icon("refresh")}</button></div>`;
   }).join("");
-  el.innerHTML = `<h4>${icon("activity")}\u8FD0\u884C\u4E2D\u7684\u4F1A\u8BDD<span class="count">${live.length}</span></h4>${live.length ? live.map((s) => `<div class="task-row"><span class="dot ${esc7(s.status)}"></span><button class="task-main" data-session="${s.id}"><span class="task-title">${esc7(s.title)}</span><span class="task-sub">${esc7(snap.projects.find((p) => p.id === s.projectId)?.name ?? "")} \xB7 ${esc7(runtime(s.runtimeId)?.name ?? s.runtimeId)} \xB7 <span data-activity="${s.id}">${esc7(activityOf(s).short)}</span> \xB7 <span data-elapsed-from="${esc7(s.updatedAt)}">${elapsed(s.updatedAt)}</span></span></button><button class="icon-btn sm" data-stop-session="${s.id}" title="\u505C\u6B62">${icon("stop")}</button></div>`).join("") : '<div class="task-empty">\u6CA1\u6709\u6B63\u5728\u8FD0\u884C\u7684\u4F1A\u8BDD</div>'}<h4>${icon("layers")}\u6A21\u578B\u76EE\u5F55</h4>${sources2}`;
+  el.innerHTML = `<h4>${icon("activity")}\u8FD0\u884C\u4E2D\u7684\u4F1A\u8BDD<span class="count">${live.length}</span></h4>${live.length ? live.map((s) => `<div class="task-row"><span class="dot ${esc8(s.status)}"></span><button class="task-main" data-session="${s.id}"><span class="task-title">${esc8(s.title)}</span><span class="task-sub">${esc8(snap.projects.find((p) => p.id === s.projectId)?.name ?? "")} \xB7 ${esc8(runtime(s.runtimeId)?.name ?? s.runtimeId)} \xB7 <span data-activity="${s.id}">${esc8(activityOf(s).short)}</span> \xB7 <span data-elapsed-from="${esc8(s.updatedAt)}">${elapsed(s.updatedAt)}</span></span></button><button class="icon-btn sm" data-stop-session="${s.id}" title="\u505C\u6B62">${icon("stop")}</button></div>`).join("") : '<div class="task-empty">\u6CA1\u6709\u6B63\u5728\u8FD0\u884C\u7684\u4F1A\u8BDD</div>'}<h4>${icon("layers")}\u6A21\u578B\u76EE\u5F55</h4>${sources2}`;
 }
 function renderTerminal() {
   const el = $2("#terminal-section");
@@ -20882,7 +21084,7 @@ function renderTerminal() {
   state.terminalBusy = t.running;
   if (!el) return;
   const p = project();
-  el.innerHTML = `<h4>${icon("terminal")}\u7EC8\u7AEF<span class="muted">PowerShell \xB7 ${esc7(p?.name ?? "\u672A\u9009\u62E9\u6587\u4EF6\u5939")}</span><span class="spacer"></span>${state.terminalBusy ? '<button class="btn sm danger" id="stop-terminal">\u505C\u6B62</button>' : ""}<button class="ghost-btn" id="clear-terminal" title="\u6E05\u7A7A\u8F93\u51FA">\u6E05\u7A7A</button></h4><pre class="terminal-output" id="terminal-output"></pre><form class="terminal-input" id="terminal-form"><span class="prompt-sign">\u276F</span><input id="terminal-command" placeholder="${p ? "\u5728\u5F53\u524D\u6587\u4EF6\u5939\u8FD0\u884C\u547D\u4EE4" : "\u5148\u6253\u5F00\u4E00\u4E2A\u6587\u4EF6\u5939"}" autocomplete="off" spellcheck="false" ${state.terminalBusy ? "disabled" : ""}><button class="btn sm" ${state.terminalBusy || !p ? "disabled" : ""}>\u8FD0\u884C</button></form>`;
+  el.innerHTML = `<h4>${icon("terminal")}\u7EC8\u7AEF<span class="muted">PowerShell \xB7 ${esc8(p?.name ?? "\u672A\u9009\u62E9\u6587\u4EF6\u5939")}</span><span class="spacer"></span>${state.terminalBusy ? '<button class="btn sm danger" id="stop-terminal">\u505C\u6B62</button>' : ""}<button class="ghost-btn" id="clear-terminal" title="\u6E05\u7A7A\u8F93\u51FA">\u6E05\u7A7A</button></h4><pre class="terminal-output" id="terminal-output"></pre><form class="terminal-input" id="terminal-form"><span class="prompt-sign">\u276F</span><input id="terminal-command" placeholder="${p ? "\u5728\u5F53\u524D\u6587\u4EF6\u5939\u8FD0\u884C\u547D\u4EE4" : "\u5148\u6253\u5F00\u4E00\u4E2A\u6587\u4EF6\u5939"}" autocomplete="off" spellcheck="false" ${state.terminalBusy ? "disabled" : ""}><button class="btn sm" ${state.terminalBusy || !p ? "disabled" : ""}>\u8FD0\u884C</button></form>`;
   const out = $2("#terminal-output");
   out.textContent = state.terminalText || "";
   out.scrollTop = out.scrollHeight;
@@ -20920,13 +21122,13 @@ function closeSettings() {
 var sourceCard = (id, desc) => sourceCardHtml(id, desc, state.snapshot.catalog[id], state.snapshot.sourceComponents?.find((c) => c.id === id));
 function catalogRows() {
   const q2 = state.catalogSearch.toLowerCase(), rows = models().filter((m) => (state.catalogSource === "all" || m.source === state.catalogSource) && `${m.name} ${m.id} ${m.source}`.toLowerCase().includes(q2));
-  return rows.length ? rows.map((m) => `<tr><td><div class="model-name">${esc7(m.name)}${m.enabled ? "" : '<span class="muted"> \xB7 \u4E0D\u53EF\u7528</span>'}</div><div class="model-id mono">${esc7(m.id)}</div></td><td>${sourceNames[m.source]}</td><td>${m.contexts.length ? m.contexts.map((c) => `<span class="ctx-tag${c.tokens === m.defaultContextTokens ? " default" : ""}">${compact(c.tokens)}</span>`).join("") : '<span class="muted">\u672A\u58F0\u660E</span>'}</td><td>${m.reasoning.length ? m.reasoning.map((e) => `<span class="effort-tag">${esc7(effortName(e))}</span>`).join("") : '<span class="muted">\u9ED8\u8BA4</span>'}</td><td><button class="link-btn" data-use-model="${esc7(m.key)}" ${m.enabled ? "" : "disabled"}>\u7528\u4E8E\u65B0\u4F1A\u8BDD</button></td></tr>`).join("") : '<tr><td colspan="5" class="table-empty">\u6CA1\u6709\u5339\u914D\u7684\u6A21\u578B\u3002\u5237\u65B0\u6765\u6E90\u76EE\u5F55\u540E\uFF0C\u6240\u6709\u53EF\u7528\u6A21\u578B\u90FD\u4F1A\u5217\u5728\u8FD9\u91CC\u3002</td></tr>';
+  return rows.length ? rows.map((m) => `<tr><td><div class="model-name">${esc8(m.name)}${m.enabled ? "" : '<span class="muted"> \xB7 \u4E0D\u53EF\u7528</span>'}</div><div class="model-id mono">${esc8(m.id)}</div></td><td>${sourceNames[m.source]}</td><td>${m.contexts.length ? m.contexts.map((c) => `<span class="ctx-tag${c.tokens === m.defaultContextTokens ? " default" : ""}">${compact(c.tokens)}</span>`).join("") : '<span class="muted">\u672A\u58F0\u660E</span>'}</td><td>${m.reasoning.length ? m.reasoning.map((e) => `<span class="effort-tag">${esc8(effortName(e))}</span>`).join("") : '<span class="muted">\u9ED8\u8BA4</span>'}</td><td><button class="link-btn" data-use-model="${esc8(m.key)}" ${m.enabled ? "" : "disabled"}>\u7528\u4E8E\u65B0\u4F1A\u8BDD</button></td></tr>`).join("") : '<tr><td colspan="5" class="table-empty">\u6CA1\u6709\u5339\u914D\u7684\u6A21\u578B\u3002\u5237\u65B0\u6765\u6E90\u76EE\u5F55\u540E\uFF0C\u6240\u6709\u53EF\u7528\u6A21\u578B\u90FD\u4F1A\u5217\u5728\u8FD9\u91CC\u3002</td></tr>';
 }
 function settingsBody(tab) {
   const snap = state.snapshot, theme = snap.preferences.theme ?? "dark";
   if (tab === "sources") return `<div class="settings-head"><h1>\u6A21\u578B\u6E90</h1><p>\u8BFB\u53D6\u8D26\u6237\u7684\u771F\u5B9E\u53EF\u7528\u76EE\u5F55\u3002\u601D\u8003\u5F3A\u5EA6\u548C\u4E0A\u4E0B\u6587\u7A97\u53E3\u4F7F\u7528\u6765\u6E90\u58F0\u660E\u7684\u80FD\u529B\uFF0C\u672A\u58F0\u660E\u7684\u4FDD\u6301\u672A\u77E5\u3002</p></div>
     <div class="source-grid" id="source-grid">${sourceCard("qoder", "\u72EC\u7ACB SDK \u526F\u672C\uFF0C\u590D\u7528\u5B98\u65B9 CLI \u767B\u5F55\u6001\u3002")}${sourceCard("workbuddy", "\u72EC\u7ACB bridge \u526F\u672C\uFF0C\u590D\u7528\u672C\u673A WorkBuddy \u767B\u5F55\u6001\u3002")}${sourceCard("antigravity", "\u72EC\u7ACB Gemini \u6765\u6E90\uFF0C\u56FA\u5B9A\u7531 Antigravity \u539F\u751F\u6267\u884C\u3002")}</div>
-    <div class="catalog-controls"><label class="search-field">${icon("search")}<input id="catalog-search" placeholder="\u641C\u7D22\u6A21\u578B\u540D\u79F0\u3001ID \u6216\u6765\u6E90" value="${esc7(state.catalogSearch)}" autocomplete="off"></label><select id="catalog-source"><option value="all">\u5168\u90E8\u6765\u6E90</option>${Object.entries(sourceNames).map(([id, name]) => `<option value="${id}" ${state.catalogSource === id ? "selected" : ""}>${name}</option>`).join("")}</select></div>
+    <div class="catalog-controls"><label class="search-field">${icon("search")}<input id="catalog-search" placeholder="\u641C\u7D22\u6A21\u578B\u540D\u79F0\u3001ID \u6216\u6765\u6E90" value="${esc8(state.catalogSearch)}" autocomplete="off"></label><select id="catalog-source"><option value="all">\u5168\u90E8\u6765\u6E90</option>${Object.entries(sourceNames).map(([id, name]) => `<option value="${id}" ${state.catalogSource === id ? "selected" : ""}>${name}</option>`).join("")}</select></div>
     <div class="table-wrap"><table class="catalog-table"><thead><tr><th>\u6A21\u578B / \u4E0A\u6E38 ID</th><th>\u6765\u6E90</th><th>\u4E0A\u4E0B\u6587\u7A97\u53E3</th><th>\u601D\u8003\u5F3A\u5EA6</th><th></th></tr></thead><tbody id="model-rows">${catalogRows()}</tbody></table></div>
     <div class="note">${icon("info")}<span>Antigravity \u6765\u6E90\u7684 Gemini \u56FA\u5B9A\u7531 Antigravity \u6267\u884C\uFF0C\u9009\u62E9\u540E\u81EA\u52A8\u5207\u6362\u5230\u8BE5\u73AF\u5883\u3002\u672C\u5730\u538B\u7F29\u9884\u7B97\u53EA\u5F71\u54CD\u8FD0\u884C\u73AF\u5883\u4F55\u65F6\u538B\u7F29\uFF0C\u4E0D\u8868\u793A\u4E0A\u6E38\u7A97\u53E3\u3002</span></div>`;
   if (tab === "runtimes") return `<div class="settings-head row"><div><h1>\u8FD0\u884C\u73AF\u5883</h1><p>\u4EFB\u52A1\u7531\u539F\u751F Agent \u6267\u884C\uFF0C\u5DE5\u5177\u3001\u6280\u80FD\u3001MCP\u3001\u5B50\u4EE3\u7406\u4E0E\u6743\u9650\u90FD\u4FDD\u7559\u5728\u5404\u81EA\u73AF\u5883\u91CC\u3002\u88C5\u597D\u4EFB\u610F\u4E00\u4E2A\u5C31\u80FD\u4F7F\u7528 Bridge++\uFF0C\u6CA1\u88C5\u7684\u73AF\u5883\u4E0D\u4F1A\u51FA\u73B0\u5728\u5DE5\u4F5C\u53F0\u7684\u53EF\u9009\u9879\u91CC\u3002</p></div><div class="head-actions"><button class="btn" id="open-guide">${icon("spark")}\u5F15\u5BFC</button>${Array.isArray(snap.environments) ? `<button class="btn" id="check-environments">${icon("download")}\u68C0\u67E5\u66F4\u65B0</button>` : ""}<button class="btn" id="refresh-runtimes">${icon("refresh")}\u91CD\u65B0\u68C0\u6D4B</button></div></div>
@@ -20937,7 +21139,7 @@ function settingsBody(tab) {
     const rows = Object.entries(snap.preferences.modelDefaults);
     return `<div class="settings-head"><h1>\u9ED8\u8BA4\u642D\u914D</h1><p>\u5728\u7F16\u8F91\u6846\u7684\u6A21\u578B\u83DC\u5355\u91CC\u70B9\u51FB\u201C\u8BB0\u4F4F\u6B64\u642D\u914D\u201D\uFF0C\u518D\u6B21\u9009\u62E9\u8BE5\u6A21\u578B\u65F6\u4F1A\u81EA\u52A8\u6062\u590D\u601D\u8003\u5F3A\u5EA6\u3001\u7A97\u53E3\u4E0E\u9884\u7B97\u3002</p></div>${rows.length ? `<div class="table-wrap"><table class="catalog-table"><thead><tr><th>\u6A21\u578B</th><th>\u8FD0\u884C\u73AF\u5883</th><th>\u601D\u8003</th><th>\u7A97\u53E3</th><th>\u9884\u7B97</th></tr></thead><tbody>${rows.map(([key, v2]) => {
       const m = models().find((x2) => x2.key === key);
-      return `<tr><td><div class="model-name">${esc7(key.startsWith("native") ? `\u539F\u751F\u6A21\u578B \xB7 ${v2.nativeModel || "\u5F53\u524D\u9ED8\u8BA4"}` : m?.name ?? key)}</div><div class="model-id mono">${esc7(key)}</div></td><td>${esc7(runtime(v2.runtimeId)?.name ?? v2.runtimeId ?? "\u2014")}</td><td>${esc7(v2.reasoning ? effortName(v2.reasoning) : "\u9ED8\u8BA4")}</td><td>${v2.contextTokens ? compact(v2.contextTokens) : "\u2014"}</td><td>${v2.contextBudget ? compact(v2.contextBudget) : "\u2014"}</td></tr>`;
+      return `<tr><td><div class="model-name">${esc8(key.startsWith("native") ? `\u539F\u751F\u6A21\u578B \xB7 ${v2.nativeModel || "\u5F53\u524D\u9ED8\u8BA4"}` : m?.name ?? key)}</div><div class="model-id mono">${esc8(key)}</div></td><td>${esc8(runtime(v2.runtimeId)?.name ?? v2.runtimeId ?? "\u2014")}</td><td>${esc8(v2.reasoning ? effortName(v2.reasoning) : "\u9ED8\u8BA4")}</td><td>${v2.contextTokens ? compact(v2.contextTokens) : "\u2014"}</td><td>${v2.contextBudget ? compact(v2.contextBudget) : "\u2014"}</td></tr>`;
     }).join("")}</tbody></table></div>` : '<div class="note">\u8FD8\u6CA1\u6709\u4FDD\u5B58\u7684\u642D\u914D\u3002</div>'}`;
   }
   if (tab === "rules") {
@@ -20947,16 +21149,17 @@ function settingsBody(tab) {
     const detectorModels = sourceModels.map((m) => ({ key: m.key, name: seen.get(sourceName(m)) > 1 ? `${sourceName(m)} \xB7 ${m.id}` : sourceName(m), group: sourceNames[m.source] ?? m.source }));
     return rulesPageHtml(state.rules, { editing: state.rulesEditing, draft: state.rulesDraft, loading: state.rulesSaving, error: state.rulesError, models: detectorModels });
   }
+  if (tab === "startup") return startupPageHtml(snap.preferences?.startup);
   if (tab === "shortcuts") return `<div class="settings-head"><h1>\u5FEB\u6377\u952E</h1></div><dl class="kv">${[["Ctrl + N", "\u65B0\u5EFA\u4F1A\u8BDD"], ["Enter", "\u53D1\u9001\u4EFB\u52A1"], ["Shift + Enter", "\u6362\u884C"], ["Ctrl + B", "\u6536\u8D77 / \u5C55\u5F00\u5DE6\u4FA7\u680F"], ["Ctrl + Alt + B", "\u6536\u8D77 / \u5C55\u5F00\u53F3\u4FA7\u9762\u677F"], ["Ctrl + J", "\u6253\u5F00\u4EFB\u52A1\u4E0E\u7EC8\u7AEF"], ["Ctrl + S", "\u4FDD\u5B58\u6B63\u5728\u7F16\u8F91\u7684\u6587\u4EF6"], ["Ctrl + ,", "\u6253\u5F00\u8BBE\u7F6E"], ["Esc", "\u5173\u95ED\u83DC\u5355\u6216\u8BBE\u7F6E"]].map(([k, v2]) => `<dt><kbd>${k}</kbd></dt><dd>${v2}</dd>`).join("")}</dl>`;
-  if (tab === "about") return `<div class="settings-head about"><div class="about-mark">${logo(48)}</div><h1>Bridge++</h1><p>\u628A\u4F60\u7684\u6A21\u578B\u6E90\u63A5\u5230\u719F\u6089\u7684\u539F\u751F Agent \u91CC\uFF0C\u5728\u4E00\u4E2A\u5DE5\u4F5C\u533A\u7BA1\u7406\u4F1A\u8BDD\u3001\u53D8\u66F4\u4E0E\u6587\u4EF6\u3002</p></div><dl class="kv"><dt>\u7248\u672C</dt><dd>${esc7(snap.app.version)}</dd><dt>\u5DE5\u4F5C\u533A\u6570\u636E</dt><dd class="mono">${esc7(snap.app.dataDir)}</dd><dt>\u5DE5\u4F5C\u6587\u4EF6\u5939</dt><dd>${snap.projects.length} \u4E2A</dd><dt>\u5DF2\u4FDD\u5B58\u4F1A\u8BDD</dt><dd>${snap.sessions.length} \u4E2A</dd></dl>${updateSectionHtml(snap.updates)}<div class="note">${icon("info")}<span>Qoder CN \u548C WorkBuddy \u7684 bridge \u5185\u7F6E\u5728 Bridge++ \u91CC\uFF1B\u8981\u8BA9\u5176\u4ED6 Agent \u4F7F\u7528\u8FD9\u4E24\u4E2A\u6A21\u578B\u6E90\uFF0C\u8BF7\u5230\u8BBE\u7F6E \u2192 \u5BF9\u5916\u63A5\u53E3\u3002</span></div>`;
+  if (tab === "about") return `<div class="settings-head about"><div class="about-mark">${logo(48)}</div><h1>Bridge++</h1><p>\u628A\u4F60\u7684\u6A21\u578B\u6E90\u63A5\u5230\u719F\u6089\u7684\u539F\u751F Agent \u91CC\uFF0C\u5728\u4E00\u4E2A\u5DE5\u4F5C\u533A\u7BA1\u7406\u4F1A\u8BDD\u3001\u53D8\u66F4\u4E0E\u6587\u4EF6\u3002</p></div><dl class="kv"><dt>\u7248\u672C</dt><dd>${esc8(snap.app.version)}</dd><dt>\u5DE5\u4F5C\u533A\u6570\u636E</dt><dd class="mono">${esc8(snap.app.dataDir)}</dd><dt>\u5DE5\u4F5C\u6587\u4EF6\u5939</dt><dd>${snap.projects.length} \u4E2A</dd><dt>\u5DF2\u4FDD\u5B58\u4F1A\u8BDD</dt><dd>${snap.sessions.length} \u4E2A</dd></dl><div id="about-updates">${updateSectionHtml(snap.updates)}</div><div class="note">${icon("info")}<span>Qoder CN \u548C WorkBuddy \u7684 bridge \u5185\u7F6E\u5728 Bridge++ \u91CC\uFF1B\u8981\u8BA9\u5176\u4ED6 Agent \u4F7F\u7528\u8FD9\u4E24\u4E2A\u6A21\u578B\u6E90\uFF0C\u8BF7\u5230\u8BBE\u7F6E \u2192 \u5BF9\u5916\u63A5\u53E3\u3002</span></div>`;
   return `<div class="settings-head"><h1>\u901A\u7528</h1><p>\u754C\u9762\u5916\u89C2\u4E0E\u5DE5\u4F5C\u533A\u4FE1\u606F\u3002</p></div>
     <h2>\u5916\u89C2</h2><div class="theme-grid">${[["system", "monitor", "\u8DDF\u968F\u7CFB\u7EDF"], ["light", "sun", "\u6D45\u8272"], ["dark", "moon", "\u6DF1\u8272"]].map(([id, ico, label]) => `<button class="theme-card${theme === id ? " active" : ""}" data-theme-choice="${id}"><span class="theme-preview ${id}"><i></i><i></i><i></i></span><span class="theme-label">${icon(ico)}${label}</span></button>`).join("")}</div>
-    <h2>\u5DE5\u4F5C\u533A</h2><dl class="kv"><dt>\u6570\u636E\u76EE\u5F55</dt><dd class="mono">${esc7(snap.app.dataDir)}</dd><dt>\u5DE5\u4F5C\u6587\u4EF6\u5939</dt><dd>${snap.projects.length} \u4E2A</dd><dt>\u4F1A\u8BDD</dt><dd>${snap.sessions.filter((s) => !s.archived).length} \u4E2A\uFF08\u53E6\u6709 ${snap.sessions.filter((s) => s.archived).length} \u4E2A\u5DF2\u5F52\u6863\uFF09</dd><dt>\u7248\u672C</dt><dd>${esc7(snap.app.version)}</dd></dl>`;
+    <h2>\u5DE5\u4F5C\u533A</h2><dl class="kv"><dt>\u6570\u636E\u76EE\u5F55</dt><dd class="mono">${esc8(snap.app.dataDir)}</dd><dt>\u5DE5\u4F5C\u6587\u4EF6\u5939</dt><dd>${snap.projects.length} \u4E2A</dd><dt>\u4F1A\u8BDD</dt><dd>${snap.sessions.filter((s) => !s.archived).length} \u4E2A\uFF08\u53E6\u6709 ${snap.sessions.filter((s) => s.archived).length} \u4E2A\u5DF2\u5F52\u6863\uFF09</dd><dt>\u7248\u672C</dt><dd>${esc8(snap.app.version)}</dd></dl>`;
 }
 function renderSettings() {
   const tab = state.settings, el = $2("#settings");
   if (!tab || !state.snapshot) return;
-  const nav = [["general", "settings", "\u901A\u7528"], ["sources", "layers", "\u6A21\u578B\u6E90"], ["runtimes", "cpu", "\u8FD0\u884C\u73AF\u5883"], ["services", "plug", "\u5BF9\u5916\u63A5\u53E3"], ["defaults", "list", "\u9ED8\u8BA4\u642D\u914D"], ["rules", "bulb", "\u957F\u671F\u8981\u6C42"], ["shortcuts", "keyboard", "\u5FEB\u6377\u952E"], ["about", "info", "\u5173\u4E8E"]];
+  const nav = [["general", "settings", "\u901A\u7528"], ["startup", "zap", "\u542F\u52A8\u4E0E\u8D44\u6E90"], ["sources", "layers", "\u6A21\u578B\u6E90"], ["runtimes", "cpu", "\u8FD0\u884C\u73AF\u5883"], ["services", "plug", "\u5BF9\u5916\u63A5\u53E3"], ["defaults", "list", "\u9ED8\u8BA4\u642D\u914D"], ["rules", "bulb", "\u957F\u671F\u8981\u6C42"], ["shortcuts", "keyboard", "\u5FEB\u6377\u952E"], ["about", "info", "\u5173\u4E8E"]];
   el.innerHTML = `<aside class="settings-nav"><div class="settings-top"><button class="icon-btn" id="close-settings" title="\u8FD4\u56DE (Esc)">${icon("arrowLeft")}</button><span>\u8BBE\u7F6E</span></div>${nav.map(([id, ico, label]) => `<button class="settings-tab${tab === id ? " active" : ""}" data-settings-tab="${id}">${icon(ico)}<span>${label}</span></button>`).join("")}</aside><div class="settings-main"><div class="settings-drag"></div><div class="settings-scroll"><div class="settings-body" id="settings-body">${settingsBody(tab)}</div></div></div>`;
   bind("#catalog-search", "input", (e) => {
     state.catalogSearch = e.target.value;
@@ -21043,13 +21246,21 @@ function refreshSettingsLive() {
     const grid = $2(state.settings === "runtimes" ? "#runtime-grid" : "#service-grid");
     if (grid) patchHtml(grid, state.settings === "runtimes" ? runtimeCards() : serviceCardsHtml(state.snapshot.modelServices ?? [], serviceViews));
     else renderSettings();
+  } else if (state.settings === "about") {
+    const box = $2("#about-updates");
+    if (box) patchHtml(box, updateSectionHtml(state.snapshot?.updates));
+    else renderSettings();
+  } else if (state.settings === "startup") {
+    const box = $2("#startup-settings");
+    if (box) patchHtml(box, startupSectionsHtml(state.snapshot?.preferences?.startup));
+    else renderSettings();
   } else if (state.settings && !document.activeElement?.closest("#settings")) renderSettings();
 }
 function modal(title, body, confirm, { confirm: confirmText = "\u4FDD\u5B58", danger = false } = {}) {
   const el = $2("#modal");
   el.className = "";
   guideOpen = false;
-  el.innerHTML = `<h2>${esc7(title)}</h2><div class="modal-body">${body}</div><div class="modal-actions"><button id="modal-cancel" class="btn">\u53D6\u6D88</button><button id="modal-confirm" class="btn ${danger ? "danger-solid" : "primary"}">${esc7(confirmText)}</button></div>`;
+  el.innerHTML = `<h2>${esc8(title)}</h2><div class="modal-body">${body}</div><div class="modal-actions"><button id="modal-cancel" class="btn">\u53D6\u6D88</button><button id="modal-confirm" class="btn ${danger ? "danger-solid" : "primary"}">${esc8(confirmText)}</button></div>`;
   el.showModal();
   bind("#modal-cancel", "click", () => el.close());
   bind("#modal-confirm", "click", () => void action(async () => {
@@ -21065,26 +21276,30 @@ var releaseDate = (iso) => {
 var percent = (d) => d.total ? Math.min(100, Math.floor(d.received / d.total * 100)) : 0;
 function updateSlotHtml(u) {
   const d = u?.download ?? {}, v2 = u?.latest?.version;
-  if (d.status === "downloaded" && d.version) return `<div class="update-card ready"><span class="uc-icon">${icon("download")}</span><span class="uc-text"><b>\u6709\u65B0\u66F4\u65B0\u5F85\u5B89\u88C5</b><small>V${esc7(d.version)} \u5DF2\u4E0B\u8F7D</small></span><button class="btn primary sm" data-update="install">\u5B89\u88C5</button></div>`;
+  if (d.status === "downloaded" && d.version) return `<div class="update-card ready"><span class="uc-icon">${icon("download")}</span><span class="uc-text"><b>\u6709\u65B0\u66F4\u65B0\u5F85\u5B89\u88C5</b><small>V${esc8(d.version)} \u5DF2\u4E0B\u8F7D</small></span><button class="btn primary sm" data-update="install">\u5B89\u88C5</button></div>`;
   if (u?.status !== "available" || !v2) return "";
-  if (d.status === "downloading") return `<div class="update-card"><span class="uc-icon"><span class="spinner"></span></span><span class="uc-text"><b>\u6B63\u5728\u4E0B\u8F7D V${esc7(v2)}</b><small>${d.total ? `${percent(d)}% \xB7 ${sizeText(d.received) || "0 KB"} / ${sizeText(d.total)}` : "\u6B63\u5728\u8FDE\u63A5\u2026"}</small><span class="uc-bar"><i style="width:${percent(d)}%"></i></span></span><button class="icon-btn sm" data-update="cancel" title="\u53D6\u6D88\u4E0B\u8F7D">${icon("close")}</button></div>`;
+  if (d.status === "downloading") return `<div class="update-card"><span class="uc-icon"><span class="spinner"></span></span><span class="uc-text"><b>\u6B63\u5728\u4E0B\u8F7D V${esc8(v2)}</b><small>${d.total ? `${percent(d)}% \xB7 ${sizeText(d.received) || "0 KB"} / ${sizeText(d.total)}` : "\u6B63\u5728\u8FDE\u63A5\u2026"}</small><span class="uc-bar"><i style="width:${percent(d)}%"></i></span></span><button class="icon-btn sm" data-update="cancel" title="\u53D6\u6D88\u4E0B\u8F7D">${icon("close")}</button></div>`;
   const failed = d.status === "failed" && (!d.version || d.version === v2), asset = u.latest.asset;
-  const sub2 = failed ? `<small class="uc-error" title="${esc7(d.error ?? "")}">\u4E0B\u8F7D\u5931\u8D25${d.error ? `\uFF1A${esc7(d.error)}` : ""}</small>` : `<small>${asset ? esc7(sizeText(asset.size)) : "\u5230\u53D1\u5E03\u9875\u4E0B\u8F7D"}</small>`;
-  return `<div class="update-card"><span class="uc-icon">${icon("arrowUp")}</span><span class="uc-text"><b>\u6709\u65B0\u7248\u672C V${esc7(v2)}</b>${sub2}</span><button class="btn sm" data-update="${asset ? "download" : "page"}">${asset ? failed ? "\u91CD\u8BD5" : "\u4E0B\u8F7D" : "\u67E5\u770B"}</button></div>`;
+  const sub2 = failed ? `<small class="uc-error" title="${esc8(d.error ?? "")}">\u4E0B\u8F7D\u5931\u8D25${d.error ? `\uFF1A${esc8(d.error)}` : ""}</small>` : `<small>${asset ? esc8(sizeText(asset.size)) : "\u5230\u53D1\u5E03\u9875\u4E0B\u8F7D"}</small>`;
+  return `<div class="update-card"><span class="uc-icon">${icon("arrowUp")}</span><span class="uc-text"><b>\u6709\u65B0\u7248\u672C V${esc8(v2)}</b>${sub2}</span><button class="btn sm" data-update="${asset ? "download" : "page"}">${asset ? failed ? "\u91CD\u8BD5" : "\u4E0B\u8F7D" : "\u67E5\u770B"}</button></div>`;
 }
 function renderUpdateSlot() {
   const el = $2("#update-slot");
   if (!el) return;
   const html2 = updateSlotHtml(state.snapshot?.updates);
-  if (el.innerHTML !== html2) el.innerHTML = html2;
+  if (html2 === lastUpdateSlotHtml) return;
+  const hadCard = !!el.firstElementChild;
+  lastUpdateSlotHtml = html2;
+  patchHtml(el, html2);
+  if (hadCard && el.firstElementChild) el.firstElementChild.classList.add("settled");
 }
 function updateSectionHtml(u) {
   if (!u) return "";
   const d = u.download ?? {}, v2 = u.latest?.version;
-  const line = u.checking ? `<span class="spinner"></span><span>\u6B63\u5728\u68C0\u67E5\u66F4\u65B0\u2026</span>` : u.status === "error" ? `${icon("alert")}<span>\u68C0\u67E5\u5931\u8D25\uFF1A${esc7(u.error ?? "\u672A\u77E5\u539F\u56E0")}</span>` : u.status === "available" && v2 ? `${icon("arrowUp")}<span>\u6709\u65B0\u7248\u672C V${esc7(v2)}${u.latest.publishedAt ? `\uFF08${esc7(releaseDate(u.latest.publishedAt))}\u53D1\u5E03\uFF09` : ""}</span>${u.latest.url ? `<button class="link-btn" data-update="page">\u53D1\u5E03\u8BF4\u660E</button>` : ""}` : u.status === "latest" ? `${icon("check")}<span>\u5DF2\u662F\u6700\u65B0\u7248\u672C</span>` : `${icon("info")}<span>\u8FD8\u6CA1\u6709\u68C0\u67E5\u8FC7\u66F4\u65B0</span>`;
-  const download = d.status === "downloading" ? `<div class="update-line"><span class="spinner"></span><span>\u6B63\u5728\u4E0B\u8F7D V${esc7(d.version ?? v2 ?? "")}${d.total ? ` \xB7 ${percent(d)}%` : ""}</span><span class="uc-bar wide"><i style="width:${percent(d)}%"></i></span><button class="link-btn" data-update="cancel">\u53D6\u6D88</button></div>` : d.status === "downloaded" && d.version ? `<div class="update-line">${icon("download")}<span>V${esc7(d.version)} \u5DF2\u4E0B\u8F7D${u.latest?.version === d.version && !u.latest?.asset?.digest ? "\uFF08\u53D1\u5E03\u6CA1\u6709\u63D0\u4F9B SHA-256\uFF0C\u53EA\u6838\u5BF9\u4E86\u6587\u4EF6\u5927\u5C0F\uFF09" : ""}\u3002\u5B89\u88C5\u65F6\u4F1A\u5173\u95ED Bridge++\uFF0C\u6570\u636E\u548C\u8BBE\u7F6E\u90FD\u4F1A\u4FDD\u7559\u3002</span><button class="btn primary sm" data-update="install">\u5B89\u88C5</button></div>` : d.status === "failed" && d.error ? `<div class="update-line warn">${icon("alert")}<span>\u4E0B\u8F7D\u5931\u8D25\uFF1A${esc7(d.error)}</span>${u.latest?.asset ? `<button class="link-btn" data-update="download">\u91CD\u8BD5</button>` : ""}</div>` : u.status === "available" && u.latest?.asset ? `<div class="update-line"><button class="btn sm" data-update="download">${icon("download")}\u4E0B\u8F7D\u66F4\u65B0\u5305\uFF08${esc7(sizeText(u.latest.asset.size))}\uFF09</button></div>` : "";
+  const line = u.checking ? `<span class="spinner"></span><span>\u6B63\u5728\u68C0\u67E5\u66F4\u65B0\u2026</span>` : u.status === "error" ? `${icon("alert")}<span>\u68C0\u67E5\u5931\u8D25\uFF1A${esc8(u.error ?? "\u672A\u77E5\u539F\u56E0")}</span>` : u.status === "available" && v2 ? `${icon("arrowUp")}<span>\u6709\u65B0\u7248\u672C V${esc8(v2)}${u.latest.publishedAt ? `\uFF08${esc8(releaseDate(u.latest.publishedAt))}\u53D1\u5E03\uFF09` : ""}</span>${u.latest.url ? `<button class="link-btn" data-update="page">\u53D1\u5E03\u8BF4\u660E</button>` : ""}` : u.status === "latest" ? `${icon("check")}<span>\u5DF2\u662F\u6700\u65B0\u7248\u672C</span>` : `${icon("info")}<span>\u8FD8\u6CA1\u6709\u68C0\u67E5\u8FC7\u66F4\u65B0</span>`;
+  const download = d.status === "downloading" ? `<div class="update-line"><span class="spinner"></span><span>\u6B63\u5728\u4E0B\u8F7D V${esc8(d.version ?? v2 ?? "")}${d.total ? ` \xB7 ${percent(d)}%` : ""}</span><span class="uc-bar wide"><i style="width:${percent(d)}%"></i></span><button class="link-btn" data-update="cancel">\u53D6\u6D88</button></div>` : d.status === "downloaded" && d.version ? `<div class="update-line">${icon("download")}<span>V${esc8(d.version)} \u5DF2\u4E0B\u8F7D${u.latest?.version === d.version && !u.latest?.asset?.digest ? "\uFF08\u53D1\u5E03\u6CA1\u6709\u63D0\u4F9B SHA-256\uFF0C\u53EA\u6838\u5BF9\u4E86\u6587\u4EF6\u5927\u5C0F\uFF09" : ""}\u3002\u5B89\u88C5\u65F6\u4F1A\u5173\u95ED Bridge++\uFF0C\u6570\u636E\u548C\u8BBE\u7F6E\u90FD\u4F1A\u4FDD\u7559\u3002</span><button class="btn primary sm" data-update="install">\u5B89\u88C5</button></div>` : d.status === "failed" && d.error ? `<div class="update-line warn">${icon("alert")}<span>\u4E0B\u8F7D\u5931\u8D25\uFF1A${esc8(d.error)}</span>${u.latest?.asset ? `<button class="link-btn" data-update="download">\u91CD\u8BD5</button>` : ""}</div>` : u.status === "available" && u.latest?.asset ? `<div class="update-line"><button class="btn sm" data-update="download">${icon("download")}\u4E0B\u8F7D\u66F4\u65B0\u5305\uFF08${esc8(sizeText(u.latest.asset.size))}\uFF09</button></div>` : "";
   return `<h2>\u66F4\u65B0</h2><div class="update-line">${line}</div>${download}
-    <div class="update-actions"><button class="btn sm" data-update="check" ${u.checking ? "disabled" : ""}>${icon("refresh")}\u68C0\u67E5\u66F4\u65B0</button><span class="muted">${u.checkedAt ? `\u4E0A\u6B21\u68C0\u67E5\uFF1A${esc7(since(u.checkedAt))}` : "\u6BCF\u5929\u7B2C\u4E00\u6B21\u542F\u52A8\u65F6\u81EA\u52A8\u68C0\u67E5"}</span></div>
+    <div class="update-actions"><button class="btn sm" data-update="check" ${u.checking ? "disabled" : ""}>${icon("refresh")}\u68C0\u67E5\u66F4\u65B0</button><span class="muted">${u.checkedAt ? `\u4E0A\u6B21\u68C0\u67E5\uFF1A${esc8(since(u.checkedAt))}` : "\u6BCF\u5929\u7B2C\u4E00\u6B21\u542F\u52A8\u65F6\u81EA\u52A8\u68C0\u67E5"}</span></div>
     <label class="update-auto"><input type="checkbox" data-update-auto ${u.autoDownload ? "checked" : ""}><span><b>\u81EA\u52A8\u4E0B\u8F7D\u66F4\u65B0\u5305</b><small>\u6709\u65B0\u7248\u672C\u65F6\u5728\u540E\u53F0\u4E0B\u8F7D\uFF0C\u4E0B\u8F7D\u5B8C\u5728\u5DE6\u4E0B\u89D2\u63D0\u793A\u5B89\u88C5</small></span></label>`;
 }
 async function installUpdate(force) {
@@ -21092,7 +21307,7 @@ async function installUpdate(force) {
     await call("update:install", { force });
   } catch (error) {
     if (error.code !== "sessions_running" || force) throw error;
-    setTimeout(() => modal("\u5B89\u88C5\u66F4\u65B0", `<p>${esc7(error.message)}\u3002</p><p>\u4ECD\u8981\u73B0\u5728\u5B89\u88C5\u5417\uFF1F</p>`, () => installUpdate(true), { confirm: "\u4E2D\u65AD\u4EFB\u52A1\u5E76\u5B89\u88C5", danger: true }), 0);
+    setTimeout(() => modal("\u5B89\u88C5\u66F4\u65B0", `<p>${esc8(error.message)}\u3002</p><p>\u4ECD\u8981\u73B0\u5728\u5B89\u88C5\u5417\uFF1F</p>`, () => installUpdate(true), { confirm: "\u4E2D\u65AD\u4EFB\u52A1\u5E76\u5B89\u88C5", danger: true }), 0);
   }
 }
 async function updateAction(kind) {
@@ -21102,7 +21317,7 @@ async function updateAction(kind) {
     return;
   }
   if (kind === "install") {
-    modal("\u5B89\u88C5\u66F4\u65B0", `<p>\u5C06\u5173\u95ED Bridge++ \u5E76\u8FD0\u884C V${esc7(u?.download?.version ?? "")} \u7684\u5B89\u88C5\u7A0B\u5E8F\u3002\u6570\u636E\u548C\u8BBE\u7F6E\u90FD\u4F1A\u4FDD\u7559\uFF0C\u88C5\u597D\u540E\u81EA\u52A8\u6253\u5F00\u3002</p><p class="q-note">\u5BF9\u5916\u63A5\u53E3\u4F1A\u5728\u5B89\u88C5\u65F6\u6682\u505C\uFF0C\u88C5\u5B8C\u81EA\u52A8\u6062\u590D\u3002</p>`, () => installUpdate(false), { confirm: "\u5173\u95ED\u5E76\u5B89\u88C5" });
+    modal("\u5B89\u88C5\u66F4\u65B0", `<p>\u5C06\u5173\u95ED Bridge++ \u5E76\u8FD0\u884C V${esc8(u?.download?.version ?? "")} \u7684\u5B89\u88C5\u7A0B\u5E8F\u3002\u6570\u636E\u548C\u8BBE\u7F6E\u90FD\u4F1A\u4FDD\u7559\uFF0C\u88C5\u597D\u540E\u81EA\u52A8\u6253\u5F00\u3002</p><p class="q-note">\u5BF9\u5916\u63A5\u53E3\u4F1A\u5728\u5B89\u88C5\u65F6\u6682\u505C\uFF0C\u88C5\u5B8C\u81EA\u52A8\u6062\u590D\u3002</p>`, () => installUpdate(false), { confirm: "\u5173\u95ED\u5E76\u5B89\u88C5" });
     return;
   }
   if (kind === "check") {
@@ -21145,9 +21360,9 @@ var FEEDBACK_KINDS = {
   rebind: "\u6362\u6A21\u578B\u6216\u53C2\u6570"
 };
 function feedbackSummaryHtml(p) {
-  const chips = (group) => Object.entries(group?.byKind ?? {}).filter(([, n]) => n).map(([k, n]) => `<span class="fb-chip">${esc7(FEEDBACK_KINDS[k] ?? k)} ${n}</span>`).join("");
+  const chips = (group) => Object.entries(group?.byKind ?? {}).filter(([, n]) => n).map(([k, n]) => `<span class="fb-chip">${esc8(FEEDBACK_KINDS[k] ?? k)} ${n}</span>`).join("");
   const all = chips(p.errors) + chips(p.corrections);
-  return `<div class="fb-counts"><span><b>${p.turns ?? 0}</b> \u8F6E</span><span><b>${p.errors?.total ?? 0}</b> \u5904\u62A5\u9519</span><span><b>${p.corrections?.total ?? 0}</b> \u6B21\u7EA0\u6B63</span><span class="muted">\u7EA6 ${esc7(sizeText(p.bytes) || "1 KB")}${p.truncated ? "\uFF0C\u6700\u65E9\u7684\u8BB0\u5F55\u5DF2\u622A\u65AD" : ""}</span></div>${all ? `<div class="fb-chips">${all}</div>` : ""}`;
+  return `<div class="fb-counts"><span><b>${p.turns ?? 0}</b> \u8F6E</span><span><b>${p.errors?.total ?? 0}</b> \u5904\u62A5\u9519</span><span><b>${p.corrections?.total ?? 0}</b> \u6B21\u7EA0\u6B63</span><span class="muted">\u7EA6 ${esc8(sizeText(p.bytes) || "1 KB")}${p.truncated ? "\uFF0C\u6700\u65E9\u7684\u8BB0\u5F55\u5DF2\u622A\u65AD" : ""}</span></div>${all ? `<div class="fb-chips">${all}</div>` : ""}`;
 }
 async function openFeedback() {
   const s = session();
@@ -21174,7 +21389,7 @@ async function openFeedback() {
       if (box) box.innerHTML = feedbackSummaryHtml(p);
     } catch (e) {
       const box = el();
-      if (box) box.innerHTML = `<div class="fb-loading">${icon("alert")}<span>${esc7(e.message)}</span></div>`;
+      if (box) box.innerHTML = `<div class="fb-loading">${icon("alert")}<span>${esc8(e.message)}</span></div>`;
     }
   };
   bind("#fb-conversation", "change", (e) => {
@@ -21382,7 +21597,8 @@ async function openSession(id) {
     throw error;
   }
   if (token !== sessionEpoch || state.sessionId !== id) return;
-  const ids = new Set(events.map((e) => e.id)), all = [...events, ...state.historyLoading.events.filter((e) => !ids.has(e.id))];
+  const history = Array.isArray(events) ? events : events?.events ?? [], seen = Array.isArray(events) ? null : events?.liveSeq;
+  const ids = new Set(history.map((e) => e.id)), all = [...history, ...state.historyLoading.events.filter((e) => typeof e.liveSeq === "number" && typeof seen === "number" ? e.liveSeq > seen : !ids.has(e.id))];
   state.historyLoading = null;
   for (const e of all) metrics.feed(e);
   activity.replay(id, all);
@@ -21424,7 +21640,7 @@ async function openNative() {
 function renameSession() {
   const s = session();
   if (!s) return;
-  modal("\u91CD\u547D\u540D\u4F1A\u8BDD", `<input id="session-title" value="${esc7(s.title)}" maxlength="100" autocomplete="off">`, async () => {
+  modal("\u91CD\u547D\u540D\u4F1A\u8BDD", `<input id="session-title" value="${esc8(s.title)}" maxlength="100" autocomplete="off">`, async () => {
     await call("session:rename", { sessionId: s.id, title: $2("#session-title").value });
     await snapshot();
     renderFolders();
@@ -21437,7 +21653,7 @@ function renameSession() {
 function archiveSession(id) {
   const s = state.snapshot.sessions.find((x2) => x2.id === id);
   if (!s) return;
-  modal("\u5F52\u6863\u4F1A\u8BDD", `<p>\u201C${esc7(s.title)}\u201D\u4F1A\u4ECE\u5217\u8868\u4E2D\u9690\u85CF\uFF0C\u4F1A\u8BDD\u8BB0\u5F55\u4ECD\u4FDD\u7559\u5728\u5DE5\u4F5C\u533A\u6570\u636E\u76EE\u5F55\u91CC\u3002</p>`, async () => {
+  modal("\u5F52\u6863\u4F1A\u8BDD", `<p>\u201C${esc8(s.title)}\u201D\u4F1A\u4ECE\u5217\u8868\u4E2D\u9690\u85CF\uFF0C\u4F1A\u8BDD\u8BB0\u5F55\u4ECD\u4FDD\u7559\u5728\u5DE5\u4F5C\u533A\u6570\u636E\u76EE\u5F55\u91CC\u3002</p>`, async () => {
     await call("session:archive", { sessionId: id });
     if (state.sessionId === id) {
       state.sessionId = null;
@@ -21453,10 +21669,10 @@ function openRecovery(s) {
   const model = modelOf(s.selection);
   if (!model?.enabled) throw new Error("\u8BF7\u5148\u5237\u65B0\u6A21\u578B\u6E90\uFF0C\u7B49\u540C\u4E00\u6A21\u578B\u91CD\u65B0\u53EF\u7528\u540E\u518D\u786E\u8BA4");
   const selected = s.selection, hasContext = model.contexts.some((c) => c.tokens === selected.contextTokens);
-  modal("\u91CD\u65B0\u786E\u8BA4\u6A21\u578B\u4E0E\u53C2\u6570", `<p>\u7EE7\u7EED\u4F7F\u7528 ${esc7(sourceNames[model.source])} \xB7 ${esc7(model.name)}<br><span class="mono">\u6A21\u578B ID\uFF1A${esc7(model.id)}</span><br>\u786E\u8BA4\u540E\u4FDD\u7559\u5F53\u524D\u8FD0\u884C\u73AF\u5883\u3001\u539F\u751F\u4F1A\u8BDD\u548C\u5386\u53F2\u8BB0\u5F55\u3002</p>
-    <label for="rebind-reasoning">\u601D\u8003\u5F3A\u5EA6</label><select id="rebind-reasoning"><option value="">\u6765\u6E90\u9ED8\u8BA4</option>${model.reasoning.map((e) => `<option value="${esc7(e)}" ${selected.reasoning === e ? "selected" : ""}>${esc7(effortName(e))}</option>`).join("")}</select>
+  modal("\u91CD\u65B0\u786E\u8BA4\u6A21\u578B\u4E0E\u53C2\u6570", `<p>\u7EE7\u7EED\u4F7F\u7528 ${esc8(sourceNames[model.source])} \xB7 ${esc8(model.name)}<br><span class="mono">\u6A21\u578B ID\uFF1A${esc8(model.id)}</span><br>\u786E\u8BA4\u540E\u4FDD\u7559\u5F53\u524D\u8FD0\u884C\u73AF\u5883\u3001\u539F\u751F\u4F1A\u8BDD\u548C\u5386\u53F2\u8BB0\u5F55\u3002</p>
+    <label for="rebind-reasoning">\u601D\u8003\u5F3A\u5EA6</label><select id="rebind-reasoning"><option value="">\u6765\u6E90\u9ED8\u8BA4</option>${model.reasoning.map((e) => `<option value="${esc8(e)}" ${selected.reasoning === e ? "selected" : ""}>${esc8(effortName(e))}</option>`).join("")}</select>
     <label for="rebind-context">\u4E0A\u4E0B\u6587\u7A97\u53E3</label><select id="rebind-context">${model.contexts.length ? "" : '<option value="">\u539F\u751F\u9ED8\u8BA4</option>'}${model.contexts.map((c) => `<option value="${c.tokens}" ${(hasContext ? selected.contextTokens : defaultContext(model)) === c.tokens ? "selected" : ""}>${compact(c.tokens)}${c.tokens === model.defaultContextTokens ? "\uFF08\u9ED8\u8BA4\uFF09" : ""}</option>`).join("")}</select>
-    <label for="rebind-budget">\u672C\u5730\u538B\u7F29\u9884\u7B97\uFF08\u53EF\u7559\u7A7A\uFF0C\u4F8B\u5982 200K\u30010.5M\uFF09</label><input id="rebind-budget" type="text" inputmode="decimal" autocomplete="off" spellcheck="false" placeholder="\u4E0D\u8BBE\u7F6E" value="${esc7(selected.contextBudget ? formatTokens(selected.contextBudget) : "")}">`, async () => {
+    <label for="rebind-budget">\u672C\u5730\u538B\u7F29\u9884\u7B97\uFF08\u53EF\u7559\u7A7A\uFF0C\u4F8B\u5982 200K\u30010.5M\uFF09</label><input id="rebind-budget" type="text" inputmode="decimal" autocomplete="off" spellcheck="false" placeholder="\u4E0D\u8BBE\u7F6E" value="${esc8(selected.contextBudget ? formatTokens(selected.contextBudget) : "")}">`, async () => {
     const context = $2("#rebind-context").value, contextTokens = context ? Number(context) : null, check = budgetCheck($2("#rebind-budget").value, { max: budgetMax(model, contextTokens) });
     if (!check.ok) throw new Error(`\u672C\u5730\u538B\u7F29\u9884\u7B97\uFF1A${check.text}`);
     await call("session:rebind", { sessionId: s.id, selection: { ...selected, identity: model.identity, reasoning: $2("#rebind-reasoning").value || void 0, contextTokens, contextBudget: check.value } });
@@ -21508,7 +21724,7 @@ function answerQuestion(approvalId) {
     }, { confirm: "\u53D1\u9001\u56DE\u7B54" });
     return;
   }
-  modal("\u56DE\u7B54 Agent \u7684\u95EE\u9898", `${summary ? `<p class="question-text">${esc7(summary)}</p>` : ""}<p class="muted">\u6309\u539F\u751F\u534F\u8BAE\u586B\u5199 answers \u5BF9\u8C61\uFF08JSON\uFF09\u3002\u590D\u6742\u4EA4\u4E92\u4E5F\u53EF\u4EE5\u5728\u539F\u751F\u754C\u9762\u4E2D\u5B8C\u6210\u3002</p><textarea id="question-answer" rows="7" placeholder="{}" spellcheck="false"></textarea>`, async () => {
+  modal("\u56DE\u7B54 Agent \u7684\u95EE\u9898", `${summary ? `<p class="question-text">${esc8(summary)}</p>` : ""}<p class="muted">\u6309\u539F\u751F\u534F\u8BAE\u586B\u5199 answers \u5BF9\u8C61\uFF08JSON\uFF09\u3002\u590D\u6742\u4EA4\u4E92\u4E5F\u53EF\u4EE5\u5728\u539F\u751F\u754C\u9762\u4E2D\u5B8C\u6210\u3002</p><textarea id="question-answer" rows="7" placeholder="{}" spellcheck="false"></textarea>`, async () => {
     const answer = JSON.parse($2("#question-answer").value || "{}");
     await call("session:approve", { sessionId: state.sessionId, approvalId, choice: "approve", answer });
   }, { confirm: "\u53D1\u9001\u56DE\u7B54" });
@@ -21821,7 +22037,7 @@ document.addEventListener("click", (e) => {
       const r = await call("bridgeService:connect", { id: id2, target }), moved = r?.defaultMigration?.to, env = [r?.requiredEnv].flat().filter(Boolean);
       await serviceCall(null, null);
       if (env.length) {
-        modal(`\u8FD8\u5DEE\u4E00\u6B65\u63A5\u5165 ${name}`, `<p class="modal-text">${esc7(r.message ?? `\u8BF7\u628A\u672C\u63A5\u53E3\u7684\u5BC6\u94A5\u8BBE\u4E3A\u73AF\u5883\u53D8\u91CF ${env.join("\u3001")}\uFF0C\u518D\u91CD\u65B0\u6253\u5F00 ${name}\u3002`)}</p>`, () => {
+        modal(`\u8FD8\u5DEE\u4E00\u6B65\u63A5\u5165 ${name}`, `<p class="modal-text">${esc8(r.message ?? `\u8BF7\u628A\u672C\u63A5\u53E3\u7684\u5BC6\u94A5\u8BBE\u4E3A\u73AF\u5883\u53D8\u91CF ${env.join("\u3001")}\uFF0C\u518D\u91CD\u65B0\u6253\u5F00 ${name}\u3002`)}</p>`, () => {
         }, { confirm: "\u77E5\u9053\u4E86" });
         return;
       }
@@ -21836,7 +22052,7 @@ document.addEventListener("click", (e) => {
   }
   if (el = hit("[data-svc-disconnect]")) {
     const [id2, target] = el.dataset.svcDisconnect.split("|"), name = { dsh: "DeepSeek Harness", kimi: "Kimi Code", codex: "Codex CLI" }[target] ?? target;
-    modal(`\u65AD\u5F00 ${name}`, `<p class="modal-text">\u4F1A\u4ECE ${esc7(name)} \u7684\u914D\u7F6E\u91CC\u79FB\u9664\u8FD9\u4E2A\u63A5\u53E3\u548C\u5B83\u7684\u5BC6\u94A5\uFF0C\u5176\u4ED6\u914D\u7F6E\u4E0D\u53D8\u3002\u4FEE\u6539\u524D\u4F1A\u7559\u4E00\u4EFD\u5907\u4EFD\u3002</p>`, async () => {
+    modal(`\u65AD\u5F00 ${name}`, `<p class="modal-text">\u4F1A\u4ECE ${esc8(name)} \u7684\u914D\u7F6E\u91CC\u79FB\u9664\u8FD9\u4E2A\u63A5\u53E3\u548C\u5B83\u7684\u5BC6\u94A5\uFF0C\u5176\u4ED6\u914D\u7F6E\u4E0D\u53D8\u3002\u4FEE\u6539\u524D\u4F1A\u7559\u4E00\u4EFD\u5907\u4EFD\u3002</p>`, async () => {
       const r = await call("bridgeService:disconnect", { id: id2, target });
       await serviceCall(null, null, r?.changed === false ? `${name} \u91CC\u6CA1\u6709\u8FD9\u4E2A\u63A5\u53E3` : r?.message ?? `\u5DF2\u65AD\u5F00 ${name}`);
     }, { confirm: "\u65AD\u5F00", danger: true });
@@ -21869,6 +22085,16 @@ document.addEventListener("click", (e) => {
       await call("preference:theme", { theme: el.dataset.themeChoice });
       await snapshot();
       renderSettings();
+    });
+    return;
+  }
+  if (el = hit("[data-startup-preset]")) {
+    const preset = el.dataset.startupPreset;
+    void action(async () => {
+      const next = await call("preference:startup", { preset });
+      if (state.snapshot?.preferences) state.snapshot.preferences.startup = next;
+      refreshSettingsLive();
+      toast(preset === "cold" ? "\u5DF2\u5207\u6362\u4E3A\u6309\u9700\u51B7\u542F\u52A8\u6A21\u5F0F" : preset === "balanced" ? "\u5DF2\u5207\u6362\u4E3A\u5E73\u8861\u6A21\u5F0F" : "\u5DF2\u5207\u6362\u4E3A\u5168\u90E8\u9884\u542F\u52A8\u6A21\u5F0F");
     });
     return;
   }
@@ -22351,7 +22577,7 @@ document.addEventListener("drop", (e) => {
 function openLightbox(url, name) {
   const el = $2("#lightbox"), src = mediaUrl(url);
   if (!el || !src) return;
-  el.innerHTML = `<div class="lightbox-bar"><span class="lightbox-name">${esc7(name ?? "")}</span><button class="icon-btn" data-media-reveal="${esc7(src)}" title="\u5728\u6587\u4EF6\u5939\u4E2D\u663E\u793A">${icon("folder")}</button><button class="icon-btn" data-media-save="${esc7(src)}" data-media-name="${esc7(name ?? "")}" title="\u53E6\u5B58\u4E3A\u2026">${icon("download")}</button><button class="icon-btn" id="lightbox-close" title="\u5173\u95ED (Esc)">${icon("close")}</button></div><img src="${esc7(src)}" alt="${esc7(name ?? "")}">`;
+  el.innerHTML = `<div class="lightbox-bar"><span class="lightbox-name">${esc8(name ?? "")}</span><button class="icon-btn" data-media-reveal="${esc8(src)}" title="\u5728\u6587\u4EF6\u5939\u4E2D\u663E\u793A">${icon("folder")}</button><button class="icon-btn" data-media-save="${esc8(src)}" data-media-name="${esc8(name ?? "")}" title="\u53E6\u5B58\u4E3A\u2026">${icon("download")}</button><button class="icon-btn" id="lightbox-close" title="\u5173\u95ED (Esc)">${icon("close")}</button></div><img src="${esc8(src)}" alt="${esc8(name ?? "")}">`;
   el.showModal();
 }
 document.addEventListener("mousemove", (e) => {
@@ -22401,6 +22627,20 @@ document.addEventListener("change", (e) => {
       await snapshot();
       refreshSettingsLive();
       renderUpdateSlot();
+    });
+    return;
+  }
+  if (t.matches?.("[data-startup-toggle]")) {
+    const path2 = t.dataset.startupToggle, enabled = t.checked;
+    void action(async () => {
+      try {
+        const next = await call("preference:startup", startupPatchFromPath(path2, enabled));
+        if (state.snapshot?.preferences) state.snapshot.preferences.startup = next;
+        refreshSettingsLive();
+      } catch (error) {
+        t.checked = !enabled;
+        throw error;
+      }
     });
     return;
   }

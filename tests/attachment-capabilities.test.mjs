@@ -25,9 +25,28 @@ test('native catalog failure is shared and throttled for 60 seconds; reason and 
  now=59999;await capabilities.snapshotSessions(rows);assert.equal(reads,1);now=60000;assert.equal((await capabilities.snapshotSessions(rows))[0].attachments.image.allowed,true);assert.equal(reads,2);
 });
 test('invalidation during a native read waits for its exit and never runs two catalog readers simultaneously',async()=>{
- let reads=0,active=0,maxActive=0,release;const gate=new Promise(r=>{release=r;});
- const catalog=new NativeMediaCatalog({read:async()=>{reads++;active++;maxActive=Math.max(maxActive,active);if(reads===1)await gate;active--;return models;}}),capabilities=service(catalog);
- const first=capabilities.snapshotSessions(rows);await Promise.resolve();const refresh=catalog.get(runtime(),'.',{refresh:true}),other=capabilities.snapshotSessions(rows);release();await Promise.all([first,refresh,other]);assert.equal(reads,2);assert.equal(maxActive,1);
+ let reads=0,active=0,maxActive=0,release,began;const gate=new Promise(r=>{release=r;}),started=new Promise(r=>{began=r;});
+ const catalog=new NativeMediaCatalog({read:async()=>{reads++;active++;maxActive=Math.max(maxActive,active);if(reads===1){began();await gate;}active--;return models;}}),capabilities=service(catalog);
+ const first=capabilities.snapshotSessions(rows);await started;const refresh=catalog.get(runtime(),'.',{refresh:true}),other=capabilities.snapshotSessions(rows);release();await Promise.all([first,refresh,other]);assert.equal(reads,2);assert.equal(maxActive,1);
+});
+test('native catalog stamp and provider MIME changes refresh attachment capabilities',async()=>{
+ let stamp=0,native=models;
+ const catalog=new NativeMediaCatalog({stamp:async()=>stamp,read:async()=>native}),capabilities=service(catalog);
+ assert.equal((await capabilities.forSelection('codex',selection)).image.allowed,true);
+ native=[{id:'fixture',inputModalities:['text']}];stamp++;
+ assert.equal((await capabilities.forSelection('codex',selection)).image.allowed,false);
+ const runtime={id:'antigravity',status:'ready',media:{image:true}};
+ let model={source:'antigravity',identity:'stable',images:true,inputMimeTypes:['image/png']},validationError=null;
+ const attachment=new AttachmentCapabilities({runtimes:()=>[runtime],sessions:()=>({validate:(_id,value)=>{
+   if(validationError)throw new Error(validationError);
+   return value;
+ }}),providers:()=>({get:()=>model}),cwd:()=>'.'});
+ const selected={modelKey:'antigravity:fixture'};
+ assert.deepEqual((await attachment.forSelection(runtime.id,selected)).image.mimes,['image/png']);
+ model={...model,inputMimeTypes:['image/jpeg']};
+ assert.deepEqual((await attachment.forSelection(runtime.id,selected)).image.mimes,['image/jpeg']);
+ validationError='stale model selection';
+ assert.equal((await attachment.forSelection(runtime.id,selected)).image.reason,validationError);
 });
 test('explicit refresh can retry a failed catalog immediately and invalid catalog payloads remain throttled',async()=>{
  let reads=0;const catalog=new NativeMediaCatalog({read:async()=>{if(++reads===1)return null;return models;}}),capabilities=service(catalog);

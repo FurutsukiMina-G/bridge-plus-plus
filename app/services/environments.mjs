@@ -1,8 +1,9 @@
 import {EventEmitter} from 'node:events';
-import {mkdir,readFile,writeFile,rename,access,rm} from 'node:fs/promises';
-import {join,resolve} from 'node:path';
+import {mkdir,readFile,writeFile,rename,access,rm,stat} from 'node:fs/promises';
+import {join,dirname,resolve} from 'node:path';
 import {randomUUID} from 'node:crypto';
-import {inspectEnvironments} from './environment-discovery.mjs';
+import {statExternalAsar} from '../core/external-asar.mjs';
+import {inspectEnvironment,inspectEnvironments} from './environment-discovery.mjs';
 import {environmentProcess,dshRunning,dshUninstallRegistry} from './environment-process.mjs';
 import {findNpmCli,installKimiNpm,installClaudeNpm} from './environment-npm.mjs';
 import {kimiInstallFailure,claudeInstallFailure} from './environment-diagnostics.mjs';
@@ -13,8 +14,21 @@ const terminal=new Set(['done','failed','cancelled']);
 const validVersion=value=>typeof value==='string'&&/^\d+\.\d+\.\d+(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$/.test(value);
 // Publisher observed on the signed installer from the official 0.2.2-rc.1 feed.
 const DSH_PUBLISHER='Hangzhou DeepSeek Artificial Intelligence Co., Ltd.';
+async function runtimeFingerprint(runtime){
+  const {id,executable,desktop}=runtime,path=executable??desktop;
+  if(!path)return null;
+  const paths=[{path,required:true}];
+  if(id==='dsh'&&executable)paths.push({path:join(dirname(path),'resources/app.asar'),required:true,statFile:statExternalAsar},{path:join(dirname(path),'resources/app-update.yml')});
+  if(id==='claude'&&executable)paths.push({path:join(dirname(path),'../claude-code/package.json')});
+  if(id==='kimi'&&/\.[cm]?js$/i.test(path))paths.push({path:join(dirname(path),'../package.json')});
+  const stats=await Promise.all(paths.map(async({path,required,statFile=stat})=>{
+    try{const info=await statFile(path);return info.isFile()?[path,info.size,info.mtimeMs]:null;}
+    catch(error){if(!required&&error.code==='ENOENT')return [path,null];return null;}
+  }));
+  return stats.every(Boolean)?JSON.stringify(stats):null;
+}
 export class Environments extends EventEmitter {
-  constructor({store,userData,node=nativeNode(),fetchImpl,inspect=inspectEnvironments,execute=environmentProcess,isDshRunning=dshRunning,npmFinder=findNpmCli,kimiInstaller=installKimiNpm,claudeInstaller=installClaudeNpm,registry=dshUninstallRegistry,runtimeCache=null,now=Date.now,canUpdate=()=>null,onRefresh=async()=>{},env=process.env,isPackaged=false}={}){super();Object.assign(this,{store,userData,node,fetchImpl,inspect,execute,isDshRunning,npmFinder,kimiInstaller,claudeInstaller,registry,runtimeCache,now,canUpdate,onRefresh,env,isPackaged});this.runtimes=[];this.jobs=new Map();this.latest=new Map();this.closed=false;this.checking=false;this.scanning=null;this.registryBackground=null;}
+  constructor({store,userData,node=nativeNode(),fetchImpl,inspect=inspectEnvironments,execute=environmentProcess,isDshRunning=dshRunning,npmFinder=findNpmCli,kimiInstaller=installKimiNpm,claudeInstaller=installClaudeNpm,registry=dshUninstallRegistry,runtimeCache=null,now=Date.now,canUpdate=()=>null,onRefresh=async()=>{},env=process.env,isPackaged=false}={}){super();Object.assign(this,{store,userData,node,fetchImpl,inspect,execute,isDshRunning,npmFinder,kimiInstaller,claudeInstaller,registry,runtimeCache,now,canUpdate,onRefresh,env,isPackaged});this.runtimes=[];this.jobs=new Map();this.latest=new Map();this.closed=false;this.checking=false;this.scanning=null;this.registryBackground=null;this.npmReady=false;}
   preferences(id){return this.store.state.preferences.environments?.[id]??{};}
   registryCache(){return this.preferences('dsh').registry??{rows:[],checkedAt:null};}
   async saveRegistry(rows){await this.store.mutate(state=>{state.preferences.environments??={};state.preferences.environments.dsh={...state.preferences.environments.dsh,registry:{rows,checkedAt:new Date(this.now()).toISOString()}};});}
@@ -22,12 +36,46 @@ export class Environments extends EventEmitter {
   finishCheck(runtimes=this.runtimes){this.checking=false;return runtimes;}
   failCheck(reason){this.checking=false;this.runtimes=runtimePlaceholders().map(row=>({...row,status:'error',reason}));return this.runtimes;}
   checkingReason(id){return this.checking&&this.runtimes.some(row=>row.id===id)?'正在检测运行环境，请稍候':null;}
-  async saveCache(runtimes){await this.runtimeCache?.save(runtimes.map(row=>{const {checking,...rest}=row;return rest;}));}
-  async init(){this.npm=await this.npmFinder({node:this.node.command}).catch(()=>null);await this.scan();void this.refreshRegistry();return this;}
+  async saveCache(runtimes){
+    if(!this.runtimeCache)return;
+    await this.runtimeCache.save(await Promise.all(runtimes.map(async row=>{
+      const {checking,...rest}=row;
+      return {...rest,fingerprint:row.installed?row.fingerprint??await runtimeFingerprint(row):null};
+    })));
+    this.cacheNeedsSave=false;
+  }
+  async ensureNpm(){if(this.npmReady)return this.npm;this.npm=await this.npmFinder({node:this.node.command}).catch(()=>null);this.npmReady=true;return this.npm;}
+  async canReuseCache(runtimes=this.runtimes){
+    if(!Array.isArray(runtimes)||runtimes.length!==ENVIRONMENT_IDS.length)return false;
+    if(runtimes.some(r=>!r||r.status==='checking'||r.status==='error'))return false;
+    const configured=this.store.state.preferences.runtimes??{};
+    const executableFingerprints=new Map();
+    for(const r of runtimes){
+      const custom=configured[r.id]?.executable;
+      if(custom&&r.executable!==custom)return false;
+      if(r.installed){
+        const fingerprint=await runtimeFingerprint(r);
+        if(!fingerprint)return false;
+        if(r.fingerprint!==fingerprint)executableFingerprints.set(r.id,fingerprint);
+      }
+    }
+    if(executableFingerprints.size){
+      this.runtimes=await Promise.all(runtimes.map(async row=>{
+        const fingerprint=executableFingerprints.get(row.id);
+        if(!fingerprint)return row;
+        const next=await inspectEnvironment({...row,version:null},{registryRows:this.registryCache().rows,execute:this.execute});
+        return {...next,fingerprint};
+      }));
+      this.cacheNeedsSave=true;
+    }
+    await this.ensureNpm();
+    return true;
+  }
+  async init(){await this.ensureNpm();await this.scan();void this.refreshRegistry();return this;}
   async refreshRegistry(){if(this.registryBackground)return this.registryBackground;this.registryBackground=(async()=>{const cached=this.registryCache(),dsh=this.runtimes.find(r=>r.id==='dsh'),stale=!Number.isFinite(Date.parse(cached.checkedAt??''))||this.now()-Date.parse(cached.checkedAt)>=7*DAY_MS;if(dsh?.installed&&!stale)return;const rows=await this.registry();if(!Array.isArray(rows))return;const changed=JSON.stringify(rows)!==JSON.stringify(cached.rows??[]);await this.saveRegistry(rows);if(!changed)return;await this.scan();await this.onRefresh(this.runtimes);this.emit('change');})().catch(()=>{}).finally(()=>{this.registryBackground=null;});return this.registryBackground;}
   async scan({registry=false}={}){const previous=this.scanning??Promise.resolve(),promise=previous.catch(()=>{}).then(async()=>{let rows=this.registryCache().rows??[];if(registry)try{const queried=await this.registry();if(Array.isArray(queried)){rows=queried;await this.saveRegistry(rows);}}catch{}let detected;try{detected=await this.inspect(this.store.state.preferences.runtimes??{},{userData:this.userData,node:this.node,env:this.env,isPackaged:this.isPackaged,registryRows:rows});}catch{detected=ENVIRONMENT_IDS.map(id=>({id,name:id,installed:false,executable:null,status:'error',reason:'环境检测失败，请到设置 → 开发环境重新检测',warning:null}));}this.runtimes=detected.map(r=>{const current=this.runtimes.find(old=>old.id===r.id);return current&&this.canUpdate(r.id)&&current.executable!==r.executable?{...current,reason:'当前会话运行中，保留其已选执行程序；结束后重新检测以切换版本'}:r;});return this.runtimes;});this.scanning=promise;try{return await promise;}finally{if(this.scanning===promise)this.scanning=null;}}
   busyReason(id){const job=this.jobs.get(id);return job&&!terminal.has(job.state)&&['install','update'].includes(job.action)?'环境正在安装或更新，请等待任务完成':null;}
-  runtimeViews(runtimes=this.runtimes){return runtimes.map(r=>{const row={...r,checking:this.checking};return this.busyReason(r.id)?{...row,status:'needs-setup',reason:this.busyReason(r.id)}:row;});}
+  runtimeViews(runtimes=this.runtimes){return runtimes.map(({fingerprint,...runtime})=>{const row={...runtime,checking:this.checking};return this.busyReason(row.id)?{...row,status:'needs-setup',reason:this.busyReason(row.id)}:row;});}
   snapshot(){return this.runtimeViews().map(r=>{const job=this.jobs.get(r.id),latest=this.preferences(r.id).latest??null,updateAvailable=latest?.version&&r.version?compareRuntimeVersions(latest.version,r.version)>0:null,busy=job&&!terminal.has(job.state),installBusy=busy&&job.action!=='check',checking=r.checking;return {id:r.id,name:r.name,status:r.status,reason:r.reason??null,warning:r.warning??null,checking,installed:r.installed?{version:r.version??null,path:r.executable??r.desktop,kind:r.kind??'system'}:null,latest,updateAvailable,job:job&&!job.silent?this.publicJob(job):null,actions:{install:!checking&&!installBusy&&['dsh','kimi','claude'].includes(r.id)&&!r.installed&&(!['kimi','claude'].includes(r.id)||!!this.npm),update:!checking&&!installBusy&&!!r.executable&&['dsh','kimi','claude','antigravity'].includes(r.id)&&(!['kimi','claude'].includes(r.id)||!!this.npm),check:!checking&&!busy&&['dsh','kimi','claude'].includes(r.id),cancel:!checking&&!!busy&&job.cancelable&&!job.silent,openPage:!checking&&!!r.page},page:r.page??null};});}
   publicJob(job){return {action:job.action,state:job.state,received:job.received,total:job.total,message:job.message};}
   emitJob(job,state,message,received=job.received,total=job.total){if(this.closed)return;const changed=job.reportedState!==state,now=this.now();Object.assign(job,{state,message,received,total});if(!job.silent&&(changed||job.lastProgressAt===undefined||now-job.lastProgressAt>=250)){job.lastProgressAt=now;this.emit('event',{type:'environment-job',id:job.id,...this.publicJob(job)});}if(changed){job.reportedState=state;this.emit('change');}}

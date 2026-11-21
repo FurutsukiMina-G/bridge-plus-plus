@@ -1,18 +1,34 @@
 import {nativeModels} from './native-models.mjs';
 import {interjectCapability} from './session-input.mjs';
 import {mediaCapabilities,deniedMediaCapabilities} from './media-capabilities.mjs';
-import {readCodexDefaultModel} from './codex-config.mjs';
+import {codexHome,readCodexDefaultModel} from './codex-config.mjs';
+import {stat} from 'node:fs/promises';
+import {join} from 'node:path';
+
+async function codexCatalogStamp(runtime){
+  if(runtime.id!=='codex')return null;
+  const home=codexHome();
+  const files=await Promise.all(['models_cache.json','config.toml'].map(async name=>{
+    try{const info=await stat(join(home,name));return [info.size,info.mtimeMs,info.ctimeMs];}
+    catch(error){return error.code;}
+  }));
+  return JSON.stringify([home,files]);
+}
 
 // One slot per runtime, retained during invalidation so even a refresh cannot
 // start a second native process while the previous catalog read is in flight.
 export class NativeMediaCatalog {
-  constructor({read=nativeModels,now=Date.now,retryMs=60000}={}){Object.assign(this,{read,now,retryMs});this.entries=new Map();}
+  constructor({read=nativeModels,now=Date.now,retryMs=60000,stamp=read===nativeModels?codexCatalogStamp:async()=>null}={}){Object.assign(this,{read,now,retryMs,stamp});this.entries=new Map();}
   invalidate(runtimeId){for(const [id,e]of this.entries)if(runtimeId===undefined||id===runtimeId){e.revision++;e.value=null;e.error=null;e.retryAt=0;}}
   async get(runtime,cwd,{refresh=false}={}){
     let e=this.entries.get(runtime.id);
     if(!e){e={executable:runtime.executable,revision:0,value:null,error:null,retryAt:0,flight:null};this.entries.set(runtime.id,e);}
     if(e.executable!==runtime.executable){this.invalidate(runtime.id);e.executable=runtime.executable;}
     if(refresh)this.invalidate(runtime.id);
+    e.stampFlight??=this.stamp(runtime).finally(()=>{e.stampFlight=null;});
+    const stamp=await e.stampFlight;
+    if(e.executable!==runtime.executable)throw new Error('运行环境已变化，请刷新后重试');
+    if(e.stamp!==stamp){this.invalidate(runtime.id);e.stamp=stamp;}
     for(;;){
       if(e.executable!==runtime.executable)throw new Error('运行环境已变化，请刷新后重试');
       if(e.flight){try{await e.flight;}catch{}continue;}
@@ -28,8 +44,10 @@ export class NativeMediaCatalog {
 export class AttachmentCapabilities {
   constructor({runtimes,sessions,providers,cwd,catalog=new NativeMediaCatalog(),codexDefault=readCodexDefaultModel}){Object.assign(this,{runtimes,sessions,providers,cwd,catalog,codexDefault});}
   async forSelection(runtimeId,selection){
-    const runtime=this.runtimes().find(r=>r.id===runtimeId);if(!runtime)throw new Error('未知运行环境');let validated,nativeModel;
-    const busy=this.sessions().runtimeReady?.(runtimeId);if(busy||runtime.status&&runtime.status!=='ready')return deniedMediaCapabilities(busy??runtime.reason??'环境尚未就绪，请到设置 → 开发环境处理',runtimeId);
+    const runtime=this.runtimes().find(r=>r.id===runtimeId);if(!runtime)throw new Error('未知运行环境');
+    const busy=this.sessions().runtimeReady?.(runtimeId)??null;
+    let validated,nativeModel;
+    if(busy||runtime.status&&runtime.status!=='ready')return deniedMediaCapabilities(busy??runtime.reason??'环境尚未就绪，请到设置 → 开发环境处理',runtimeId);
     try{validated=this.sessions().validate(runtimeId,selection);}catch(error){return deniedMediaCapabilities(error.message,runtimeId);}
     if(validated.modelKey==='native'&&runtimeId==='codex'){
       let modelId=validated.nativeModel;

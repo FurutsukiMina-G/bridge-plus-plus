@@ -111,6 +111,7 @@ export class AgentRules {
         const model=this.model(key);if(!model||!this.gateway)continue;available=true;
         try{
           const followSession=this.detectorModel()==='session'&&key===session.selection?.modelKey;
+          // Keep the detector's original prompt profile independent of the session's tool contract.
           const selection=validateSelection(model,{modelKey:key,identity:followSession?session.selection.identity:model.identity,...followSession?{contextTokens:session.selection.contextTokens}:{}}),variant=variantFor(model,selection),endpoint=await abortable(this.gateway.register(model,variant,selection,'codex',auxId),controller.signal);
           controller.signal.throwIfAborted();
           const response=await abortable(this.fetchImpl(endpoint.baseURL+'/chat/completions',{method:'POST',headers:{'content-type':'application/json',authorization:'Bearer '+endpoint.key,'x-bridge-auxiliary':'1','x-bridge-rules':'1','x-bridge-effort':'none,low,minimal,medium'},body:JSON.stringify({model:variant.id,stream:false,max_tokens:400,messages:[{role:'system',content:RULE_DETECTOR_PROMPT},{role:'user',content:JSON.stringify({existingRules:existing,message:text})}]}),signal:controller.signal}),controller.signal);

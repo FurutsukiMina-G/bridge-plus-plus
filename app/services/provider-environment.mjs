@@ -1,5 +1,5 @@
 import {join} from 'node:path';
-const workbuddyTiming=['WORKBUDDY_TIMEOUT_MS','WORKBUDDY_IDLE_TIMEOUT_MS','WORKBUDDY_PREWARM_MS',
+const workbuddyTiming=['WORKBUDDY_TIMEOUT_MS','WORKBUDDY_IDLE_TIMEOUT_MS','WORKBUDDY_SESSION_IDLE_MS','WORKBUDDY_PREWARM_MS',
   'WORKBUDDY_WARM_DEMAND_MS','WORKBUDDY_MAX_BLANK_WARM','WORKBUDDY_NATIVE_WARM_LIMIT','WORKBUDDY_MAX_WARM'];
 /** Isolate standalone bridge settings while allowing bounded timing and prewarm settings. */
 export function providerEnvironmentPatch(env=process.env){

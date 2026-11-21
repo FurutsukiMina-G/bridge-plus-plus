@@ -60,6 +60,17 @@ test('detector uses the exact primary model with auxiliary headers, existing rul
   const body=JSON.parse(calls[0].body);assert.equal(body.max_tokens,400);assert.equal(body.stream,false);assert.equal(body.model.includes(Buffer.from('deepseek-v4.1-flash').toString('base64url')),true);assert.deepEqual(JSON.parse(body.messages[1].content).existingRules,['回复用中文']);assert.equal((await rules.read()).items.length,2);
   assert.equal((await store.events('s1')).filter(e=>e.source==='long-term-rule').length,1);
 });
+test('rule detection keeps the same prompt profile for hosted, Antigravity and native sessions',async t=>{
+  const routes=[],{rules,store}=await fixture(t,{providers,gateway:{register:async(model,variant,selection,runtimeId)=>{
+    routes.push([model.source,runtimeId]);return gateway.register(model,variant);
+  }},fetchImpl:async()=>response('{"rules":[]}')});
+  const s=store.session('s1');
+  for(const [runtimeId,modelKey]of [['claude',FLASH.qoder],['antigravity','antigravity:fixture'],['kimi','native']]){
+    Object.assign(s,{runtimeId,selection:{modelKey}});
+    await rules.detect(s,'以后回复都用中文');
+  }
+  assert.deepEqual(routes,[['qoder','codex'],['workbuddy','codex'],['workbuddy','codex']]);
+});
 test('detector skips opted-out, attachment-only, slash, short and globally disabled messages without a request',async t=>{
   let count=0;const {rules,store}=await fixture(t,{providers,gateway,fetchImpl:async()=>{count++;return response('{"rules":[]}');}}),s=store.session('s1');
   for(const text of ['', '  ', '/remember hello', 'a b c'])rules.observe(s,text);s.recordRules=false;rules.observe(s,'以后回复用中文');delete s.recordRules;await rules.auto(false);rules.observe(s,'记住以后用中文');await drained(rules);assert.equal(count,0);assert.equal(rules.stats.skipped,6);
@@ -84,8 +95,8 @@ test('detector falls back to the other source\'s DeepSeek Flash, and counts unav
   rules.timeoutMs=15;rules.fetchImpl=async(_url,{signal})=>new Promise((_,reject)=>signal.addEventListener('abort',()=>reject(signal.reason),{once:true}));rules.observe(store.session('s1'),'以后每次先运行检查');await drained(rules);assert.equal(rules.stats.failed,2);
 });
 test('detector runs one request per session and retains only the latest pending message without blocking admission',async t=>{
-  const gate=deferred(),seen=[],{rules,store}=await fixture(t,{providers,gateway,fetchImpl:async(_url,options)=>{seen.push(JSON.parse(JSON.parse(options.body).messages[1].content).message);if(seen.length===1)await gate.promise;return response('{"rules":[]}');}}),s=store.session('s1');
-  rules.observe(s,'以后要求第一条');await new Promise(r=>setImmediate(r));await new Promise(r=>setImmediate(r));assert.equal(seen.length,1);
+  const gate=deferred(),began=deferred(),seen=[],{rules,store}=await fixture(t,{providers,gateway,fetchImpl:async(_url,options)=>{seen.push(JSON.parse(JSON.parse(options.body).messages[1].content).message);if(seen.length===1){began.resolve();await gate.promise;}return response('{"rules":[]}');}}),s=store.session('s1');
+  rules.observe(s,'以后要求第一条');await began.promise;assert.equal(seen.length,1);
   rules.observe(s,'以后要求第二条');rules.observe(s,'以后要求第三条');assert.equal(seen.length,1);gate.resolve();await drained(rules);assert.deepEqual(seen,['以后要求第一条','以后要求第三条']);
 });
 test('auxiliary usage is routed to its source session independently of a running native turn',async t=>{

@@ -41,9 +41,17 @@ async function collect(transport,request){
 }
 const next=(first,extra={})=>({...body,...extra,messages:[...body.messages,first.result.choices[0].message,{role:'tool',tool_call_id:'call_00_W',content:'HOST_RESULT'}]});
 const call={calls:[{id:'call_00_W',input:{file_path:'a.ts'}}]};
+async function waitFor(predicate,description){
+  const deadline=performance.now()+5000;
+  while(!predicate()){
+    assert.ok(performance.now()<deadline,description);
+    await sleep(20);
+  }
+}
 test('the next turn runs on a runtime that booted while the host executed the calls',async t=>{
   const {transport,runs}=await fixture(t,[call,{text:'a.ts 已检查完毕。',denied:'mcp__host__read'}]);
-  const first=await collect(transport,body);await sleep(450);
+  const first=await collect(transport,body);
+  await waitFor(()=>transport.warm.size===1&&runs[1]?.connected===1,'resumable runtime did not prestart');
   assert.equal(runs.length,2);assert.equal(runs[1].prestarted,true);assert.equal(runs[1].connected,1);assert.equal(runs[1].started,false);
   assert.equal(runs[1].options.resume,'warm-session');assert.equal(runs[1].options.mcpServers.host.type,'sdk');
   // A prestarted runtime must carry the same memory and compaction switches as a cold one.
@@ -57,7 +65,8 @@ test('the next turn runs on a runtime that booted while the host executed the ca
 });
 test('a turn whose options changed discards the prestarted runtime and starts its own',async t=>{
   const {transport,runs}=await fixture(t,[call,{text:'unused'},{text:'fresh runtime answer'}]);
-  const first=await collect(transport,body);await sleep(450);
+  const first=await collect(transport,body);
+  await waitFor(()=>transport.warm.size===1,'resumable runtime did not prestart');
   const changed=[...tools,{type:'function',function:{name:'write',parameters:{type:'object'}}}];
   const second=await collect(transport,next(first,{tools:changed}));
   assert.equal(runs.length,3);assert.equal(runs[1].started,false);assert.ok(runs[1].cleaned>=1);assert.equal(runs[2].prestarted,false);
@@ -65,22 +74,32 @@ test('a turn whose options changed discards the prestarted runtime and starts it
 });
 test('a prestarted runtime that dies before initializing is replaced by a cold one',async t=>{
   const {transport,runs}=await fixture(t,[call,{dies:true},{text:'cold answer'}]);
-  const first=await collect(transport,body);await sleep(450);
+  const first=await collect(transport,body);
+  await waitFor(()=>transport.warm.size===1,'resumable runtime did not prestart');
   const second=await collect(transport,next(first));
   assert.equal(runs.length,3);assert.ok(runs[1].cleaned>=1);assert.equal(second.metrics.warmFailed,true);assert.equal(second.metrics.warmStart,false);assert.equal(second.result.choices[0].message.content,'cold answer');
   assert.equal(transport.warm.stats.used,0);assert.equal(transport.warm.stats.discarded,1);
 });
 test('unused prestarted runtimes expire, and closing the transport ends them',async t=>{
   const expiring=await fixture(t,[call,{text:'never'}],{prewarmMs:150});
-  await collect(expiring.transport,body);await sleep(650);
+  await collect(expiring.transport,body);
+  await waitFor(()=>expiring.transport.warm.stats.expired===1,'unused runtime did not expire');
   assert.ok(expiring.runs[1].cleaned>=1);assert.equal(expiring.transport.warm.stats.expired,1);assert.equal(expiring.transport.warm.stats.discarded,0);assert.equal(expiring.transport.warm.size,0);
   const closing=await fixture(t,[call,{text:'never'}]);
-  await collect(closing.transport,body);await sleep(450);await closing.transport.close();
+  await collect(closing.transport,body);
+  await waitFor(()=>closing.transport.warm.size===1,'runtime did not prestart before close');
+  await closing.transport.close();
   assert.ok(closing.runs[1].cleaned>=1);assert.equal(closing.transport.warm.stats.discarded,1);assert.equal(closing.transport.warm.size,0);
 });
 test('final answers start no runtime, and prestarting can be disabled',async t=>{
-  const final=await fixture(t,[{text:'All done.'}]);await collect(final.transport,body);await sleep(450);assert.equal(final.runs.length,1);
-  const disabled=await fixture(t,[call],{prewarmMs:0});await collect(disabled.transport,body);await sleep(450);assert.equal(disabled.runs.length,1);
+  const final=await fixture(t,[{text:'All done.'}]);
+  const finalPrewarm=t.mock.method(final.transport,'prewarm');
+  await collect(final.transport,body);
+  assert.equal(finalPrewarm.mock.callCount(),0);assert.equal(final.runs.length,1);
+  const disabled=await fixture(t,[call],{prewarmMs:0});
+  t.mock.timers.enable({apis:['setTimeout']});
+  await collect(disabled.transport,body);t.mock.timers.tick(5000);
+  assert.equal(disabled.transport.warm.stats.started,0);assert.equal(disabled.runs.length,1);
 });
 test('one bounded blank runtime serves only a fresh matching conversation and closes on shutdown',async t=>{
   const runtime=await mkdtemp(join(tmpdir(),'wb-blank-')),runs=[];
@@ -96,11 +115,15 @@ test('one bounded blank runtime serves only a fresh matching conversation and cl
   const transport=new SdkTransport({runtime,cliPath:process.execPath,toolMode:'replay',prewarmMs:5000,maxBlankWarm:1},{get:async()=>credential},{run});
   t.after(async()=>{await transport.close();await rm(runtime,{recursive:true,force:true});});
   const request={...body,tools:[],prompt_cache_key:undefined,response_format:{type:'json_object'}};
-  const first=await collect(transport,request);await sleep(100);assert.equal(runs.length,2);assert.equal(runs[1].options.resume,undefined);
-  const second=await collect(transport,{...request,messages:[{role:'user',content:'new synthetic audit'}]});await sleep(100);
+  const first=await collect(transport,request);
+  await waitFor(()=>transport.blank.size===1,'first blank runtime did not prestart');
+  assert.equal(runs.length,2);assert.equal(runs[1].options.resume,undefined);
+  const second=await collect(transport,{...request,messages:[{role:'user',content:'new synthetic audit'}]});
+  await waitFor(()=>transport.blank.size===1,'blank runtime was not replenished after use');
   assert.equal(second.metrics.warmStart,true);assert.equal(runs[1].options.resume,undefined);assert.match(runs[1].prompt,/new synthetic audit/);
   assert.equal(transport.blank.size,1);assert.equal(transport.blank.stats.used,1);
-  await collect(transport,{...request,prompt_cache_key:'resumed',messages:[...request.messages,first.result.choices[0].message,{role:'user',content:'resume check'}],reasoning_effort:'high'});await sleep(100);
+  await collect(transport,{...request,prompt_cache_key:'resumed',messages:[...request.messages,first.result.choices[0].message,{role:'user',content:'resume check'}],reasoning_effort:'high'});
+  await waitFor(()=>transport.blank.size===1,'blank runtime for the new effort did not prestart');
   assert.ok(transport.blank.stats.discarded>=1,'different effort discards the unmatched blank');
   await transport.close();assert.equal(transport.blank.size,0);assert.ok(runs.at(-1).cleaned>0);
 });

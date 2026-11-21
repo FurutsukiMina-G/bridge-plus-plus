@@ -43,6 +43,20 @@ test('a partially failed workspace batch rejects each caller and retries both co
   assert.equal(await readFile(store.file,'utf8'),original);
   assert.equal(await readFile(store.backupFile,'utf8'),original);
 });
+test('serialization and a populated backup protect the workspace even if the main write fails',async t=>{
+  const root=await mkdtemp(join(tmpdir(),'awb-backup-guard-')),store=await new Store(root).open();
+  t.after(async()=>{await store.close();await rm(root,{recursive:true,force:true});});
+  store.state.sessions=[{id:'valid',toJSON:()=>({id:'../invalid'})}];
+  await assert.rejects(store.save(),/Unsupported workspace state/);
+  const write=store.writeSnapshot.bind(store);
+  store.writeSnapshot=(file,content)=>file===store.file?Promise.reject(new Error('main copy failed')):write(file,content);
+  store.state.sessions=[{id:'only-in-backup'}];
+  await assert.rejects(store.save(),/main copy failed/);
+  store.writeSnapshot=write;
+  store.state.sessions=[];
+  await assert.rejects(store.save(),/populated session index/);
+  assert.equal(JSON.parse(await readFile(store.backupFile,'utf8')).sessions[0].id,'only-in-backup');
+});
 test('JSONL handles split UTF-8 and never mistakes human stderr for protocol',()=>{const lines=new JsonLines(),messages=[],text=[];lines.on('message',m=>messages.push(m));lines.on('text',m=>text.push(m));const b=Buffer.from('{"text":"中文🙂"}\nlog line\n');for(let i=0;i<b.length;i++)lines.push(b.subarray(i,i+1));lines.end();assert.deepEqual(messages,[{text:'中文🙂'}]);assert.deepEqual(text,['log line']);});
 test('RPC roundtrip rejects on process exit and propagates request errors',async()=>{const script=`process.stdin.setEncoding('utf8');let b='';process.stdin.on('data',d=>{b+=d;let n;while((n=b.indexOf('\\n'))>=0){const m=JSON.parse(b.slice(0,n));b=b.slice(n+1);if(m.method==='exit'){process.exit(3);}else process.stdout.write(JSON.stringify({id:m.id,result:{echo:m.params}})+'\\n');}});`;const rpc=new RpcProcess(launch(process.execPath,['-e',script]));try{assert.deepEqual(await rpc.request('echo',{x:2}),{echo:{x:2}});await assert.rejects(rpc.request('exit',{}),/退出码 3/);}finally{await rpc.close();}});
 test('intentional Electron Node mode is preserved for owned worker processes',()=>{assert.equal(childEnvironment({ELECTRON_RUN_AS_NODE:'1'}).ELECTRON_RUN_AS_NODE,'1');assert.equal(childEnvironment().ELECTRON_RUN_AS_NODE,undefined);});

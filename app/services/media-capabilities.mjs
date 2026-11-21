@@ -3,7 +3,7 @@ import {join,dirname} from 'node:path';
 import {tmpdir} from 'node:os';
 import {execFile} from 'node:child_process';
 import {promisify} from 'node:util';
-import {readExternalAsar} from '../core/external-asar.mjs';
+import {readExternalAsar,statExternalAsar} from '../core/external-asar.mjs';
 import {normalizeAntigravity} from '../core/catalog.mjs';
 import {ANTIGRAVITY_INPUT_MIMES,ANTIGRAVITY_TRANSPORT_SOURCE} from '../core/antigravity-media.mjs';
 const exec=promisify(execFile),cache=new Map(),durable=new Map();
@@ -35,7 +35,13 @@ export function antigravityTransportMedia(help){const supported=/(?:^|\s)--add-d
 export async function inspectRuntimeMedia(runtime,{readArchive=readExternalAsar}={}){
   if(runtime.status&&runtime.status!=='ready')return {image:false,audio:false,video:false,reason:runtime.reason??'环境尚未就绪'};
   if(!runtime.executable)return {reason:'运行程序未安装'};
-  const info=await stat(runtime.executable),key=JSON.stringify([runtime.id,runtime.executable,info.size,info.mtimeMs]);
+  const info=await stat(runtime.executable),identity=[runtime.id,runtime.executable,info.size,info.mtimeMs];
+  const archive=runtime.id==='dsh'?join(dirname(runtime.executable),'resources/app.asar'):null;
+  if(archive){
+    const info=await statExternalAsar(archive).catch(()=>null);
+    identity.push(info?.size??null,info?.mtimeMs??null);
+  }
+  const key=JSON.stringify(identity);
   if(cache.has(key))return cache.get(key);
   const flight=(async()=>{
     if(runtime.id==='codex'){
@@ -55,8 +61,8 @@ export async function inspectRuntimeMedia(runtime,{readArchive=readExternalAsar}
       if(pkg.name==='@moonshot-ai/kimi-code'&&block)return {image:/image:\s*true/.test(block[1]),audio:/audio:\s*true/.test(block[1]),video:false,version:pkg.version,source:'installed ACP initialize implementation'};
     }
     if(runtime.id==='claude')return {image:true,audio:false,video:false,version:runtime.version??null,source:'stream-json Anthropic base64 image blocks',reason:'Claude Code 仅支持图片附件'};
-    if(runtime.id==='dsh'){
-      const s=await readArchive(join(dirname(runtime.executable),'resources/app.asar'));
+    if(archive){
+      const s=await readArchive(archive);
       const image=s.includes("readonly type: 'image'; readonly mediaType: ImageMediaType; readonly data: string;")&&s.includes('SessionPromptRequest');
       return {image,audio:false,video:false,source:'installed Host PromptContentPart declaration',reason:'DSH Host 未声明此媒体类型的提示词传输'};
     }

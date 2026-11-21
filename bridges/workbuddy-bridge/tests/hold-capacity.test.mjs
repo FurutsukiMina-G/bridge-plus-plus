@@ -25,6 +25,25 @@ test('idle scoped root records remain eligible when all non-root candidates are 
  const first=await pool.acquire({...body,bridge_scope:'one'},credential,new AbortController().signal);first.release();
  const second=await pool.acquire({...body,bridge_scope:'two'},credential,new AbortController().signal);assert.notEqual(second.record.id,first.record.id);second.release();
 });
+test('review keys resume one user delta, retire on rotation and lose capacity before main sessions',async t=>{
+ const runtime=await mkdtemp(join(tmpdir(),'wb-review-slots-'));
+ const transport=new SdkTransport({runtime,maxSessions:2,toolMode:'json'},{get:async()=>credential},{run:()=>{throw new Error('fixture records only');}});
+ t.after(async()=>{await transport.close();await rm(runtime,{recursive:true,force:true});});
+ const acquire=(scope,key,messages=body.messages)=>transport.pool.acquire({...body,bridge_scope:scope,prompt_cache_key:key,messages},credential,new AbortController().signal);
+ const reviewKey=value=>'review:'+value.repeat(64),answer={role:'assistant',content:'{"decision":"allow"}'};
+ const first=await acquire('one','main');first.release();
+ const review=await acquire('one',reviewKey('a'));review.record.sessionId='sdk-review';review.commit({},answer);review.release();
+ const appended={role:'user',content:'next review'};
+ const next=await acquire('one',reviewKey('a'),[...body.messages,answer,appended]);
+ assert.equal(next.record,review.record);assert.equal(next.metrics.historyMode,'delta');assert.deepEqual(next.messages,[appended]);next.release();
+ const rotated=await acquire('one',reviewKey('b'));rotated.release();
+ assert.equal(transport.pool.records.has(review.record.id),false);
+ const other=await acquire('two','main');other.release();
+ assert.equal(transport.pool.records.has(first.record.id),true);
+ assert.equal(transport.pool.records.has(rotated.record.id),false);
+ await assert.rejects(acquire('two',reviewKey('c')),error=>error.code==='sessions_busy');
+ assert.equal(transport.pool.records.size,2);
+});
 test('configuration accepts all three modes and defaults to 24 slots for concurrent conversations',()=>{
  const env={LOCALAPPDATA:'D:/synthetic-does-not-exist',APPDATA:'D:/synthetic-does-not-exist',WORKBUDDY_AUTH_FILE:'synthetic-never-read'};
  for(const mode of ['native','replay','json'])assert.equal(config({...env,WORKBUDDY_TOOL_MODE:mode}).toolMode,mode);

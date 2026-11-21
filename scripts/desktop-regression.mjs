@@ -108,7 +108,7 @@ export async function runRegression({window,methods,store,capture}){
     await until(()=>exists('[data-session="qa-cache"]'));await click('[data-session="qa-cache"]');
     await until(async()=>/缓存命中\s*未报告/.test(await js('document.querySelector("#composer-footer").textContent')));
     assert.doesNotMatch(await js('document.querySelector("#composer-footer").textContent'),/199%|90%/);await capture('17-cache-provenance');
-    const projected=await methods['session:events']({sessionId:cacheSession.id});assert.ok(projected.filter(e=>e.type==='usage').every(e=>e.data.cached_tokens===null));
+    const {events:projected}=await methods['session:events']({sessionId:cacheSession.id});assert.ok(projected.filter(e=>e.type==='usage').every(e=>e.data.cached_tokens===null));
     assert.equal((await store.events(cacheSession.id)).find(e=>e.data?.cached_tokens===1990).data.cached_tokens,1990,'Original diagnostics must not be overwritten');
     await store.event(cacheSession.id,{type:'usage',scope:'request',source:'gateway',data:{prompt_tokens:1000,completion_tokens:10,cached_tokens:750,cache_status:'reported',context_window:200000}});
     await until(async()=>/缓存命中 75%/.test(await js('document.querySelector("#composer-footer").textContent')));

@@ -11,8 +11,56 @@ const appVersion=createRequire(import.meta.url)('../../package.json').version;
 
 /** A persistent worker per source/runtime isolates prompts, SDK sessions and replay caches. */
 export class BridgeWorkers {
-  constructor({node,script,cwd,dataRoot,catalog,metadataOnly=false,components=null}){Object.assign(this,{node,script,cwd,dataRoot,catalog,metadataOnly,components});this.entries=new Map();this.retired=new Set();this.closed=false;}
-  async ensure(source,runtimeId){
+  constructor({node,script,cwd,dataRoot,catalog,metadataOnly=false,components=null,envFor=()=>({}),configKey=()=>'',idleMs=()=>0,canReclaim=()=>true,sweepMs=15000,now=Date.now}){
+    Object.assign(this,{node,script,cwd,dataRoot,catalog,metadataOnly,components,envFor,configKey,idleMs,canReclaim,sweepMs,now});
+    this.entries=new Map();this.retired=new Set();this.closed=false;this.sweepTimer=null;
+  }
+  scheduleSweep(){
+    if(this.closed||this.sweepTimer||!this.entries.size)return;
+    if(![...this.entries.values()].some(entry=>this.hasReclaimPolicy(entry)))return;
+    this.sweepTimer=setInterval(()=>{void this.sweepIdle();},this.sweepMs);
+    this.sweepTimer.unref?.();
+  }
+  stopSweepIfEmpty(){
+    if(this.sweepTimer&&![...this.entries.values()].some(entry=>this.hasReclaimPolicy(entry))){
+      clearInterval(this.sweepTimer);this.sweepTimer=null;
+    }
+  }
+  hasReclaimPolicy(entry){return this.idleMs(entry.source,entry.runtimeId)>0||entry.configKey!==this.configKey(entry.source,entry.runtimeId);}
+  reclaimable(entry){
+    if(!entry.url||entry.failed||entry.active||entry.syncing||!this.canReclaim(entry.source,entry.runtimeId,entry))return false;
+    const ttl=this.idleMs(entry.source,entry.runtimeId);
+    return entry.configKey!==this.configKey(entry.source,entry.runtimeId)||ttl>0&&this.now()-entry.lastUsed>=ttl;
+  }
+  async sweepIdle(){
+    if(this.closed)return;
+    await Promise.all([...this.entries].map(async([scope,entry])=>{
+      if(entry.checkingIdle||!this.reclaimable(entry))return;
+      const activity=entry.activity;
+      entry.checkingIdle=true;
+      try{
+        // A held PostToolUse channel can outlive its HTTP request and any desktop run.
+        const response=await fetch(entry.url+'/health',{headers:{authorization:`Bearer ${entry.key}`},redirect:'error',signal:AbortSignal.timeout(2000)});
+        if(!response.ok)return;
+        const status=await response.json();
+        const idle=entry.source==='workbuddy'
+          ?status.active===0&&status.queued===0&&status.provider?.hold?.awaiting===0
+          :status.activeRequests===0&&status.queuedRequests===0&&status.pools&&Object.values(status.pools).every(pool=>pool.native?.awaiting===0);
+        if(idle&&!this.closed&&this.entries.get(scope)===entry&&entry.activity===activity&&this.reclaimable(entry)){
+          this.retired.add(entry);
+          entry.fail(new Error('Model source worker reclaimed'));
+        }
+      }catch{}finally{entry.checkingIdle=false;}
+    }));
+    this.stopSweepIfEmpty();
+  }
+  touch(entry){entry.lastUsed=this.now();entry.activity++;}
+  async readyEntry(entry,retain){
+    this.touch(entry);
+    if(retain)this.retain(entry);
+    try{return await entry.ready;}catch(error){if(retain)this.release(entry);throw error;}
+  }
+  async ensure(source,runtimeId,{retain=false}={}){
     if(this.closed)throw new Error('Bridge workers are closed');
     const componentEnv=this.components?await this.components.environment(source):{AWB_SOURCE_PACKAGE_DIR:undefined};
     const userData=this.components?.userData;
@@ -22,9 +70,11 @@ export class BridgeWorkers {
     }
     const directory=await this.compileCache?.directory;
     if(this.closed)throw new Error('Bridge workers are closed');
-    const scope=`${runtimeId}/${source}`,previous=this.entries.get(scope);if(previous)return previous.ready;
-    const config=this.catalog(source,runtimeId),child=launch(this.node.command,[...this.node.args,this.script,source,runtimeId],{cwd:this.cwd,stdio:['pipe','pipe','pipe','ipc'],env:{...this.node.env,...providerEnvironmentPatch(),...componentEnv,...directory?{NODE_COMPILE_CACHE:directory}:{},AWB_METADATA_ONLY:this.metadataOnly?'1':'0',AWB_PROVIDER_DIR:join(this.dataRoot,'providers',source,runtimeId,...this.metadataOnly?[randomUUID()]:[])}});
-    const entry={child,revision:config.revision,pending:new Map(),failed:null,syncing:null,active:0};this.entries.set(scope,entry);
+    const scope=`${runtimeId}/${source}`,previous=this.entries.get(scope),key=this.configKey(source,runtimeId);
+    if(previous)return this.readyEntry(previous,retain);
+    const extraEnv=this.envFor(source,runtimeId)??{};
+    const config=this.catalog(source,runtimeId),child=launch(this.node.command,[...this.node.args,this.script,source,runtimeId],{cwd:this.cwd,stdio:['pipe','pipe','pipe','ipc'],env:{...this.node.env,...providerEnvironmentPatch(),...extraEnv,...componentEnv,...directory?{NODE_COMPILE_CACHE:directory}:{},AWB_METADATA_ONLY:this.metadataOnly?'1':'0',AWB_PROVIDER_DIR:join(this.dataRoot,'providers',source,runtimeId,...this.metadataOnly?[randomUUID()]:[])}});
+    const entry={child,source,runtimeId,configKey:key,revision:config.revision,pending:new Map(),failed:null,syncing:null,active:0,lastUsed:this.now(),activity:0};this.entries.set(scope,entry);
     const log=this.metadataOnly?{write(){},async close(){}}:new WorkerLog(join(this.dataRoot,'providers',source,runtimeId,'worker.log'));
     const lines=new JsonLines();child.stdout.on('data',b=>lines.push(b));child.stdout.on('end',()=>lines.end());child.stderr.on('data',b=>log.write(b));child.stderr.on('end',()=>{void log.close();});
     entry.ready=new Promise((resolve,reject)=>{
@@ -35,12 +85,13 @@ export class BridgeWorkers {
         if(this.entries.get(scope)===entry)this.entries.delete(scope);
         entry.stopping=stopProcess(child);
         void entry.stopping.then(()=>this.retired.delete(entry));
+        this.stopSweepIfEmpty();
       };
       lines.on('message',message=>{
         if(message?.type==='ready')try{
           const url=new URL(message.url);
           if(url.protocol!=='http:'||url.hostname!=='127.0.0.1'||!url.port||url.username||url.password||url.pathname!=='/'||url.search||url.hash||typeof message.key!=='string'||!message.key||/[\r\n]/.test(message.key))throw new Error('Invalid owned worker endpoint');
-          clearTimeout(timer);entry.url=url.origin;entry.key=message.key;resolve(entry);
+          clearTimeout(timer);entry.url=url.origin;entry.key=message.key;entry.lastUsed=this.now();this.scheduleSweep();resolve(entry);
         }catch(error){entry.fail(error);}
         else if(message?.type==='error')entry.fail(new Error(message.error??'Bridge initialization failed'));
       });
@@ -48,10 +99,11 @@ export class BridgeWorkers {
       child.once('close',()=>entry.fail(new Error('Model source process exited')));
       child.on('message',message=>{const pending=entry.pending.get(message?.requestId);if(!pending)return;clearTimeout(pending.timer);entry.pending.delete(message.requestId);message.type==='catalog-updated'?pending.resolve():pending.reject(new Error(message.error??'Catalog update failed'));});
     });
-    child.stdin.end(JSON.stringify(config));return entry.ready;
+    child.stdin.end(JSON.stringify(config));return this.readyEntry(entry,retain);
   }
   async sync(source,runtimeId,entry){
     if(entry.failed)throw entry.failed;if(entry.syncing)return entry.syncing;
+    this.touch(entry);
     const task=(async()=>{
       while(entry.revision!==this.catalog(source,runtimeId).revision){
         const config=this.catalog(source,runtimeId),requestId=randomUUID();
@@ -64,8 +116,12 @@ export class BridgeWorkers {
     })();entry.syncing=task;
     try{await task;}finally{if(entry.syncing===task)entry.syncing=null;}
   }
-  retain(entry){if(entry.failed)throw entry.failed;entry.active++;}
-  release(entry){if(!entry)return;entry.active--;if(entry.retired&&entry.active===0)entry.fail(new Error('Model catalog identity updated'));}
-  retire(){for(const [scope,entry]of this.entries){this.entries.delete(scope);entry.retired=true;this.retired.add(entry);if(entry.active===0)entry.fail(new Error('Model catalog identity updated'));}}
-  async close(){this.closed=true;const entries=[...new Set([...this.entries.values(),...this.retired])];for(const entry of entries)entry.fail(new Error('Bridge workers closed'));await Promise.all(entries.map(entry=>entry.stopping));this.entries.clear();this.retired.clear();}
+  retain(entry){if(entry.failed)throw entry.failed;entry.active++;this.touch(entry);}
+  release(entry){if(!entry)return;entry.active--;this.touch(entry);if(entry.retired&&entry.active===0)entry.fail(new Error('Model catalog identity updated'));else if(entry.active===0)this.scheduleSweep();}
+  retire(){for(const [scope,entry]of this.entries){this.entries.delete(scope);entry.retired=true;this.retired.add(entry);if(entry.active===0)entry.fail(new Error('Model catalog identity updated'));}this.stopSweepIfEmpty();}
+  applyPolicy(){
+    this.scheduleSweep();
+    return this.sweepIdle();
+  }
+  async close(){this.closed=true;clearInterval(this.sweepTimer);this.sweepTimer=null;const entries=[...new Set([...this.entries.values(),...this.retired])];for(const entry of entries)entry.fail(new Error('Bridge workers closed'));await Promise.all(entries.map(entry=>entry.stopping));this.entries.clear();this.retired.clear();}
 }

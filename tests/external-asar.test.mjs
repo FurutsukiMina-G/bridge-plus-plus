@@ -23,6 +23,15 @@ test('plain Node reads the archive without attempting to import Electron origina
   assert.equal(text,'synthetic archive bytes 中文');assert.equal(imports,0);
 });
 
+test('DSH media capability is refreshed when only its archive is replaced',async()=>{
+  await mkdir('.runtime/tests',{recursive:true});
+  const root=await mkdtemp(resolve('.runtime/tests/media-asar-')),executable=join(root,'DSH.exe'),archive=join(root,'resources/app.asar');
+  await mkdir(join(root,'resources'));await writeFile(executable,'fixture');await writeFile(archive,'no media');
+  assert.equal((await inspectRuntimeMedia({id:'dsh',executable})).image,false);
+  await writeFile(archive,"SessionPromptRequest readonly type: 'image'; readonly mediaType: ImageMediaType; readonly data: string;");
+  assert.equal((await inspectRuntimeMedia({id:'dsh',executable})).image,true);
+});
+
 test('missing original-fs falls back to node fs; original-fs read errors are preserved without retrying patched fs',async()=>{
   let fallbackReads=0;
   const text=await readExternalAsar('external.asar',{electronVersion:'synthetic',loadOriginalFs:async()=>{throw Object.assign(new Error('module unavailable'),{code:'ERR_MODULE_NOT_FOUND'});},nodeReadFile:async(path,encoding)=>{fallbackReads++;assert.equal(path,'external.asar');assert.equal(encoding,'utf8');return 'fallback';}});

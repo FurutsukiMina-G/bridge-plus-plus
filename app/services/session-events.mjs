@@ -1,6 +1,9 @@
 // Match appendDisplayEvent's chunk identity without depending on renderer code.
 const chunks=new Set(['thinking','text','tool-output']);
-const identity=['type','turnId','itemId','toolId','attemptId'];
+const identity=['type','sessionId','turnId','itemId','toolId','attemptId','stream','source'];
+const plainFields=new Set([...identity,'text','id','at']);
+export const plainStreamChunk=event=>chunks.has(event?.type)&&typeof event.text==='string'&&Object.keys(event).every(key=>plainFields.has(key));
+export const sameStreamChunk=(a,b)=>identity.every(key=>a[key]===b[key]);
 // Some runtimes report thinking progress as a counter that ticks once per token batch
 // instead of one summary per turn (Claude Code's `thinking_tokens` system event started
 // this). The individual rows carry no information the journal needs — 133k rows/61 MB in
@@ -45,8 +48,8 @@ export function coalesceSessionEvents(events){
   const result=[];let current=null,parts=null;
   const flush=()=>{if(parts){current.text=parts.join('');parts=null;}current=null;};
   for(const event of events){
-    if(chunks.has(event?.type)&&typeof event.text==='string'){
-      if(current&&identity.every(key=>current[key]===event[key]))parts.push(event.text);
+    if(plainStreamChunk(event)){
+      if(current&&sameStreamChunk(current,event))parts.push(event.text);
       else{flush();current={...event};parts=[event.text];result.push(current);}
     }else{flush();result.push(event);}
   }

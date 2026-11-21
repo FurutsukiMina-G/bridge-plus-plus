@@ -52,8 +52,9 @@ export function routeConversation(
 
 /** The first lane of each application scope is reserved. Refuse admission rather
  * than evict another application's root or an active parent waiting on children. */
-export function evictionCandidate<T extends {bridgeScope?:string;busy:number;touched:number;messages:unknown[]}>(records:Iterable<T>,scope?:string){
-  const rows=[...records],roots=new Set<T>(),seen=new Set<string>();
+export const reviewClientKey=(key?:string)=>/^review(?:-once)?:[a-f0-9]{64}$/.test(key??'');
+export function evictionCandidate<T extends {bridgeScope?:string;clientKey?:string;busy:number;touched:number;messages:unknown[]}>(records:Iterable<T>,scope?:string){
+  const rows=[...records].filter(row=>!reviewClientKey(row.clientKey)),roots=new Set<T>(),seen=new Set<string>();
   for(const row of rows)if(row.bridgeScope!==undefined&&!seen.has(row.bridgeScope)){seen.add(row.bridgeScope);roots.add(row);}
   return rows.filter(row=>!row.busy&&!roots.has(row)).sort((a,b)=>
     Number(scope!==undefined&&b.bridgeScope===scope)-Number(scope!==undefined&&a.bridgeScope===scope)||a.touched-b.touched)[0];

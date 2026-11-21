@@ -11,6 +11,7 @@ export function stable(value){
   return value;
 }
 export const digest=value=>createHash('sha256').update(JSON.stringify(stable(value))).digest('hex');
+export const reviewClientKey=key=>/^review(?:-once)?:[a-f0-9]{64}$/.test(key??'');
 export function evictionCandidate(records,scope){
   const rows=[...records],roots=new Set(),seen=new Set();
   for(const r of rows)if(r.bridgeScope!==undefined&&!seen.has(r.scope)){seen.add(r.scope);roots.add(r);}
@@ -117,9 +118,13 @@ export class ContextPool {
       }
       if(!record){
         await this.sweep();
-        externalRelease=await this.externalMakeRoom?.();
+        const review=scoped&&reviewClientKey(body.prompt_cache_key);
+        if(review&&body.prompt_cache_key.startsWith('review:')){
+          for(const r of this.records.values())if(!r.busy&&r.scope===scope&&r.clientKey?.startsWith('review:')&&reviewClientKey(r.clientKey))await this.remove(r);
+        }
+        externalRelease=await this.externalMakeRoom?.(review);
         while(this.records.size>=(this.cfg.maxSessions??24)){
-          const idle=evictionCandidate(this.records.values(),scope);
+          const idle=[...this.records.values()].filter(r=>!r.busy&&reviewClientKey(r.clientKey)).sort((a,b)=>a.touched-b.touched)[0]??(!review?evictionCandidate(this.records.values(),scope):null);
           if(!idle){const counts={busy:[...this.records.values()].filter(r=>r.busy).length,awaiting:0,idle:[...this.records.values()].filter(r=>!r.busy).length};throw new BridgeError(429,'sessions_busy',`All context slots are active (busy=${counts.busy}, awaiting=${counts.awaiting}, idle=${counts.idle})`,counts);}await this.remove(idle);
         }
         const id=randomUUID();record={id,scope,bridgeScope:body.bridge_scope,lockKey,clientKey:body.prompt_cache_key,dir:join(this.cfg.runtime,'sdk',id),sessionId:null,history:[],toolSignature:null,touched:Date.now(),busy:true};
